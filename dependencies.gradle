@@ -34,5 +34,14 @@
  * For more details, see https://docs.gradle.org/8.0.1/userguide/java_library_plugin.html#sec:java_library_configurations_graph
  */
 dependencies {
-    //runtimeOnlyNonPublishable("com.github.GTNewHorizons:NotEnoughItems:2.7.69-GTNH:dev")
+    api("com.github.GTNewHorizons:NotEnoughItems:2.8.84-GTNH:dev")
+	api("com.github.GTNewHorizons:OpenComputers:1.12.31-GTNH:dev")
+    shadowImplementation("org.apache.sshd:sshd-sftp:2.13.0")
+     api("com.github.GTNewHorizons:Applied-Energistics-2-Unofficial:rv3-beta-880-GTNH:dev")
+      api(rfg.deobf(fileTree(dir: 'run/libs', include: '*.jar')))
+    // shadowImplementation("org.slf4j:slf4j-simple:1.7.36")
+	//api("com.github.GTNewHorizons:OpenComputers:1.12.22-GTNH:dev")
+	//api("org.apache.sshd:sshd-sftp:2.13.0")
+	//api("at.released.weh:bindings-chicory-emscripten:0.6.0")
+	api("com.github.GTNewHorizons:Angelica:2.1.16:dev")
 }
