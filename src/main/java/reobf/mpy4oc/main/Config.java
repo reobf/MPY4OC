@@ -40,11 +40,17 @@ public class Config {
 
     /** (Re)read every value. Called at startup and again after an in-game edit. */
     public static void loadFromConfig() {
-        port = configuration.getInt("SFTP_Port", Configuration.CATEGORY_GENERAL, port, -1, 65535,
-                "SFTP Port. 0 for auto, -1 to disable");
+        // Properties are fetched (not just read) so each can carry a language key: the
+        // in-game config screen then shows a translated label and tooltip instead of the
+        // raw property name. See assets/mpy4oc/lang/*.lang.
+        net.minecraftforge.common.config.Property portProp = configuration.get(
+                Configuration.CATEGORY_GENERAL, "SFTP_Port", port,
+                "SFTP Port. 0 for auto, -1 to disable", -1, 65535);
+        portProp.setLanguageKey("mpy4oc.config.sftpPort");
+        port = portProp.getInt(port);
 
-        compilerBackend = configuration.getString("CompilerBackend", Configuration.CATEGORY_GENERAL,
-                BACKEND_JAVA,
+        net.minecraftforge.common.config.Property backendProp = configuration.get(
+                Configuration.CATEGORY_GENERAL, "CompilerBackend", BACKEND_JAVA,
                 "Which backend compiles Python to .mpy bytecode.\n"
                         + "  java   - built-in pure-Java compiler (default): no native binary needed,\n"
                         + "           works on any platform, compiles in-process.\n"
@@ -53,6 +59,8 @@ public class Config {
                         + "If 'binary' is selected but no usable mpy-cross exists for this platform,\n"
                         + "the java backend is used instead.",
                 BACKEND_VALUES);
+        backendProp.setLanguageKey("mpy4oc.config.compilerBackend");
+        compilerBackend = backendProp.getString();
 
         if (!BACKEND_BINARY.equals(compilerBackend)) compilerBackend = BACKEND_JAVA;
 

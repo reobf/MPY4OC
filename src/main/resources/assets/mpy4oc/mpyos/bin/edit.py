@@ -63,8 +63,22 @@ def main():
         if len(right) < w:
             gpu.set(w - len(right) + 1, h, right)
 
+    BLINK = 0.5          # seconds between blink toggles while idle
+    cursor_on = [False]
+    show_now = [True]    # repaint the cursor solid after each keystroke
+
     def place_cursor():
         tty.set_cursor(min(cx, w - 1) + 1, (cy - top) + 1)
+
+    def draw_cursor(on):
+        """Paint/erase the block cursor at the current screen position."""
+        x, y = tty.get_cursor()
+        tty.draw_cursor_cell(x, y, on)
+        cursor_on[0] = on
+
+    def erase_cursor():
+        if cursor_on[0]:
+            draw_cursor(False)
 
     def clamp_scroll():
         """Keep the cursor line on screen; returns True if we scrolled."""
@@ -81,9 +95,23 @@ def main():
     place_cursor()
 
     while True:
-        sig = event.pull()
+        # The player only sees the screen while the VM is yielded, so the cursor has
+        # to be ON before every wait -- that is what keeps it visible during keyboard
+        # movement instead of flashing between redraws.
+        place_cursor()
+        if show_now[0]:
+            # Just acted on a key: show the cursor solid at its new spot. Using a
+            # one-shot flag rather than "if not cursor_on" matters -- the latter
+            # would re-light the cursor immediately after each blink-off and it
+            # would never appear to blink at all.
+            draw_cursor(True)
+            show_now[0] = False
+        sig = event.pull(BLINK)
         if sig is None:
+            draw_cursor(not cursor_on[0])   # idle: blink
             continue
+        erase_cursor()                      # restore the cell before any redraw
+        show_now[0] = True
         name = sig[0]
 
         if name == "clipboard":

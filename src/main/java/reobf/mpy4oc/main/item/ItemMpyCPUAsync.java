@@ -85,9 +85,11 @@ public class ItemMpyCPUAsync extends Item {
     public void addInformation(ItemStack stack, EntityPlayer player, List tooltip, boolean advanced) {
         int t = tierOf(stack);
         int[] ops = { 500, 2000, 16000 };
-        tooltip.add("Architecture: mpy (async)");
-        tooltip.add("Tier " + (t + 1) + " \u2014 " + ops[t] + " ops/tick");
-        tooltip.add("Async: steps off the main thread; non-direct calls sync back.");
+        // Localised: see assets/mpy4oc/lang/*.lang
+        tooltip.add(net.minecraft.util.StatCollector.translateToLocal("mpy4oc.tip.cpu.async.arch"));
+        tooltip.add(net.minecraft.util.StatCollector.translateToLocalFormatted(
+                "mpy4oc.tip.tier", Integer.valueOf(t + 1), Integer.valueOf(ops[t])));
+        tooltip.add(net.minecraft.util.StatCollector.translateToLocal("mpy4oc.tip.cpu.async.desc"));
     }
 
     @Override

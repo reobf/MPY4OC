@@ -140,6 +140,39 @@ class Terminal:
     def get_cursor(self):
         return self.x, self.y
 
+    # -- block cursor ----------------------------------------------------
+    #
+    # OC has no hardware cursor, so we fake one: read the cell, redraw its own
+    # character with fg/bg swapped (inverse video), and swap back to undo. Shared
+    # by the line editor (read) and by `edit`, so both look and behave the same.
+    #
+    # The invariant that actually matters for visibility: the player only sees the
+    # screen at the moments the VM yields, so the cursor must be ON before every
+    # wait. Draw it right before pulling, erase it right after a signal arrives.
+
+    def draw_cursor_cell(self, x, y, on):
+        """Paint (on) or restore (off) a block cursor at column x, row y."""
+        try:
+            cell = self.gpu.get(x, y)          # (char, fg, bg, ...)
+            ch = cell[0] if cell else " "
+            fg = cell[1] if cell and len(cell) > 1 else None
+            bg = cell[2] if cell and len(cell) > 2 else None
+        except Exception:
+            ch, fg, bg = " ", None, None
+        if not ch:
+            ch = " "
+        try:
+            if on and fg is not None and bg is not None:
+                self.gpu.setForeground(bg)
+                self.gpu.setBackground(fg)
+                self.gpu.set(x, y, ch)
+                self.gpu.setForeground(fg)
+                self.gpu.setBackground(bg)
+            else:
+                self.gpu.set(x, y, ch)
+        except Exception:
+            pass
+
     # -- screen ops --
     def clear(self):
         # Headless (no screen bound yet) is not an error: just reset the cursor.
@@ -275,24 +308,7 @@ class Terminal:
             return start_x + pos
 
         def draw_cursor(on):
-            cx = cursor_x()
-            try:
-                cell = self.gpu.get(cx, start_y)   # (char, fg, bg, ...)
-                ch = cell[0] if cell else " "
-                fg = cell[1] if cell and len(cell) > 1 else None
-                bg = cell[2] if cell and len(cell) > 2 else None
-            except Exception:
-                ch, fg, bg = " ", None, None
-            if on and fg is not None and bg is not None:
-                # inverse video for one cell: draw char with fg/bg swapped
-                self.gpu.setForeground(bg)
-                self.gpu.setBackground(fg)
-                self.gpu.set(cx, start_y, ch)
-                self.gpu.setForeground(fg)
-                self.gpu.setBackground(bg)
-            else:
-                # off (or colours unknown): the plain character
-                self.gpu.set(cx, start_y, ch if ch else " ")
+            self.draw_cursor_cell(cursor_x(), start_y, on)
             cursor_on[0] = on
 
         def erase_cursor():

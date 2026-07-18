@@ -636,6 +636,41 @@ public final class Ops {
     }
 
     /** Extract exactly n elements (natural order seq[0..n-1]) for UNPACK_SEQUENCE. */
+    /**
+     * Starred unpacking: {@code a, *b, c = seq}. Mirrors mp_unpack_ex.
+     *
+     * <p>{@code numLeft} targets come before the starred one and {@code numRight}
+     * after it; the star collects whatever is left over, as a list (possibly empty).
+     * Returns the values in the order the VM should push them -- bottom of stack
+     * first -- so the first target ends up on top, matching UNPACK_SEQUENCE.
+     */
+    public static Object[] unpackEx(Object seq, int numLeft, int numRight) {
+        List<Object> items;
+        if (seq instanceof PyObj.Tuple) items = asList(((PyObj.Tuple) seq).items);
+        else if (seq instanceof PyObj.PyList) items = ((PyObj.PyList) seq).items;
+        else {
+            items = new ArrayList<>();
+            PyObj.Iter it = getIter(seq);
+            Object v;
+            while ((v = it.next()) != PyObj.STOP_ITERATION) items.add(v);
+        }
+        int len = items.size();
+        if (len < numLeft + numRight) {
+            throw PyException.valueError("wrong number of values to unpack");
+        }
+        Object[] out = new Object[numLeft + 1 + numRight];
+        int w = 0;
+        // trailing targets, furthest-right first (deepest on the stack)
+        for (int i = 0; i < numRight; i++) out[w++] = items.get(len - 1 - i);
+        // the starred target takes the middle slice
+        PyObj.PyList rest = new PyObj.PyList();
+        for (int i = numLeft; i < len - numRight; i++) rest.items.add(items.get(i));
+        out[w++] = rest;
+        // leading targets, last-to-first, so items.get(0) lands on top
+        for (int i = 0; i < numLeft; i++) out[w++] = items.get(numLeft - 1 - i);
+        return out;
+    }
+
     public static Object[] unpackSeq(Object seq, int n) {
         // Lua-style tuples (from the lua() builtin) follow Lua's assignment rules:
         // too few values pad the extra targets with None, too many are discarded --

@@ -1,2 +1,51 @@
+# ---------------------------------------------------------------------------
+# mpy4oc - English (US)
+#
+# Item names carry the tier because getUnlocalizedName(stack) appends it:
+# "mpy4oc.cpu" + tier -> item.mpy4oc.cpu1.name ... .cpu3.name
+# ---------------------------------------------------------------------------
+
+# --- items: processors -----------------------------------------------------
+item.mpy4oc.cpu1.name=MPY CPU (Tier 1)
+item.mpy4oc.cpu2.name=MPY CPU (Tier 2)
+item.mpy4oc.cpu3.name=MPY CPU (Tier 3)
+
+item.mpy4oc.apu1.name=MPY APU (Tier 1)
+item.mpy4oc.apu2.name=MPY APU (Tier 2)
+item.mpy4oc.apu3.name=MPY APU (Tier 3)
+
+item.mpy4oc.cpu.async1.name=MPY CPU, Async (Tier 1)
+item.mpy4oc.cpu.async2.name=MPY CPU, Async (Tier 2)
+item.mpy4oc.cpu.async3.name=MPY CPU, Async (Tier 3)
+
+item.mpy4oc.apu.async1.name=MPY APU, Async (Tier 1)
+item.mpy4oc.apu.async2.name=MPY APU, Async (Tier 2)
+item.mpy4oc.apu.async3.name=MPY APU, Async (Tier 3)
+
+# --- items: cards ----------------------------------------------------------
 item.mpy4oc.oc.sftpcard.name=SFTP Server Card
-item.mpy4oc.cpu.name=CPU (mpy)
+
+# --- tooltips --------------------------------------------------------------
+# %1$s = tier number, %2$s = ops per tick
+mpy4oc.tip.tier=Tier %1$s \u2014 %2$s ops/tick
+
+mpy4oc.tip.cpu.arch=Architecture: mpy
+mpy4oc.tip.cpu.desc=Runs MicroPython bytecode.
+
+mpy4oc.tip.apu.arch=Architecture: mpy (CPU + GPU)
+mpy4oc.tip.apu.desc=Built-in graphics card.
+
+mpy4oc.tip.cpu.async.arch=Architecture: mpy (async)
+mpy4oc.tip.cpu.async.desc=Runs off the main thread; non-direct calls sync back.
+
+mpy4oc.tip.apu.async.arch=Architecture: mpy async (CPU + GPU)
+mpy4oc.tip.apu.async.desc=Off-thread; graphics calls are direct, so they stay fast.
+
+# --- config screen ---------------------------------------------------------
+mpy4oc.config.title=mpy4oc Settings
+
+mpy4oc.config.compilerBackend=Compiler Backend
+mpy4oc.config.compilerBackend.tooltip=Which compiler turns Python into .mpy bytecode.\njava: built-in, no native binary, works everywhere (default).\nbinary: the bundled mpy-cross, run as a subprocess.\nBoth produce identical bytecode. Takes effect immediately.
+
+mpy4oc.config.sftpPort=SFTP Port
+mpy4oc.config.sftpPort.tooltip=Port for the SFTP/SSH server.\n0 = pick a free port automatically, -1 = disable.

@@ -273,7 +273,7 @@ public class MyMod {
         byte[] bios = readResourceBytes("assets/mpy4oc/bios/bios.py");
         net.minecraft.item.ItemStack biosStack = null;
         if (bios != null) {
-            biosStack = li.cil.oc.api.Items.registerEEPROM("MPYOS BIOS", bios, null, true);
+            biosStack = li.cil.oc.api.Items.registerEEPROM("EEPROM(MicroPython BIOS)", bios, null, true);
             LOG.info("Registered EEPROM: mpy BIOS (" + bios.length + " bytes)");
         } else {
             LOG.warn("mpy BIOS resource missing; EEPROM not registered");

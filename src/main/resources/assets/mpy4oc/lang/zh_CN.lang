@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# mpy4oc - 简体中文
+#
+# 物品名带档位, 因为 getUnlocalizedName(stack) 会把档位接在后面:
+# "mpy4oc.cpu" + 档位 -> item.mpy4oc.cpu1.name ... .cpu3.name
+# ---------------------------------------------------------------------------
+
+# --- 物品: 处理器 ----------------------------------------------------------
+item.mpy4oc.cpu1.name=MPY CPU (一级)
+item.mpy4oc.cpu2.name=MPY CPU (二级)
+item.mpy4oc.cpu3.name=MPY CPU (三级)
+
+item.mpy4oc.apu1.name=MPY APU (一级)
+item.mpy4oc.apu2.name=MPY APU (二级)
+item.mpy4oc.apu3.name=MPY APU (三级)
+
+item.mpy4oc.cpu.async1.name=MPY 异步CPU (一级)
+item.mpy4oc.cpu.async2.name=MPY 异步CPU (二级)
+item.mpy4oc.cpu.async3.name=MPY 异步CPU (三级)
+
+item.mpy4oc.apu.async1.name=MPY 异步APU (一级)
+item.mpy4oc.apu.async2.name=MPY 异步APU (二级)
+item.mpy4oc.apu.async3.name=MPY 异步APU (三级)
+
+# --- 物品: 卡 --------------------------------------------------------------
+item.mpy4oc.oc.sftpcard.name=SFTP 服务器卡
+
+# --- 提示文字 --------------------------------------------------------------
+# %1$s = 档位, %2$s = 每 tick 指令预算
+mpy4oc.tip.tier=%1$s 级 \u2014 每 tick %2$s 条指令
+
+mpy4oc.tip.cpu.arch=架构: mpy
+mpy4oc.tip.cpu.desc=运行 MicroPython 字节码。
+
+mpy4oc.tip.apu.arch=架构: mpy (处理器 + 显卡)
+mpy4oc.tip.apu.desc=自带显卡, 省一个显卡槽。
+
+mpy4oc.tip.cpu.async.arch=架构: mpy (异步)
+mpy4oc.tip.cpu.async.desc=在计算线程运行; 非 direct 调用会回主线程执行。
+
+mpy4oc.tip.apu.async.arch=架构: mpy 异步 (处理器 + 显卡)
+mpy4oc.tip.apu.async.desc=计算线程运行; 显卡调用是 direct 的, 依然很快。
+
+# --- 配置界面 --------------------------------------------------------------
+mpy4oc.config.title=mpy4oc 设置
+
+mpy4oc.config.compilerBackend=编译后端
+mpy4oc.config.compilerBackend.tooltip=用哪个编译器把 Python 编成 .mpy 字节码。\njava: 内置, 不需要原生程序, 任何平台都能用(默认)。\nbinary: 附带的 mpy-cross, 以子进程运行。\n两者产出的字节码一致。改完立即生效。
+
+mpy4oc.config.sftpPort=SFTP 端口
+mpy4oc.config.sftpPort.tooltip=SFTP/SSH 服务器端口。\n0 = 自动挑一个空闲端口, -1 = 关闭。

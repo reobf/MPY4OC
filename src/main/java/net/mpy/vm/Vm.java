@@ -1385,6 +1385,16 @@ public final class Vm {
                         break dispatch;
                     }
 
+                    case Opcodes.UNPACK_EX: {
+                        // arg packs both counts: low byte = targets before the star,
+                        // next byte = targets after it (mp_unpack_ex).
+                        int numLeft = (int) (arg & 0xff);
+                        int numRight = (int) ((arg >> 8) & 0xff);
+                        Object[] elems = Ops.unpackEx(f.pop(), numLeft, numRight);
+                        for (Object e : elems) f.push(e);   // already in push order
+                        break dispatch;
+                    }
+
                     case Opcodes.STORE_COMP: {
                         int unum = (int) arg;
                         Object container = f.state[f.sp - (unum >> 2)];

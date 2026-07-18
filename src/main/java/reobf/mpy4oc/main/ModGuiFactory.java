@@ -48,7 +48,7 @@ public class ModGuiFactory implements IModGuiFactory {
                     new ConfigElement(Config.configuration.getCategory(Configuration.CATEGORY_GENERAL))
                             .getChildElements(),
                     MyMod.MODID, false, false,
-                    "mpy4oc settings");
+                    net.minecraft.client.resources.I18n.format("mpy4oc.config.title"));
         }
     }
 
