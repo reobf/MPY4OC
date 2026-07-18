@@ -62,6 +62,11 @@ final class Snapshot {
         private int nextId = 0;
         private final IdentityHashMap<Frame, Integer> frameSeen = new IdentityHashMap<>();
         private int nextFrameId = 0;
+        // Identity table for exec/sandbox namespaces, so frames that share the same
+        // ns (an exec unit and the functions defined in it) restore to one shared
+        // dict rather than diverging copies.
+        private final IdentityHashMap<java.util.Map<String, Object>, Integer> nsSeen = new IdentityHashMap<>();
+        private int nextNsId = 0;
 
         Writer(DataOutputStream out, MpyModule module, HostRegistry hosts) {
             this.out = out; this.module = module; this.hosts = hosts;
@@ -111,6 +116,52 @@ final class Snapshot {
             } else {
                 out.writeByte(0);
             }
+            // exec()/exec_sandbox() namespace: a frame running inside an exec unit
+            // (or a function defined in one) carries its ns here. Without persisting
+            // it, a suspended command/REPL loses its injected names (tty, sh, args,
+            // and any variables it defined) across a save/load. Stored as a plain
+            // string->value map; sandboxScope records the fall-through mode.
+            if (f.execGlobals != null) {
+                out.writeByte(1);
+                out.writeBoolean(f.sandboxScope);
+                writeNs(f.execGlobals);
+            } else {
+                out.writeByte(0);
+            }
+            // exec()/eval() unit root flags: without these, a restored suspended
+            // command/REPL would not deliver its result back to the caller when it
+            // finishes -- doReturn would treat it as the end of the whole program.
+            out.writeBoolean(f.isExecRoot);
+            out.writeBoolean(f.isEvalRoot);
+        }
+
+        /** Write an exec/sandbox namespace with identity dedup: the first sighting
+         *  assigns an id and writes contents; later sightings write a back-ref, so
+         *  frames and functions sharing one ns restore to one shared dict. A
+         *  DictGlobals view (exec given a Python dict) is written as a reference to
+         *  its backing PyDict, which writeValue dedupes with every other reference
+         *  to that dict in the snapshot -- the Python-visible dict and the exec ns
+         *  must stay one storage after restore. */
+        void writeNs(java.util.Map<String, Object> ns) throws IOException {
+            if (ns instanceof DictGlobals) {
+                out.writeByte(3);              // view over a Python dict
+                writeValue(((DictGlobals) ns).dict);
+                return;
+            }
+            Integer nsId = nsSeen.get(ns);
+            if (nsId != null) {
+                out.writeByte(2);              // back-ref
+                out.writeInt(nsId);
+                return;
+            }
+            out.writeByte(1);                  // first sighting
+            out.writeInt(nextNsId);
+            nsSeen.put(ns, nextNsId++);
+            out.writeInt(ns.size());
+            for (java.util.Map.Entry<String, Object> e : ns.entrySet()) {
+                writeStr(out, e.getKey());
+                writeValue(e.getValue());
+            }
         }
 
         /** Track identity: emit a back-ref if already written, else assign an id.
@@ -142,11 +193,20 @@ final class Snapshot {
                 out.writeInt(b.length); out.write(b);
                 return;
             }
+            if (v instanceof PyObj.ByteArray) {
+                if (ref(v)) return;                 // mutable: preserve aliasing
+                out.writeByte(68);
+                byte[] b = ((PyObj.ByteArray) v).toBytes();
+                out.writeInt(b.length); out.write(b);
+                return;
+            }
             if (v instanceof PyObj.Tuple) {
                 if (ref(v)) return;
                 out.writeByte(T_TUPLE);
-                Object[] it = ((PyObj.Tuple) v).items;
+                PyObj.Tuple tup = (PyObj.Tuple) v;
+                Object[] it = tup.items;
                 out.writeInt(it.length);
+                out.writeBoolean(tup.luaStyle);   // Lua-style unpack flag (lua())
                 for (Object o : it) writeValue(o);
                 return;
             }
@@ -178,6 +238,7 @@ final class Snapshot {
                 if (ref(v)) return;
                 out.writeByte(T_ITER);
                 PyObj.Iter it = (PyObj.Iter) v;
+                it.materialize();   // drain any live host supplier into items first
                 out.writeInt(it.pos);
                 out.writeInt(it.items.size());
                 for (Object o : it.items) writeValue(o);
@@ -265,7 +326,14 @@ final class Snapshot {
             }
             if (v instanceof Descriptors.StaticMethod) { out.writeByte(37); writeValue(((Descriptors.StaticMethod) v).fn); return; }
             if (v instanceof Descriptors.ClassMethod) { out.writeByte(38); writeValue(((Descriptors.ClassMethod) v).fn); return; }
-            if (v instanceof Descriptors.Property) { out.writeByte(39); writeValue(((Descriptors.Property) v).getter); return; }
+            if (v instanceof Descriptors.Property) {
+                Descriptors.Property p = (Descriptors.Property) v;
+                out.writeByte(39);
+                writeValue(p.getter);
+                writeValue(p.setter == null ? PyObj.NONE : p.setter);
+                writeValue(p.deleter == null ? PyObj.NONE : p.deleter);
+                return;
+            }
             if (v instanceof BoundPyMethod) {
                 out.writeByte(T_BOUNDPYM);
                 writeValue(((BoundPyMethod) v).fn);
@@ -292,6 +360,8 @@ final class Snapshot {
             if (v == Vm.COMPILE_BUILTIN) { out.writeByte(55); return; }
             if (v == Vm.EXEC_BUILTIN) { out.writeByte(56); return; }
             if (v == Vm.EVAL_BUILTIN) { out.writeByte(57); return; }
+            if (v == Vm.EXEC_SANDBOX_BUILTIN) { out.writeByte(65); return; }
+            if (v == Vm.EVAL_SANDBOX_BUILTIN) { out.writeByte(66); return; }
             if (v == Vm.CREATE_TASK_BUILTIN) { out.writeByte(59); return; }
             if (v instanceof SleepRequest) { out.writeByte(60); out.writeLong(((SleepRequest) v).ms); return; }
             if (v == Vm.MAKE_SLEEP_BUILTIN) { out.writeByte(61); return; }
@@ -305,6 +375,7 @@ final class Snapshot {
                 PyModule pm = (PyModule) v;
                 writeStr(out, pm.name);
                 writeStr(out, pm.root);
+                out.writeBoolean(pm.initializing);      // mid-init snapshot keeps waiters waiting
                 if (pm.code == null) {
                     out.writeInt(-1);                       // synthetic package
                 } else {
@@ -357,6 +428,23 @@ final class Snapshot {
                     out.writeInt(fn.kwDefaults.size());
                     for (var e : fn.kwDefaults.entrySet()) { writeValue(e.getKey()); writeValue(e.getValue()); }
                 }
+                // The defining exec/sandbox scope (see PyFunction.defScope): without
+                // this, a function defined in a REPL/command sandbox loses its ns on
+                // restore and every module-level name it uses becomes a NameError.
+                if (fn.defScope != null) {
+                    out.writeByte(1);
+                    out.writeBoolean(fn.defSandbox);
+                    writeNs(fn.defScope);
+                } else {
+                    out.writeByte(0);
+                }
+                // function attributes (func.attr = x); usually empty
+                if (fn.attrs == null || fn.attrs.isEmpty()) {
+                    out.writeInt(0);
+                } else {
+                    out.writeInt(fn.attrs.size());
+                    for (var e : fn.attrs.entrySet()) { writeStr(out, e.getKey()); writeValue(e.getValue()); }
+                }
                 return;
             }
             if (v instanceof HostFunction) {
@@ -378,6 +466,19 @@ final class Snapshot {
                 writeStr(out, ((CompiledCode) v).source);
                 return;
             }
+            // Generic fallback for any builtin singleton not given an explicit tag
+            // above: store it by its stable toString() name and resolve it back on
+            // read via Vm's registry. This keeps snapshots working even if a new
+            // builtin is added without a dedicated tag (as happened with
+            // exec_sandbox/eval_sandbox).
+            if (v instanceof Vm.NativeBuiltin) {
+                String name = Vm.builtinName(v);
+                if (name != null) {
+                    out.writeByte(67);              // T_NAMED_BUILTIN
+                    writeStr(out, name);
+                    return;
+                }
+            }
             throw new IllegalStateException("cannot snapshot value of type " + v.getClass().getName());
         }
     }
@@ -396,6 +497,7 @@ final class Snapshot {
         }
         private final List<Object> byId = new ArrayList<>();
         private final List<Frame> framesById = new ArrayList<>();
+        private final java.util.Map<Integer, java.util.Map<String, Object>> nsById = new java.util.HashMap<>();
 
         Reader(DataInputStream in, MpyModule module, HostRegistry hosts) {
             this.in = in; this.module = module; this.hosts = hosts;
@@ -428,7 +530,30 @@ final class Snapshot {
             int namesKind = in.readByte();
             if (namesKind == 1) f.names = f.buildingClass.ns;
             else if (namesKind == 2) f.names = ((PyModule) f.returnOverride).ns;
+            int hasExecGlobals = in.readByte();
+            if (hasExecGlobals == 1) {
+                f.sandboxScope = in.readBoolean();
+                f.execGlobals = readNs();
+            }
+            f.isExecRoot = in.readBoolean();
+            f.isEvalRoot = in.readBoolean();
             return f;
+        }
+
+        /** Read a namespace written by writeNs, honouring identity back-refs. */
+        java.util.Map<String, Object> readNs() throws IOException {
+            int kind = in.readByte();
+            if (kind == 3) return new DictGlobals((PyObj.PyDict) readValue());
+            if (kind == 2) return nsById.get(in.readInt());   // back-ref
+            int nsId = in.readInt();
+            int nEG = in.readInt();
+            java.util.Map<String, Object> ns = new java.util.HashMap<String, Object>();
+            nsById.put(nsId, ns);              // register before contents (cycles)
+            for (int i = 0; i < nEG; i++) {
+                String k = readStr(in);
+                ns.put(k, readValue());
+            }
+            return ns;
         }
 
         Object readValue() throws IOException {
@@ -450,9 +575,16 @@ final class Snapshot {
                     byte[] b = new byte[in.readInt()]; in.readFully(b);
                     return new PyObj.Bytes(b);
                 }
+                case 68: {   // ByteArray
+                    byte[] b = new byte[in.readInt()]; in.readFully(b);
+                    PyObj.ByteArray ba = new PyObj.ByteArray(b);
+                    byId.add(ba);   // matches ref() on the write side
+                    return ba;
+                }
                 case T_TUPLE: {
                     int n = in.readInt();
-                    PyObj.Tuple t = new PyObj.Tuple(new Object[n]);
+                    boolean luaStyle = in.readBoolean();
+                    PyObj.Tuple t = new PyObj.Tuple(new Object[n], luaStyle);
                     byId.add(t);                     // register before contents (cycles/aliases)
                     for (int i = 0; i < n; i++) t.items[i] = readValue();
                     return t;
@@ -569,7 +701,14 @@ final class Snapshot {
                 }
                 case 37: return new Descriptors.StaticMethod(readValue());
                 case 38: return new Descriptors.ClassMethod(readValue());
-                case 39: return new Descriptors.Property(readValue());
+                case 39: {
+                    Object g = readValue();
+                    Object st = readValue();
+                    Object dl = readValue();
+                    return new Descriptors.Property(g,
+                            st == PyObj.NONE ? null : st,
+                            dl == PyObj.NONE ? null : dl);
+                }
                 case T_BOUNDPYM: {
                     Object fn = readValue();
                     Object self = readValue();
@@ -590,6 +729,13 @@ final class Snapshot {
                 case 55: return Vm.COMPILE_BUILTIN;
                 case 56: return Vm.EXEC_BUILTIN;
                 case 57: return Vm.EVAL_BUILTIN;
+                case 65: return Vm.EXEC_SANDBOX_BUILTIN;
+                case 66: return Vm.EVAL_SANDBOX_BUILTIN;
+                case 67: {   // T_NAMED_BUILTIN: builtin stored by stable name
+                    Object b = Vm.builtinByName(readStr(in));
+                    if (b == null) throw new IllegalStateException("unknown named builtin in snapshot");
+                    return b;
+                }
                 case 59: return Vm.CREATE_TASK_BUILTIN;
                 case 60: return new SleepRequest(in.readLong());
                 case 61: return Vm.MAKE_SLEEP_BUILTIN;
@@ -610,9 +756,11 @@ final class Snapshot {
                 case T_MODULE: {
                     String name = readStr(in);
                     String root = readStr(in);
+                    boolean initializing = in.readBoolean();
                     int idx = in.readInt();
                     MpyModule fm = idx < 0 ? null : moduleTable[idx];
                     PyModule pm = new PyModule(name, root, fm); // ctor links fm.ns
+                    pm.initializing = initializing;
                     byId.add(pm);
                     int n = in.readInt();
                     for (int i = 0; i < n; i++) { String k = readStr(in); pm.ns.put(k, readValue()); }
@@ -665,7 +813,14 @@ final class Snapshot {
                         kwd = new java.util.LinkedHashMap<>();
                         for (int i = 0; i < nk; i++) { Object k = readValue(); Object vv = readValue(); kwd.put(k, vv); }
                     }
-                    return new PyFunction(code, code.module, defs, kwd);
+                    PyFunction fn = new PyFunction(code, code.module, defs, kwd);
+                    if (in.readByte() == 1) {
+                        fn.defSandbox = in.readBoolean();
+                        fn.defScope = readNs();
+                    }
+                    int nAttrs = in.readInt();
+                    for (int i = 0; i < nAttrs; i++) { String k = readStr(in); fn.attrsOrNew().put(k, readValue()); }
+                    return fn;
                 }
                 case T_HOSTFUNC: {
                     String id = readStr(in);

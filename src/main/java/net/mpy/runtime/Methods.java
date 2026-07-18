@@ -51,6 +51,7 @@ public final class Methods {
     private static final Map<String, Impl> SET = new HashMap<>();
     private static final Map<String, Impl> TUPLE = new HashMap<>();
     private static final Map<String, Impl> BYTES = new HashMap<>();
+    private static final Map<String, Impl> BYTEARRAY = new HashMap<>();
 
     /** The implementation of {@code self.name}, or null if the type has no such method. */
     public static Impl lookup(Object self, String name) {
@@ -60,6 +61,7 @@ public final class Methods {
         if (self instanceof PyObj.PySet) return SET.get(name);
         if (self instanceof PyObj.Tuple) return TUPLE.get(name);
         if (self instanceof PyObj.Bytes) return BYTES.get(name);
+        if (self instanceof PyObj.ByteArray) return BYTEARRAY.get(name);
         return null;
     }
 
@@ -71,6 +73,7 @@ public final class Methods {
         if (o instanceof PyObj.PySet) return "set";
         if (o instanceof PyObj.Tuple) return "tuple";
         if (o instanceof PyObj.Bytes) return "bytes";
+        if (o instanceof PyObj.ByteArray) return "bytearray";
         if (o instanceof Long || o instanceof java.math.BigInteger) return "int";
         if (o instanceof Double) return "float";
         if (o instanceof Boolean) return "bool";
@@ -198,8 +201,52 @@ public final class Methods {
             byte[] d = ((PyObj.Bytes) s).data;
             StringBuilder sb = new StringBuilder(d.length * 2);
             for (byte b : d) { sb.append(Character.forDigit((b >> 4) & 0xf, 16)); sb.append(Character.forDigit(b & 0xf, 16)); }
-            return sb.toString();
-        });
+            return sb.toString();        });
+        BYTES.put("join", (s, a) -> { arity(a, 1, 1, "join");
+            byte[] sep = ((PyObj.Bytes) s).data;
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            boolean first = true;
+            for (Object x : listOfIterable(a[0])) {
+                byte[] part;
+                if (x instanceof PyObj.Bytes) part = ((PyObj.Bytes) x).data;
+                else if (x instanceof PyObj.ByteArray) part = ((PyObj.ByteArray) x).toBytes();
+                else throw PyException.typeError("bytes.join expects bytes/bytearray items");
+                if (!first) out.write(sep, 0, sep.length);
+                first = false;
+                out.write(part, 0, part.length);
+            }
+            return new PyObj.Bytes(out.toByteArray()); });
+        // ---- bytearray (mutable) ----
+        BYTEARRAY.put("append", (s, a) -> { arity(a, 1, 1, "append");
+            long v = asInt(a[0]);
+            if (v < 0 || v > 255) throw PyException.valueError("byte must be in range(0, 256)");
+            ((PyObj.ByteArray) s).append((int) v); return PyObj.NONE; });
+        BYTEARRAY.put("extend", (s, a) -> { arity(a, 1, 1, "extend");
+            PyObj.ByteArray ba = (PyObj.ByteArray) s;
+            Object x = a[0];
+            if (x instanceof PyObj.Bytes) { for (byte b : ((PyObj.Bytes) x).data) ba.append(b & 0xFF); }
+            else if (x instanceof PyObj.ByteArray) { byte[] o = ((PyObj.ByteArray) x).toBytes(); for (byte b : o) ba.append(b & 0xFF); }
+            else { for (Object o : listOfIterable(x)) { long v = asInt(o); if (v < 0 || v > 255) throw PyException.valueError("byte must be in range(0, 256)"); ba.append((int) v); } }
+            return PyObj.NONE; });
+        BYTEARRAY.put("decode", (s, a) -> { arity(a, 0, 1, "decode");
+            return new String(((PyObj.ByteArray) s).toBytes(), java.nio.charset.StandardCharsets.UTF_8); });
+        BYTEARRAY.put("hex", (s, a) -> { arity(a, 0, 0, "hex");
+            byte[] d = ((PyObj.ByteArray) s).toBytes();
+            StringBuilder sb = new StringBuilder(d.length * 2);
+            for (byte b : d) { sb.append(Character.forDigit((b >> 4) & 0xf, 16)); sb.append(Character.forDigit(b & 0xf, 16)); }
+            return sb.toString(); });
+        BYTEARRAY.put("clear", (s, a) -> { arity(a, 0, 0, "clear"); ((PyObj.ByteArray) s).size = 0; return PyObj.NONE; });
+        BYTEARRAY.put("copy", (s, a) -> { arity(a, 0, 0, "copy"); return new PyObj.ByteArray(((PyObj.ByteArray) s).toBytes()); });
+        BYTEARRAY.put("pop", (s, a) -> { arity(a, 0, 1, "pop");
+            PyObj.ByteArray ba = (PyObj.ByteArray) s;
+            if (ba.size == 0) throw PyException.valueError("pop from empty bytearray");
+            int idx = a.length > 0 ? (int) asInt(a[0]) : ba.size - 1;
+            if (idx < 0) idx += ba.size;
+            if (idx < 0 || idx >= ba.size) throw PyException.valueError("pop index out of range");
+            int val = ba.data[idx] & 0xFF;
+            System.arraycopy(ba.data, idx + 1, ba.data, idx, ba.size - idx - 1);
+            ba.size--;
+            return (long) val; });
         STR.put("upper", (s, a) -> { arity(a, 0, 0, "upper"); return ((String) s).toUpperCase(); });
         STR.put("lower", (s, a) -> { arity(a, 0, 0, "lower"); return ((String) s).toLowerCase(); });
         STR.put("strip", (s, a) -> { arity(a, 0, 1, "strip");

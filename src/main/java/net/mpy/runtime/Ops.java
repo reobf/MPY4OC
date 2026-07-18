@@ -41,13 +41,19 @@ public final class Ops {
     }
 
     /** Process-wide cap on elements/chars a single operation may allocate
-     *  (sequence repeat/concat, range materialisation). Set via Limits. */
+     *  (sequence repeat/concat, range materialisation, container constructors).
+     *  Set via Limits (maxSeqLength); the OC host lowers it to match the machine's
+     *  memory so one statement can't demand a giant array. */
     public static volatile long MAX_SEQ_LEN = 1L << 22;
 
-    private static void checkAlloc(long units, long bytesEach) {
+    /** Pre-allocation guard: reject (with MemoryError, before allocating) a request
+     *  for {@code units} elements of {@code bytesEach} each that exceeds MAX_SEQ_LEN
+     *  or is negative. Public so type constructors and other allocation sites share
+     *  one gate. */
+    public static void checkAlloc(long units, long bytesEach) {
         if (units > MAX_SEQ_LEN || units < 0) {
             throw new PyException("MemoryError",
-                    "memory allocation failed, allocating " + (units * bytesEach) + " bytes");
+                    "memory allocation failed, allocating " + (units * Math.max(1, bytesEach)) + " bytes");
         }
     }
 
@@ -73,6 +79,7 @@ public final class Ops {
         if (o instanceof Double) return (Double) o != 0.0;
         if (o instanceof String) return !((String) o).isEmpty();
         if (o instanceof PyObj.Bytes) return ((PyObj.Bytes) o).data.length != 0;
+        if (o instanceof PyObj.ByteArray) return ((PyObj.ByteArray) o).size != 0;
         if (o instanceof PyObj.Tuple) return ((PyObj.Tuple) o).items.length != 0;
         if (o instanceof PyObj.PyList) return !((PyObj.PyList) o).items.isEmpty();
         if (o instanceof PyObj.PyDict) return !((PyObj.PyDict) o).map.isEmpty();
@@ -121,6 +128,13 @@ public final class Ops {
     }
 
     private static Object arith(int op, Object a, Object b) {
+        // set operators: a - b (difference), a & b (intersection), a | b (union),
+        // a ^ b (symmetric difference). Both operands must be sets; result is a new
+        // set, operands are not mutated.
+        if (a instanceof PyObj.PySet && b instanceof PyObj.PySet
+                && (op == SUBTRACT || op == AND || op == OR || op == XOR)) {
+            return setOp(op, (PyObj.PySet) a, (PyObj.PySet) b);
+        }
         // string / sequence operators
         if (op == ADD) {
             if (a instanceof String && b instanceof String) {
@@ -296,6 +310,14 @@ public final class Ops {
         }
         if (a instanceof PyObj.Bytes && b instanceof PyObj.Bytes)
             return java.util.Arrays.equals(((PyObj.Bytes) a).data, ((PyObj.Bytes) b).data);
+        // bytearray compares by value, and bytearray == bytes when the bytes match
+        if ((a instanceof PyObj.ByteArray || a instanceof PyObj.Bytes)
+                && (b instanceof PyObj.ByteArray || b instanceof PyObj.Bytes)
+                && (a instanceof PyObj.ByteArray || b instanceof PyObj.ByteArray)) {
+            byte[] ba = a instanceof PyObj.ByteArray ? ((PyObj.ByteArray) a).toBytes() : ((PyObj.Bytes) a).data;
+            byte[] bb = b instanceof PyObj.ByteArray ? ((PyObj.ByteArray) b).toBytes() : ((PyObj.Bytes) b).data;
+            return java.util.Arrays.equals(ba, bb);
+        }
         if (a instanceof PyObj.Complex && b instanceof PyObj.Complex)
             return ((PyObj.Complex) a).re == ((PyObj.Complex) b).re && ((PyObj.Complex) a).im == ((PyObj.Complex) b).im;
         if (a == null || a == PyObj.NONE) return b == null || b == PyObj.NONE;
@@ -316,6 +338,36 @@ public final class Ops {
     }
 
     // ---- membership ---------------------------------------------------------
+
+    // ---- set operators ------------------------------------------------------
+    /** a - b / a & b / a | b / a ^ b, producing a NEW set (operands unchanged).
+     *  Membership uses value equality via pyEquals, matching set literals. */
+    private static PyObj.PySet setOp(int op, PyObj.PySet a, PyObj.PySet b) {
+        PyObj.PySet out = new PyObj.PySet();
+        switch (op) {
+            case SUBTRACT:   // in a but not in b
+                for (Object x : a.items) if (!setContains(b, x)) out.items.add(x);
+                break;
+            case AND:        // in both
+                for (Object x : a.items) if (setContains(b, x)) out.items.add(x);
+                break;
+            case OR:         // in either
+                out.items.addAll(a.items);
+                for (Object x : b.items) if (!setContains(out, x)) out.items.add(x);
+                break;
+            case XOR:        // in exactly one
+                for (Object x : a.items) if (!setContains(b, x)) out.items.add(x);
+                for (Object x : b.items) if (!setContains(a, x)) out.items.add(x);
+                break;
+            default:
+                throw PyException.typeError("unsupported set operator");
+        }
+        return out;
+    }
+    private static boolean setContains(PyObj.PySet s, Object item) {
+        for (Object x : s.items) if (pyEquals(x, item)) return true;
+        return false;
+    }
 
     private static Object contains(Object container, Object item) {
         if (container instanceof String && item instanceof String) return ((String) container).contains((String) item);
@@ -369,23 +421,100 @@ public final class Ops {
             byte[] data = ((PyObj.Bytes) obj).data;
             return (long) (data[checkIndex(i, data.length, "bytes index out of range")] & 0xFF);
         }
+        if (obj instanceof PyObj.ByteArray) {
+            PyObj.ByteArray ba = (PyObj.ByteArray) obj;
+            return (long) (ba.data[checkIndex(i, ba.size, "bytearray index out of range")] & 0xFF);
+        }
         throw PyException.typeError("object is not subscriptable");
     }
 
     public static void subscrStore(Object obj, Object index, Object value) {
+        // A null value is how `del obj[index]` reaches here: MicroPython compiles it
+        // to STORE_SUBSCR with a LOAD_NULL value (Python None is PyObj.NONE, never
+        // null). So null means delete the item, not assign None.
+        boolean delete = (value == null);
+        // Slice assignment / deletion: xs[a:b] = iterable  and  del xs[a:b].
+        // Only lists are mutable-by-slice (str/tuple/bytes/range are immutable).
+        if (index instanceof PyObj.Slice) {
+            if (!(obj instanceof PyObj.PyList)) {
+                throw PyException.typeError(delete
+                        ? "object doesn't support slice deletion"
+                        : "object does not support slice assignment");
+            }
+            List<Object> xs = ((PyObj.PyList) obj).items;
+            PyObj.Slice s = (PyObj.Slice) index;
+            int[] r = sliceIndices(s, xs.size());
+            int start = r[0], stop = r[1], step = r[2];
+            // collect the positions this slice selects, in order
+            List<Integer> idx = new ArrayList<>();
+            for (int i = start; (step > 0) ? i < stop : i > stop; i += step) idx.add(i);
+            if (delete) {
+                // remove from highest position down so earlier indices stay valid
+                idx.sort(java.util.Collections.reverseOrder());
+                for (int p : idx) xs.remove(p);
+                return;
+            }
+            List<Object> repl = listOfIterableOps(value);
+            if (step == 1) {
+                // contiguous slice: can grow or shrink the list arbitrarily
+                for (int p = idx.size() - 1; p >= 0; p--) xs.remove((int) idx.get(p));
+                xs.addAll(start, repl);
+            } else {
+                // extended slice: assignment must match the number of selected slots
+                if (repl.size() != idx.size())
+                    throw PyException.valueError("attempt to assign sequence of size "
+                            + repl.size() + " to extended slice of size " + idx.size());
+                for (int k = 0; k < idx.size(); k++) xs.set(idx.get(k), repl.get(k));
+            }
+            return;
+        }
         if (obj instanceof PyObj.PyDict) {
             var map = ((PyObj.PyDict) obj).map;
             Object existing = null;
             for (Object k : map.keySet()) if (pyEquals(k, index)) { existing = k; break; }
+            if (delete) {
+                if (existing == null) throw new PyException("KeyError", String.valueOf(index));
+                map.remove(existing);
+                return;
+            }
             map.put(existing != null ? existing : index, value);
             return;
         }
         if (obj instanceof PyObj.PyList) {
             List<Object> xs = ((PyObj.PyList) obj).items;
-            xs.set(checkIndex((int) toLong(index), xs.size(), "list index out of range"), value);
+            int i = checkIndex((int) toLong(index), xs.size(), "list index out of range");
+            if (delete) {
+                xs.remove(i);
+                return;
+            }
+            xs.set(i, value);
             return;
         }
-        throw PyException.typeError("object does not support item assignment");
+        if (obj instanceof PyObj.ByteArray) {
+            PyObj.ByteArray ba = (PyObj.ByteArray) obj;
+            int i = checkIndex((int) toLong(index), ba.size, "bytearray index out of range");
+            if (delete) {
+                System.arraycopy(ba.data, i + 1, ba.data, i, ba.size - i - 1);
+                ba.size--;
+                return;
+            }
+            long v = toLong(value);
+            if (v < 0 || v > 255) throw PyException.valueError("byte must be in range(0, 256)");
+            ba.data[i] = (byte) v;
+            return;
+        }
+        throw PyException.typeError(delete
+                ? "object doesn't support item deletion"
+                : "object does not support item assignment");
+    }
+
+    /** Materialize any Python iterable into a Java List (used by slice assignment). */
+    private static List<Object> listOfIterableOps(Object it) {
+        List<Object> out = new ArrayList<>();
+        PyObj.Iter iter = getIter(it);
+        Object v;
+        while ((v = iter.next()) != PyObj.STOP_ITERATION) out.add(v);
+        return out;
     }
 
     private static Object sliceGet(Object obj, PyObj.Slice s) {
@@ -402,6 +531,28 @@ public final class Ops {
             java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
             for (int i = r[0]; (r[2] > 0) ? i < r[1] : i > r[1]; i += r[2]) bo.write(data[i]);
             return new PyObj.Bytes(bo.toByteArray());
+        }
+        if (obj instanceof PyObj.ByteArray) {
+            PyObj.ByteArray ba = (PyObj.ByteArray) obj;
+            int[] r = sliceIndices(s, ba.size);
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            for (int i = r[0]; (r[2] > 0) ? i < r[1] : i > r[1]; i += r[2]) bo.write(ba.data[i]);
+            return new PyObj.ByteArray(bo.toByteArray());   // slicing yields a new bytearray
+        }
+        if (obj instanceof PyObj.Range) {
+            // Slicing a range yields a new range (CPython/MicroPython behaviour):
+            // map the slice's start/stop/step (over the range's length) back onto the
+            // underlying arithmetic sequence.
+            PyObj.Range rg = (PyObj.Range) obj;
+            int len = (int) rg.length();
+            int[] r = sliceIndices(s, len);
+            long newStart = rg.get(r[0]);
+            long newStep = rg.step * r[2];
+            // number of elements the slice produces
+            long count = 0;
+            for (int i = r[0]; (r[2] > 0) ? i < r[1] : i > r[1]; i += r[2]) count++;
+            long newStop = newStart + count * newStep;
+            return new PyObj.Range(newStart, newStop, newStep == 0 ? 1 : newStep);
         }
         List<Object> src;
         boolean tuple = obj instanceof PyObj.Tuple;
@@ -445,6 +596,12 @@ public final class Ops {
             Object nv = ((net.mpy.vm.PyInstance) o).nativeValue;
             if (nv != null && nv != o) return getIter(nv);
         }
+        // host-object wrapper with a lazy iteration hook (e.g. an iterable OC Value):
+        // start a fresh lazy iterator so `for x in wrapper` converts one element at
+        // a time and each loop begins a clean pass.
+        if (o instanceof net.mpy.vm.PyModule && ((net.mpy.vm.PyModule) o).iterFactory != null) {
+            return new PyObj.Iter(((net.mpy.vm.PyModule) o).iterFactory.get());
+        }
         if (o instanceof PyObj.Range) {
             PyObj.Range r = (PyObj.Range) o;
             long n = r.length();
@@ -469,11 +626,26 @@ public final class Ops {
             for (byte b : data) vals.add((long) (b & 0xFF));
             return new PyObj.Iter(vals);
         }
+        if (o instanceof PyObj.ByteArray) {
+            PyObj.ByteArray ba = (PyObj.ByteArray) o;
+            List<Object> vals = new ArrayList<>(ba.size);
+            for (int i = 0; i < ba.size; i++) vals.add((long) (ba.data[i] & 0xFF));
+            return new PyObj.Iter(vals);
+        }
         throw PyException.typeError("object is not iterable");
     }
 
     /** Extract exactly n elements (natural order seq[0..n-1]) for UNPACK_SEQUENCE. */
     public static Object[] unpackSeq(Object seq, int n) {
+        // Lua-style tuples (from the lua() builtin) follow Lua's assignment rules:
+        // too few values pad the extra targets with None, too many are discarded --
+        // so `a, b, c = lua(m.get())` never raises on a value-count mismatch.
+        if (seq instanceof PyObj.Tuple && ((PyObj.Tuple) seq).luaStyle) {
+            Object[] src = ((PyObj.Tuple) seq).items;
+            Object[] out = new Object[n];
+            for (int i = 0; i < n; i++) out[i] = i < src.length ? src[i] : PyObj.NONE;
+            return out;
+        }
         List<Object> items;
         if (seq instanceof PyObj.Tuple) items = asList(((PyObj.Tuple) seq).items);
         else if (seq instanceof PyObj.PyList) items = ((PyObj.PyList) seq).items;

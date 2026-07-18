@@ -13,7 +13,10 @@ import java.util.Set;
  * for name resolution.
  */
 final class DictGlobals extends AbstractMap<String, Object> {
-    private final PyObj.PyDict dict;
+    final PyObj.PyDict dict;   // package-visible: Snapshot serializes the ns as a
+                               // reference to this backing dict so the Python-side
+                               // dict object and the exec ns stay one storage
+                               // across a snapshot/restore.
 
     DictGlobals(PyObj.PyDict dict) { this.dict = dict; }
 

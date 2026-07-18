@@ -27,6 +27,7 @@ public final class Builtins {
         // exception types (ValueError, TypeError, ... are looked up via LOAD_GLOBAL)
         globals.putAll(net.mpy.runtime.PyExc.TYPES);
         globals.putIfAbsent("print", Vm.PRINT_BUILTIN);
+        globals.putIfAbsent("__import__", Vm.IMPORT_BUILTIN);
         globals.putIfAbsent("len", Vm.LEN_BUILTIN);
         globals.putIfAbsent("range", BuiltinType.RANGE);
         globals.putIfAbsent("list", BuiltinType.LIST);
@@ -76,6 +77,21 @@ public final class Builtins {
         });
         // ---- type queries -------------------------------------------------
         globals.putIfAbsent("type", BuiltinType.TYPE);
+        // callable(obj): True if obj can be called.
+        globals.putIfAbsent("callable", (HostFunction) a -> {
+            arityExact(a, 1, "callable");
+            return isCallable(a[0]);
+        });
+        // id(obj): a stable identity number for the object's lifetime.
+        globals.putIfAbsent("id", (HostFunction) a -> {
+            arityExact(a, 1, "id");
+            return (long) System.identityHashCode(a[0]);
+        });
+        // hash(obj): hash of a hashable object; unhashable containers raise TypeError.
+        globals.putIfAbsent("hash", (HostFunction) a -> {
+            arityExact(a, 1, "hash");
+            return pyHash(a[0]);
+        });
         globals.putIfAbsent("isinstance", (HostFunction) a -> {
             if (a.length != 2) throw PyException.typeError("isinstance expected 2 arguments");
             return isInstance(a[0], a[1]);
@@ -87,11 +103,42 @@ public final class Builtins {
         // value-type objects with no constructor already installed
         globals.putIfAbsent("object", BuiltinType.OBJECT);
         globals.putIfAbsent("bytes", BuiltinType.BYTES);
+        // bytearray(): mutable byte sequence. Forms: bytearray(), bytearray(n) -> n
+        // zero bytes, bytearray(bytes/bytearray) -> copy, bytearray(iterable-of-ints),
+        // bytearray("text", "utf-8") -> encoded.
+        globals.putIfAbsent("bytearray", (HostFunction) a -> {
+            if (a.length == 0) return new PyObj.ByteArray(0);
+            Object x = a[0];
+            if (x instanceof Long || x instanceof BigInteger || x instanceof Boolean) {
+                int n = (int) longOf(x);
+                if (n < 0) throw PyException.valueError("negative count");
+                net.mpy.runtime.Ops.checkAlloc(n, 1);
+                return new PyObj.ByteArray(new byte[n]);
+            }
+            if (x instanceof PyObj.Bytes) return new PyObj.ByteArray(((PyObj.Bytes) x).data.clone());
+            if (x instanceof PyObj.ByteArray) return new PyObj.ByteArray(((PyObj.ByteArray) x).toBytes());
+            if (x instanceof String) {
+                // bytearray("text", encoding); default utf-8
+                java.nio.charset.Charset cs = java.nio.charset.StandardCharsets.UTF_8;
+                return new PyObj.ByteArray(((String) x).getBytes(cs));
+            }
+            // iterable of ints
+            java.util.List<Object> items = toList(x);
+            byte[] buf = new byte[items.size()];
+            for (int i = 0; i < buf.length; i++) {
+                long v = longOf(items.get(i));
+                if (v < 0 || v > 255) throw PyException.valueError("byte must be in range(0, 256)");
+                buf[i] = (byte) v;
+            }
+            return new PyObj.ByteArray(buf);
+        });
         globals.putIfAbsent("complex", BuiltinType.COMPLEX);
         globals.putIfAbsent("globals", Vm.GLOBALS_BUILTIN);
         globals.putIfAbsent("locals", Vm.LOCALS_BUILTIN);
         globals.putIfAbsent("compile", Vm.COMPILE_BUILTIN);
         globals.putIfAbsent("exec", Vm.EXEC_BUILTIN);
+        globals.putIfAbsent("exec_sandbox", Vm.EXEC_SANDBOX_BUILTIN);
+        globals.putIfAbsent("eval_sandbox", Vm.EVAL_SANDBOX_BUILTIN);
         globals.putIfAbsent("eval", Vm.EVAL_BUILTIN);
         globals.putIfAbsent("__jasyncio_create_task", Vm.CREATE_TASK_BUILTIN);
         globals.putIfAbsent("__jasyncio_run", Vm.RUN_BUILTIN);
@@ -117,6 +164,8 @@ public final class Builtins {
         });
         globals.putIfAbsent("setattr", (HostFunction) a -> {
             if (a[0] instanceof PyInstance) { ((PyInstance) a[0]).attrs.put((String) a[1], a[2]); return PyObj.NONE; }
+            if (a[0] instanceof PyFunction) { ((PyFunction) a[0]).attrsOrNew().put((String) a[1], a[2]); return PyObj.NONE; }
+            if (a[0] instanceof Closure) { ((Closure) a[0]).fun.attrsOrNew().put((String) a[1], a[2]); return PyObj.NONE; }
             throw PyException.typeError("can't set attribute on " + StdLib.typeName(a[0]));
         });
         globals.putIfAbsent("delattr", (HostFunction) a -> {
@@ -133,7 +182,12 @@ public final class Builtins {
             // (contents match MicroPython; element order follows this VM's insertion
             // order rather than the reference's hash-bucket order.)
             java.util.LinkedHashSet<Object> names = new java.util.LinkedHashSet<>();
-            if (a.length >= 1 && a[0] instanceof PyInstance) {
+            if (a.length >= 1 && a[0] instanceof PyModule) {
+                // module (including injected ones like component/computer): its ns
+                names.addAll(((PyModule) a[0]).ns.keySet());
+            } else if (a.length >= 1 && a[0] instanceof PyObj.PyDict) {
+                for (Object k : ((PyObj.PyDict) a[0]).map.keySet()) names.add(k);
+            } else if (a.length >= 1 && a[0] instanceof PyInstance) {
                 PyInstance inst = (PyInstance) a[0];
                 names.add("__class__");
                 if (inst.cls.lookup("__init__") != null) names.add("__init__");
@@ -205,8 +259,23 @@ public final class Builtins {
         });
         globals.putIfAbsent("staticmethod", (HostFunction) a -> new Descriptors.StaticMethod(a[0]));
         globals.putIfAbsent("classmethod", (HostFunction) a -> new Descriptors.ClassMethod(a[0]));
-        globals.putIfAbsent("property", (HostFunction) a -> new Descriptors.Property(a[0]));
+        globals.putIfAbsent("property", (HostFunction) a -> new Descriptors.Property(
+                a.length > 0 ? a[0] : null,
+                a.length > 1 ? a[1] : null,
+                a.length > 2 ? a[2] : null));
         globals.putIfAbsent("tuple", BuiltinType.TUPLE);
+        // lua(x): wrap an OC/host return value so it unpacks Lua-style -- missing
+        // targets get None, extra values are dropped, so `a, b, c = lua(m.get())`
+        // never raises regardless of how many values the method returned. A plain
+        // value becomes a 1-element lua-tuple; an existing tuple keeps its elements.
+        globals.putIfAbsent("lua", (HostFunction) a -> {
+            Object v = a.length > 0 ? a[0] : PyObj.NONE;
+            Object[] items;
+            if (v instanceof PyObj.Tuple) items = ((PyObj.Tuple) v).items;
+            else if (v == PyObj.NONE) items = new Object[0];   // no return -> all None on unpack
+            else items = new Object[] { v };
+            return new PyObj.Tuple(items, true);
+        });
     }
 
     /** str(): strings pass through unquoted; everything else uses repr. */
@@ -310,6 +379,55 @@ public final class Builtins {
         return false;
     }
 
+    private static void arityExact(Object[] a, int n, String name) {
+        if (a.length != n) throw PyException.typeError(
+                name + "() takes exactly " + n + " argument" + (n == 1 ? "" : "s"));
+    }
+
+    /** True if obj can be called: functions, bound methods, host functions, type
+     *  constructors, classes, and instances whose class defines __call__. */
+    private static boolean isCallable(Object o) {
+        if (o instanceof PyFunction) return true;
+        if (o instanceof HostFunction) return true;
+        if (o instanceof BoundPyMethod) return true;
+        if (o instanceof Methods.BoundMethod) return true;
+        if (o instanceof Methods.Ref) return true;
+        if (o instanceof BuiltinType) return true;      // int(), str(), list()...
+        if (o instanceof Vm.NativeBuiltin) return true;  // len, sorted, map, print...
+        if (o instanceof PyClass) return true;          // classes are callable
+        if (o instanceof Descriptors.StaticMethod) return true;
+        if (o instanceof Descriptors.ClassMethod) return true;
+        if (o instanceof PyInstance)
+            return ((PyInstance) o).cls.lookup("__call__") != null;
+        return false;
+    }
+
+    /** Python hash() for hashable objects; unhashable containers raise TypeError.
+     *  Consistent with equality: values that compare equal hash equal. */
+    static Long pyHash(Object o) {
+        if (o == null || o == PyObj.NONE) return 0L;
+        if (o instanceof Boolean) return ((Boolean) o) ? 1L : 0L;
+        if (o instanceof Long) return (Long) o;
+        if (o instanceof BigInteger) return ((BigInteger) o).longValue();
+        if (o instanceof Double) return (long) Double.doubleToLongBits((Double) o);
+        if (o instanceof String) return (long) o.hashCode();
+        if (o instanceof PyObj.Bytes) return (long) java.util.Arrays.hashCode(((PyObj.Bytes) o).data);
+        if (o instanceof PyObj.Complex) {
+            PyObj.Complex c = (PyObj.Complex) o;
+            return (long) (Double.hashCode(c.re) ^ Double.hashCode(c.im));
+        }
+        if (o instanceof PyObj.Tuple) {
+            long h = 1L;
+            for (Object x : ((PyObj.Tuple) o).items) h = h * 31 + pyHash(x);   // recurses; tuple of hashables
+            return h;
+        }
+        if (o instanceof PyObj.PyList) throw PyException.typeError("unhashable type: 'list'");
+        if (o instanceof PyObj.PyDict) throw PyException.typeError("unhashable type: 'dict'");
+        if (o instanceof PyObj.PySet) throw PyException.typeError("unhashable type: 'set'");
+        if (o instanceof PyObj.ByteArray) throw PyException.typeError("unhashable type: 'bytearray'");
+        return (long) System.identityHashCode(o);   // objects hash by identity by default
+    }
+
     /** getattr core: instance attrs, class methods, module/dict members. Returns
      *  null if absent (callers apply defaults or raise). */
     static Object getAttr(Object obj, String name) {
@@ -321,7 +439,18 @@ public final class Builtins {
             if (m instanceof PyFunction || m instanceof Closure) return new BoundPyMethod(m, inst);
             return m;
         }
-        if (obj instanceof PyModule) return ((PyModule) obj).ns.get(name);
+        if (obj instanceof PyModule) {
+            Object v = ((PyModule) obj).ns.get(name);
+            if (v == null && !"__getattr__".equals(name)) {
+                // PEP 562 fallback (see Vm.loadAttr). Host-function hooks (like the
+                // arch's component primaries) can be invoked directly here; a
+                // Python-level __getattr__ needs the VM loop and goes through
+                // ordinary attribute access instead.
+                Object ga = ((PyModule) obj).ns.get("__getattr__");
+                if (ga instanceof HostFunction) return ((HostFunction) ga).call(new Object[]{name});
+            }
+            return v;
+        }
         if (obj instanceof PyClass) {
             if (name.equals("__name__")) return ((PyClass) obj).name;
             return ((PyClass) obj).lookup(name);
@@ -332,6 +461,14 @@ public final class Builtins {
         }
         if (obj instanceof BuiltinType) {
             if (name.equals("__name__")) return ((BuiltinType) obj).name;
+            return null;
+        }
+        if (obj instanceof PyFunction || obj instanceof Closure) {
+            PyFunction fn = obj instanceof Closure ? ((Closure) obj).fun : (PyFunction) obj;
+            if (fn.attrs != null && fn.attrs.containsKey(name)) return fn.attrs.get(name);
+            if (name.equals("__name__") || name.equals("__qualname__")) return fn.name();
+            if (name.equals("__module__")) return "__main__";
+            if (name.equals("__doc__")) return PyObj.NONE;
             return null;
         }
         Object bm = Methods.lookup(obj, name) != null ? new Methods.BoundMethod(obj, name) : null;
@@ -368,6 +505,7 @@ public final class Builtins {
     static int lenOf(Object o) {
         if (o instanceof String) return ((String) o).length();
         if (o instanceof PyObj.Bytes) return ((PyObj.Bytes) o).data.length;
+        if (o instanceof PyObj.ByteArray) return ((PyObj.ByteArray) o).size;
         if (o instanceof PyObj.Tuple) return ((PyObj.Tuple) o).items.length;
         if (o instanceof PyObj.PyList) return ((PyObj.PyList) o).items.size();
         if (o instanceof PyObj.PyDict) return ((PyObj.PyDict) o).map.size();

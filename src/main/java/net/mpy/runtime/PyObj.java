@@ -62,6 +62,28 @@ public final class PyObj {
         @Override public String toString() { return repr(this); }
     }
 
+    /** Mutable Python {@code bytearray}, backed by a growable Java byte[]. Only the
+     *  first {@code size} bytes are live; the tail is spare capacity for append. */
+    public static final class ByteArray {
+        public byte[] data;
+        public int size;
+        public ByteArray(byte[] initial) { this.data = initial; this.size = initial.length; }
+        public ByteArray(int n) { this.data = new byte[Math.max(n, 8)]; this.size = 0; }
+        /** A tight copy of the live bytes. */
+        public byte[] toBytes() { return Arrays.copyOf(data, size); }
+        public void ensure(int cap) {
+            if (cap <= data.length) return;
+            int grow = Math.max(cap, data.length + (data.length >> 1) + 8);
+            data = Arrays.copyOf(data, grow);
+        }
+        public void append(int b) { ensure(size + 1); data[size++] = (byte) (b & 0xFF); }
+        @Override public boolean equals(Object o) {
+            return o instanceof ByteArray && Arrays.equals(toBytes(), ((ByteArray) o).toBytes());
+        }
+        @Override public int hashCode() { return Arrays.hashCode(toBytes()); }
+        @Override public String toString() { return repr(this); }
+    }
+
     /** Immutable Python {@code tuple}. */
     public static final class Tuple {
         public final Object[] items;
@@ -69,9 +91,17 @@ public final class PyObj {
         public final String[] fieldNames;
         /** namedtuple type name (for repr), or null for a plain tuple. */
         public final String typeName;
-        public Tuple(Object[] items) { this.items = items; this.fieldNames = null; this.typeName = null; }
+        /** When true, unpacking this tuple follows Lua's assignment rules: too few
+         *  values pad the remaining targets with None, too many are dropped -- see
+         *  Ops.unpackSeq and the lua() builtin. A plain tuple (false) uses strict
+         *  Python unpacking. Does not affect iteration/indexing/len/repr. */
+        public final boolean luaStyle;
+        public Tuple(Object[] items) { this.items = items; this.fieldNames = null; this.typeName = null; this.luaStyle = false; }
         public Tuple(Object[] items, String[] fieldNames, String typeName) {
-            this.items = items; this.fieldNames = fieldNames; this.typeName = typeName;
+            this.items = items; this.fieldNames = fieldNames; this.typeName = typeName; this.luaStyle = false;
+        }
+        public Tuple(Object[] items, boolean luaStyle) {
+            this.items = items; this.fieldNames = null; this.typeName = null; this.luaStyle = luaStyle;
         }
 
         @Override public boolean equals(Object o) {
@@ -106,6 +136,7 @@ public final class PyObj {
         if (o instanceof Boolean) return ((Boolean) o) ? "True" : "False";
         if (o instanceof String) return reprStr((String) o);
         if (o instanceof Bytes) return reprBytes(((Bytes) o).data);
+        if (o instanceof ByteArray) return "bytearray(" + reprBytes(((ByteArray) o).toBytes()) + ")";
         if (o instanceof Double) return reprFloat((Double) o);
         if (o instanceof Complex) {
             Complex c = (Complex) o;
@@ -336,9 +367,32 @@ public final class PyObj {
     public static final class Iter {
         public final java.util.List<Object> items;
         public int pos;
+        /** Optional on-demand producer: returns the next value, or STOP_ITERATION
+         *  when exhausted. When non-null, next() pulls from here instead of walking
+         *  {@link #items} -- this is how a wrapped OC Value iterates lazily
+         *  (one toPy() conversion per step) rather than materialising thousands of
+         *  Python objects up front. A lazy Iter is materialised on snapshot (its
+         *  remaining elements are drained into items) so it can be serialised. */
+        public transient java.util.function.Supplier<Object> supplier;
         public Iter(java.util.List<Object> items) { this.items = items; }
+        public Iter(java.util.function.Supplier<Object> supplier) {
+            this.items = new java.util.ArrayList<>();
+            this.supplier = supplier;
+        }
         /** Next value, or {@link #STOP_ITERATION} when exhausted. */
-        public Object next() { return pos < items.size() ? items.get(pos++) : STOP_ITERATION; }
+        public Object next() {
+            if (supplier != null) return supplier.get();
+            return pos < items.size() ? items.get(pos++) : STOP_ITERATION;
+        }
+        /** Drain any remaining lazily-produced values into {@link #items} and drop the
+         *  supplier, turning this into a plain list-backed iterator (used before a
+         *  snapshot, since a live host supplier cannot be serialised). Idempotent. */
+        public void materialize() {
+            if (supplier == null) return;
+            Object v;
+            while ((v = supplier.get()) != STOP_ITERATION) items.add(v);
+            supplier = null;
+        }
         @Override public String toString() { return "<iterator>"; }
     }
 }

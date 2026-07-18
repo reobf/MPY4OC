@@ -49,7 +49,30 @@ public final class HostRegistry {
             Object v = liveGlobals.get(id);
             if (v instanceof HostFunction) return (HostFunction) v;
         }
+        if (fn == null && resolver != null) {
+            // Last resort: let the embedder synthesise a function for an id it can
+            // reconstruct deterministically (e.g. component proxy methods, whose id
+            // encodes address + method and so need not have been pre-registered --
+            // important when a snapshot is restored before the component network is
+            // back online, as happens during chunk load). A generated function is
+            // cached so identity is stable within this registry.
+            fn = resolver.resolve(id);
+            if (fn != null) register(id, fn);
+        }
         return fn;
+    }
+
+    /** Synthesises a HostFunction for an id not otherwise registered. */
+    public interface Resolver {
+        HostFunction resolve(String id);
+    }
+
+    private Resolver resolver;
+
+    /** Install a fallback resolver for unknown ids (see {@link #functionFor}). */
+    public HostRegistry withResolver(Resolver r) {
+        this.resolver = r;
+        return this;
     }
 
     /** Build a registry backed LIVE by a globals map: every host function is

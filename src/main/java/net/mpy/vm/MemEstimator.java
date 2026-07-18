@@ -47,6 +47,7 @@ final class MemEstimator {
         if (seen.put(v, Boolean.TRUE) != null) return;
         if (v instanceof BigInteger) { total += 40 + ((BigInteger) v).bitLength() / 8; return; }
         if (v instanceof PyObj.Bytes) { total += 40 + ((PyObj.Bytes) v).data.length; return; }
+        if (v instanceof PyObj.ByteArray) { total += 48 + ((PyObj.ByteArray) v).data.length; return; }
         if (v instanceof PyObj.Tuple) {
             Object[] it = ((PyObj.Tuple) v).items;
             total += 40 + 8L * it.length;

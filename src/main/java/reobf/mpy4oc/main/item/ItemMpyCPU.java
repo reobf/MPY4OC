@@ -1,0 +1,109 @@
+package reobf.mpy4oc.main.item;
+
+import java.util.List;
+
+import cpw.mods.fml.relauncher.Side;
+import cpw.mods.fml.relauncher.SideOnly;
+import net.minecraft.client.renderer.texture.IIconRegister;
+import net.minecraft.creativetab.CreativeTabs;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.util.IIcon;
+
+/**
+ * The MPY CPU: a processor that always runs the "mpy" architecture, in three
+ * tiers. The tier is stored in the item's damage value (0/1/2 == tier 1/2/3),
+ * which controls how many bytecode ops the VM runs per tick:
+ *
+ *   tier 1  ->  2000 ops/tick
+ *   tier 2  ->  8000 ops/tick
+ *   tier 3  -> 64000 ops/tick
+ *
+ * (The op budget itself lives in the architecture; this item just reports its
+ * tier, which the architecture reads from the installed CPU.)
+ *
+ * Like the original single-tier CPU, the architecture is hardcoded via the driver
+ * -- nothing to toggle, no architecture NBT to get right.
+ */
+public class ItemMpyCPU extends Item {
+
+    /** Number of tiers (damage values 0..TIERS-1). */
+    public static final int TIERS = 3;
+
+    /** Component slots supported per tier, mirroring OC's CPU tiers. */
+    private static final int[] SUPPORTED_COMPONENTS = { 8, 12, 16 };
+
+    /** Direct component calls allowed per tick, per tier (OC-like). */
+    private static final double[] CALL_BUDGET = { 0.5, 1.0, 1.5 };
+
+    @SideOnly(Side.CLIENT)
+    private IIcon[] icons;
+
+    public ItemMpyCPU() {
+        super();
+        setMaxStackSize(64);
+        setHasSubtypes(true);
+        setMaxDamage(0);
+        setUnlocalizedName("mpy4oc.cpu");
+        setCreativeTab(CreativeTabs.tabRedstone);
+    }
+
+    /** 0-based tier from an item stack's damage (clamped to a valid tier). */
+    public int tierOf(ItemStack stack) {
+        int d = stack == null ? 0 : stack.getItemDamage();
+        if (d < 0) return 0;
+        if (d >= TIERS) return TIERS - 1;
+        return d;
+    }
+
+    public int supportedComponents(ItemStack stack) {
+        return SUPPORTED_COMPONENTS[tierOf(stack)];
+    }
+
+    public double callBudget(ItemStack stack) {
+        return CALL_BUDGET[tierOf(stack)];
+    }
+
+    @Override
+    public String getUnlocalizedName(ItemStack stack) {
+        return super.getUnlocalizedName() + (tierOf(stack) + 1);
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    @Override
+    @SideOnly(Side.CLIENT)
+    public void getSubItems(Item item, CreativeTabs tab, List list) {
+        for (int t = 0; t < TIERS; t++) {
+            list.add(new ItemStack(item, 1, t));
+        }
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    @Override
+    @SideOnly(Side.CLIENT)
+    public void addInformation(ItemStack stack, EntityPlayer player, List tooltip, boolean advanced) {
+        int t = tierOf(stack);
+        int[] ops = { 500, 2000, 16000 };
+        tooltip.add("Architecture: mpy");
+        tooltip.add("Tier " + (t + 1) + " \u2014 " + ops[t] + " ops/tick");
+        tooltip.add("Runs MicroPython bytecode.");
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public void registerIcons(IIconRegister reg) {
+        icons = new IIcon[TIERS];
+        for (int t = 0; t < TIERS; t++) {
+            // mpy_cpu, mpy_cpu2, mpy_cpu3 (falls back to missing-texture if absent)
+            icons[t] = reg.registerIcon("mpy4oc:mpy_cpu" + (t == 0 ? "" : String.valueOf(t + 1)));
+        }
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public IIcon getIconFromDamage(int damage) {
+        int t = damage < 0 ? 0 : (damage >= TIERS ? TIERS - 1 : damage);
+        return icons != null ? icons[t] : super.getIconFromDamage(damage);
+    }
+}

@@ -102,7 +102,16 @@ public final class Vm {
     private boolean daemonFinishOnExit;
     private Object returnValue;
     private boolean yielding;   // set by the yield host function to abort a batch early
+
+    /** Live instruction-budget accounting for the ops()/ops_share() host functions.
+     *  shareRemaining is the current runLoop batch's remaining count (the running
+     *  frame's / coroutine's slice); stepRemaining is the whole step's remaining
+     *  across every slice not yet consumed. Both are only meaningful while a step is
+     *  executing; ops() reads stepRemaining, ops_share() reads shareRemaining. */
+    private int shareRemaining;
+    private int stepRemaining;
     private int raiseIp;        // start ip of the executing instruction (C: code_state->ip)
+    private int raiseSp;        // stack pointer at the start of the executing instruction
     private Limits limits = new Limits();
     private int memCheckCountdown;
     /** The most recently handled exception (set when an except block is entered);
@@ -218,10 +227,15 @@ public final class Vm {
      *  return, doReturn delivers the result (eval: the expression value; exec:
      *  None) to the caller via the isExecRoot path. */
     private void runCompiled(CompiledCode code, Map<String, Object> ns, boolean isEval) {
+        runCompiled(code, ns, isEval, false);
+    }
+
+    private void runCompiled(CompiledCode code, Map<String, Object> ns, boolean isEval, boolean sandbox) {
         embedCell("<exec:" + cellModules.size() + ">", code.module);
         checkDepth();
         Frame top = new Frame(code.module.root);
         top.execGlobals = ns;            // null -> plain globals
+        top.sandboxScope = sandbox && ns != null;
         top.isExecRoot = true;
         top.isEvalRoot = isEval;         // eval reads back EVAL_RESULT_NAME on return
         top.caller = current;
@@ -249,6 +263,23 @@ public final class Vm {
     public boolean hasPendingTasks() {
         for (AsyncTask t : asyncTasks) if (!t.done) return true;
         return false;
+    }
+
+    /** True when the VM is in a legitimate zero-op wait: every pending async task is
+     *  sleeping (timer not yet due), so a step consumes nothing by design. A host can
+     *  use this to tell a healthy idle sleep apart from a program that is genuinely
+     *  doing nothing useful. */
+    public boolean idleWaiting() {
+        boolean any = false;
+        for (AsyncTask t : asyncTasks) {
+            if (t.done) continue;
+            if (t.sleepRemainingMs <= 0) return false;   // a runnable task exists
+            any = true;
+        }
+        // All pending tasks are asleep. This is an idle wait when something is
+        // actually waiting on them: either the main frame blocked in jasyncio.run,
+        // or the main frame already returned (daemon drain mode).
+        return any && (mainWaitingTask != null || mainReturned);
     }
 
     /**
@@ -370,6 +401,18 @@ public final class Vm {
                 current = resumeAt;
             }
             leftover = runLoop(give);
+        } catch (HostPause hp) {
+            // A host function parked mid-instruction (e.g. async non-direct call).
+            // Treat exactly like a yieldJava host-yield: the frame chain is intact
+            // and the instruction was rewound, so resume from the exact stop frame.
+            Frame stop = current;
+            int consumedHp = give - leftover;   // leftover still == give here (batch aborted)
+            restoreTop(savedCurrent, savedFinished, savedYielding, savedReturn, savedDriving);
+            t.blacklistedThisRound = true;
+            t.atYieldPoint = false;
+            t.suspendedFrame = stop;
+            hostPaused = true;                  // signal the async driver to defer to sync
+            return Math.max(1, consumedHp);
         } catch (PyException pe) {
             t.done = true;
             t.error = PyExc.from(pe);
@@ -423,6 +466,25 @@ public final class Vm {
 
     /** The sandbox limits for this VM (see {@link Limits}); replace to reconfigure. */
     public Limits limits() { return limits; }
+
+    /** Instructions still available in the current step (the whole per-tick budget,
+     *  including rolled-over/banked ops), for the ops() host function. Meaningful
+     *  only while a step is running; 0 between steps. */
+    public int opsRemaining() { return Math.max(0, stepRemaining); }
+
+    /** Instructions still available in the running frame's/coroutine's own slice
+     *  (main gets ~2/3, async ~1/3 when both are active), for ops_share(). */
+    public int opsShareRemaining() { return Math.max(0, shareRemaining); }
+
+    /** A rough estimate, in bytes, of the script-reachable live data right now
+     *  (the same walk the memory limit uses). Cheap enough for an occasional
+     *  computer.freeMemory() call, not for a hot loop. */
+    public long estimatedMemory() {
+        return MemEstimator.estimate(current, globals);
+    }
+
+    /** The configured soft memory ceiling in bytes (Long.MAX_VALUE if unlimited). */
+    public long memoryLimit() { return limits.memoryLimit; }
 
     public void setLimits(Limits limits) {
         this.limits = limits;
@@ -528,6 +590,17 @@ public final class Vm {
     /** For an absolute import, pick the first root where the leaf resolves as a
      *  file/package; failing that, the first root where any chain prefix does;
      *  failing that, the first root (the leaf error surfaces naturally). */
+    /** True if {@code pm}'s still-executing top frame sits in {@code f}'s own caller
+     *  chain -- i.e. this is a circular import within the same execution, which per
+     *  Python semantics proceeds and sees the partially-initialized module. The
+     *  executing top frame is recognisable by returnOverride == pm (set at push). */
+    private static boolean inOwnImportChain(Frame f, PyModule pm) {
+        for (Frame x = f; x != null; x = x.caller) {
+            if (x.returnOverride == pm && x.importRetryIp >= 0) return true;
+        }
+        return false;
+    }
+
     private String pickRoot(String[] tparts) {
         String full = String.join(".", tparts);
         for (String r : importRoots) if (resolveDotted(r, full) != null) return r;
@@ -891,7 +964,20 @@ public final class Vm {
      * over ({@code > 0} if everything runnable finished early, else {@code 0}).
      */
     public void step(int[] remops) {
+        try {
+            stepImpl(remops);
+        } catch (HostPause hp) {
+            // The main frame parked in a host function (async non-direct call): the
+            // instruction was rewound and yielding set, so it re-runs next step.
+            // Flag it so the async arch issues a synchronized call. Budget already
+            // spent up to the park stays spent; the rest is left for the bank.
+            hostPaused = true;
+        }
+    }
+
+    private void stepImpl(int[] remops) {
         int budget = remops[0];
+        stepRemaining = budget;   // whole-step total for ops()
         if (budget <= 0) { remops[0] = 0; return; }
 
         boolean haveTasks = hasPendingTasks();
@@ -900,10 +986,9 @@ public final class Vm {
         // async until that task settles, then hand its result (or exception) to the
         // main frame and let it resume on a subsequent step.
         if (mainWaitingTask != null) {
+            int[] a = { budget };
             if (!mainWaitingTask.done && haveTasks) {
-                int[] a = { budget };
-                driveAsync(a);
-                remops[0] = a[0];
+                driveAsync(a);          // a[0] holds whatever async did not consume
             }
             if (mainWaitingTask.done) {
                 AsyncTask t = mainWaitingTask;
@@ -914,9 +999,14 @@ public final class Vm {
                 } else {
                     current.setTop(t.result);   // run() returns the coroutine's value
                 }
+                remops[0] = a[0];
                 if (!finished && remops[0] > 0) remops[0] = runLoop(remops[0]);
             } else {
-                remops[0] = 0;   // still waiting; async consumed the budget
+                // Still waiting on the task. Report the budget async actually left
+                // unused -- when the task is just sleeping, async runs nothing and the
+                // whole budget rolls over (so ops bank up during a sleep) rather than
+                // being falsely counted as spent.
+                remops[0] = a[0];
             }
             return;
         }
@@ -970,7 +1060,46 @@ public final class Vm {
      * budget. Called by the {@link #yieldHost() yield host function}; the VM is left
      * runnable (not finished) and the next run continues right after the yield point.
      */
+    /** Set by driveTask when a task parked via {@link #hostPause()} (e.g. an async
+     *  non-direct component call from inside a coroutine). The async arch checks
+     *  and clears this after {@link #step} to know a synchronized call is needed
+     *  even though the pause happened deep inside the async scheduler rather than
+     *  propagating out as a HostPause. */
+    private boolean hostPaused = false;
+    public boolean consumeHostPaused() { boolean b = hostPaused; hostPaused = false; return b; }
+
     public void requestYield() { yielding = true; }
+
+    /** Rewind the current frame to the START of the instruction now executing, so
+     *  that after a host-side park (e.g. an async non-direct component call handed
+     *  to the main thread) the VM re-runs that instruction idempotently -- the same
+     *  multi-pass mechanism import uses. Call only from inside a host function
+     *  invoked by the running instruction; pairs with {@link #requestYield()}. */
+    public void rewindCurrentInstruction() { current.ip = raiseIp; current.sp = raiseSp; }
+
+    /** Park the running instruction: rewind it and abort the current batch by
+     *  throwing {@link HostPause}, which the VM's drivers convert into a normal
+     *  host-yield suspension (main frame or task frame alike). A host function
+     *  calls this when it cannot complete the instruction now but the instruction
+     *  must re-run unchanged later -- e.g. an async CPU handing a non-direct
+     *  component call to the main thread. Unlike {@link #requestYield()}, this does
+     *  NOT let the calling instruction complete (no result is stored), so the
+     *  re-run sees the identical operand stack. */
+    public void hostPause() {
+        current.ip = raiseIp;   // re-run this instruction after the pause
+        current.sp = raiseSp;   // ... with the operand stack it had at instruction start
+        yielding = true;
+        throw HOST_PAUSE;
+    }
+
+    /** Thrown by {@link #hostPause()} to unwind out of a host call without
+     *  completing the instruction. Caught by the VM's own run drivers (runLoop
+     *  callers, driveTask) and turned into a standard host-yield suspension; it
+     *  never reaches Python and carries no stack trace (control flow, not error). */
+    public static final class HostPause extends RuntimeException {
+        HostPause() { super(null, null, false, false); }
+    }
+    private static final HostPause HOST_PAUSE = new HostPause();
 
     /**
      * Whether the most recent batch stopped because the script yielded (rather than
@@ -1006,6 +1135,9 @@ public final class Vm {
         Frame f = current;
         byte[] bc = f.bc;
         int remaining = budget;
+        int batchStart = budget;          // for step-wide accounting (ops())
+        int stepBase = stepRemaining;     // total remaining across the step at entry
+        shareRemaining = remaining;       // this batch's slice, for ops_share()
         yielding = false;   // clear any prior yield request; a fresh batch continues past it
         taskYielded = false;
 
@@ -1023,6 +1155,8 @@ public final class Vm {
             raiseIp = f.ip;   // C's code_state->ip: the START of this instruction,
                               // used by the unwind's handler<=ip test (a handler
                               // placed right after a trailing `raise` must survive)
+            raiseSp = f.sp;   // stack pointer at instruction start, so hostPause() can
+                              // rewind a CALL that already popped its args to the callable slot
             int ip = f.ip;
             final int op = bc[ip++] & 0xff;
             final int format = Opcodes.format(op);
@@ -1115,14 +1249,14 @@ public final class Vm {
                         if (f.names != null && f.names.containsKey(name)) { f.push(f.names.get(name)); break dispatch; }
                         Map<String, Object> scope = scopeOf(f);
                         if (scope.containsKey(name)) { f.push(scope.get(name)); break dispatch; }
-                        if (scope != globals && globals.containsKey(name)) { f.push(globals.get(name)); break dispatch; } // builtins
+                        if (scope != globals && globals.containsKey(name) && fallsThrough(f, name)) { f.push(globals.get(name)); break dispatch; }
                         throw PyException.nameError("name '" + name + "' is not defined");
                     }
                     case Opcodes.LOAD_GLOBAL: {
                         String name = f.code.module.qstr((int) arg);
                         Map<String, Object> scope = scopeOf(f);
                         if (scope.containsKey(name)) { f.push(scope.get(name)); break dispatch; }
-                        if (scope != globals && globals.containsKey(name)) { f.push(globals.get(name)); break dispatch; } // builtins
+                        if (scope != globals && globals.containsKey(name) && fallsThrough(f, name)) { f.push(globals.get(name)); break dispatch; }
                         throw PyException.nameError("name '" + name + "' is not defined");
                     }
                     case Opcodes.STORE_NAME: {
@@ -1134,9 +1268,13 @@ public final class Vm {
                     case Opcodes.STORE_GLOBAL:
                         scopeOf(f).put(f.code.module.qstr((int) arg), f.pop());
                         break dispatch;
-                    case Opcodes.DELETE_NAME: case Opcodes.DELETE_GLOBAL:
-                        globals.remove(f.code.module.qstr((int) arg));
+                    case Opcodes.DELETE_NAME: case Opcodes.DELETE_GLOBAL: {
+                        String dn = f.code.module.qstr((int) arg);
+                        Map<String, Object> scope = scopeOf(f);
+                        if (scope.containsKey(dn)) scope.remove(dn);
+                        else globals.remove(dn);
                         break dispatch;
+                    }
 
                     case Opcodes.POP_TOP:      f.drop(1); break dispatch;
                     case Opcodes.DUP_TOP:      f.push(f.top()); break dispatch;
@@ -1169,11 +1307,20 @@ public final class Vm {
                     case Opcodes.STORE_SUBSCR: {
                         Object obj = f.peek(1), index = f.peek(0), value = f.peek(2);
                         if (obj instanceof PyInstance) {
-                            Object m = ((PyInstance) obj).cls.lookup("__setitem__");
-                            if (m != null) { callSync(new BoundPyMethod(m, obj), new Object[]{index, value}); f.drop(3); break dispatch; }
+                            // value == null means `del obj[index]` -> __delitem__.
+                            String dunder = (value == null) ? "__delitem__" : "__setitem__";
+                            Object m = ((PyInstance) obj).cls.lookup(dunder);
+                            if (m != null) {
+                                Object[] callArgs = (value == null)
+                                        ? new Object[]{index}
+                                        : new Object[]{index, value};
+                                callSync(new BoundPyMethod(m, obj), callArgs);
+                                f.drop(3); break dispatch;
+                            }
                             Object nv = nativeValueOf(obj);
                             if (nv != null) { Ops.subscrStore(nv, index, value); f.drop(3); break dispatch; }
-                            throw PyException.typeError("'" + ((PyInstance) obj).cls.name + "' object does not support item assignment");
+                            throw PyException.typeError("'" + ((PyInstance) obj).cls.name + "' object does not support item "
+                                    + (value == null ? "deletion" : "assignment"));
                         }
                         Ops.subscrStore(obj, index, value);
                         f.drop(3);
@@ -1295,6 +1442,7 @@ public final class Vm {
                         PyObj.Cell[] closed = new PyObj.Cell[nClosed];
                         for (int k = nClosed - 1; k >= 0; k--) closed[k] = (PyObj.Cell) f.pop();
                         PyFunction fn = new PyFunction(f.code.children.get((int) arg), f.code.module, null);
+                        fn.defScope = f.execGlobals; fn.defSandbox = f.sandboxScope;   // inherit the sandbox, if any
                         f.push(new Closure(fn, closed));
                         break dispatch;
                     }
@@ -1307,12 +1455,15 @@ public final class Vm {
                         Object[] defs = (defTuple instanceof PyObj.Tuple) ? ((PyObj.Tuple) defTuple).items : null;
                         java.util.Map<Object, Object> kwd = (defDict instanceof PyObj.PyDict) ? ((PyObj.PyDict) defDict).map : null;
                         PyFunction fn = new PyFunction(f.code.children.get((int) arg), f.code.module, defs, kwd);
+                        fn.defScope = f.execGlobals; fn.defSandbox = f.sandboxScope;
                         f.drop(1);
                         f.setTop(new Closure(fn, closed));
                         break dispatch;
                     }
                     case Opcodes.MAKE_FUNCTION: {
-                        f.push(new PyFunction(f.code.children.get((int) arg), f.code.module, null));
+                        PyFunction fn = new PyFunction(f.code.children.get((int) arg), f.code.module, null);
+                        fn.defScope = f.execGlobals; fn.defSandbox = f.sandboxScope;
+                        f.push(fn);
                         break dispatch;
                     }
                     case Opcodes.MAKE_FUNCTION_DEFARGS: {
@@ -1321,6 +1472,7 @@ public final class Vm {
                         Object[] defs = (defTuple instanceof PyObj.Tuple) ? ((PyObj.Tuple) defTuple).items : null;
                         java.util.Map<Object, Object> kwd = (defDict instanceof PyObj.PyDict) ? ((PyObj.PyDict) defDict).map : null;
                         PyFunction fn = new PyFunction(f.code.children.get((int) arg), f.code.module, defs, kwd);
+                        fn.defScope = f.execGlobals; fn.defSandbox = f.sandboxScope;
                         f.drop(1);       // remove def_dict
                         f.setTop(fn);    // replace def_tuple with the function
                         break dispatch;
@@ -1337,10 +1489,37 @@ public final class Vm {
                         Object obj = f.peek(0);          // value at peek(1)
                         Object value = f.peek(1);
                         f.drop(2);
-                        if (obj instanceof PyInstance) { ((PyInstance) obj).attrs.put(name, value); break dispatch; }
+                        if (obj instanceof PyInstance) {
+                            PyInstance inst = (PyInstance) obj;
+                            // A class-level property intercepts assignment/deletion.
+                            Object cm = inst.cls.lookup(name);
+                            if (cm instanceof Descriptors.Property) {
+                                Descriptors.Property prop = (Descriptors.Property) cm;
+                                if (value == null) {   // del inst.name -> deleter
+                                    if (prop.deleter == null)
+                                        throw new PyException("AttributeError", "can't delete attribute '" + name + "'");
+                                    callSync(prop.deleter, new Object[]{inst});
+                                    break dispatch;
+                                }
+                                if (prop.setter == null)
+                                    throw new PyException("AttributeError", "can't set attribute '" + name + "'");
+                                callSync(prop.setter, new Object[]{inst, value});
+                                break dispatch;
+                            }
+                            if (value == null) {   // del inst.name (plain attribute)
+                                if (inst.attrs.remove(name) == null)
+                                    throw new PyException("AttributeError",
+                                            "'" + inst.cls.name + "' object has no attribute '" + name + "'");
+                                break dispatch;
+                            }
+                            inst.attrs.put(name, value);
+                            break dispatch;
+                        }
                         if (obj instanceof PyExc.Instance) { ((PyExc.Instance) obj).userAttrs.put(name, value); break dispatch; }
                         if (obj instanceof PyClass) { ((PyClass) obj).ns.put(name, value); break dispatch; }
                         if (obj instanceof PyModule) { ((PyModule) obj).ns.put(name, value); break dispatch; }
+                        if (obj instanceof PyFunction) { ((PyFunction) obj).attrsOrNew().put(name, value); break dispatch; }
+                        if (obj instanceof Closure) { ((Closure) obj).fun.attrsOrNew().put(name, value); break dispatch; }
                         throw new PyException("AttributeError", "'" + Methods.typeName(obj)
                                 + "' object has no attribute '" + name + "'");
                     }
@@ -1408,6 +1587,15 @@ public final class Vm {
                             f.push(obj);
                             break dispatch;
                         }
+                        // a function attribute that is itself callable (e.g. fib.cache_info())
+                        if (obj instanceof PyFunction || obj instanceof Closure) {
+                            PyFunction fnObj = obj instanceof Closure ? ((Closure) obj).fun : (PyFunction) obj;
+                            if (fnObj.attrs != null && fnObj.attrs.containsKey(name)) {
+                                f.setTop(fnObj.attrs.get(name));   // the attribute is the callable
+                                f.push(null);                       // no bound self
+                                break dispatch;
+                            }
+                        }
                         if (Methods.lookup(obj, name) == null) {
                             throw new PyException("AttributeError", "'" + Methods.typeName(obj)
                                     + "' object has no attribute '" + name + "'");
@@ -1448,6 +1636,12 @@ public final class Vm {
                         }
                         if (callable instanceof Methods.Ref) {
                             if (nKw != 0) throw PyException.typeError("built-in methods do not accept keyword arguments");
+                            // A generator passed to a builtin method (e.g. ",".join(x for x in xs))
+                            // must be drained here: Methods run statically and cannot drive the
+                            // interpreter, so materialise any PyGen args into lists first.
+                            for (int gi = 0; gi < pos.length; gi++) {
+                                if (pos[gi] instanceof PyGen) pos[gi] = new PyObj.PyList(materialize(pos[gi]));
+                            }
                             Methods.Impl impl = Methods.lookup(self, ((Methods.Ref) callable).name);
                             f.setTop(impl.call(self, pos));
                         } else {
@@ -1480,6 +1674,78 @@ public final class Vm {
                         int nKw = (unum >> 8) & 0xff;
                         int base = f.sp - (nPos + 2 * nKw);   // slot holding the callable
                         Object callable = f.state[base];
+                        // __import__(name, ...): dynamic import via the same multi-pass
+                        // retry mechanism as IMPORT_NAME. Runs BEFORE any stack pops so
+                        // the re-run after a module executes sees the identical call.
+                        if (callable == IMPORT_BUILTIN) {
+                            if (nKw != 0) throw PyException.typeError("__import__ does not accept keyword arguments");
+                            if (nPos < 1) throw PyException.typeError("__import__ expected at least 1 argument");
+                            Object nameArg = f.state[base + 1];
+                            if (!(nameArg instanceof String)) throw PyException.typeError("__import__() argument 1 must be str");
+                            if (nPos >= 5) {
+                                Object lvlArg = f.state[base + 5];   // 5th positional: level
+                                long lvl = lvlArg instanceof Long ? (Long) lvlArg : 0;
+                                if (lvl != 0) throw new PyException("ImportError", "__import__ supports absolute imports only (level=0)");
+                            }
+                            String target = (String) nameArg;
+                            if (target.isEmpty()) throw new PyException("ImportError", "cannot import the top-level package itself");
+                            // non-empty fromlist (4th arg) selects the leaf, like CPython
+                            boolean wantLeaf = nPos >= 4 && truthy(f.state[base + 4]);
+                            String[] tparts = target.split("\\.");
+                            String root = pickRoot(tparts);
+                            PyModule parent = null, first = null, leaf = null;
+                            boolean pushed = false;
+                            for (int i = 1; i <= tparts.length; i++) {
+                                StringBuilder db = new StringBuilder();
+                                for (int k = 0; k < i; k++) { if (k > 0) db.append('.'); db.append(tparts[k]); }
+                                String dotted = db.toString();
+                                PyModule pm = loadedModules.get(dotted);
+                                if (pm != null && pm.initializing && !inOwnImportChain(f, pm)) {
+                                    // Another coroutine is still running this module's top-level.
+                                    // Wait cooperatively: rewind to re-run this call, then yield
+                                    // the rest of this slice (instead of spinning it away) so the
+                                    // owner -- and the ops bank -- get the unused budget.
+                                    f.ip = raiseIp;
+                                    yielding = true;
+                                    break dispatch;
+                                }
+                                if (pm == null) {
+                                    Object[] hit = resolveDotted(root, dotted);
+                                    if (hit == null) {
+                                        if (i < tparts.length) {
+                                            pm = new PyModule(dotted, root, null); // synthetic package
+                                            loadedModules.put(dotted, pm);
+                                        } else {
+                                            throw new PyException("ImportError", "no module named '" + target + "'");
+                                        }
+                                    } else {
+                                        MpyModule mcode = MpyLoader.load((byte[]) hit[0], new QstrPool());
+                                        pm = new PyModule(dotted, root, mcode);
+                                        pm.initializing = true;            // until its top-level returns
+                                        loadedModules.put(dotted, pm);     // cache before executing
+                                        byCode.put(mcode, pm);
+                                        if (parent != null) parent.ns.put(tparts[i - 1], pm);
+                                        checkDepth();
+                                        Frame top = new Frame(mcode.root);
+                                        top.names = pm.ns;
+                                        top.returnOverride = pm;
+                                        top.importRetryIp = raiseIp;       // re-run this CALL after
+                                        top.caller = f;
+                                        current = top;
+                                        pushed = true;
+                                        break;
+                                    }
+                                }
+                                if (parent != null) parent.ns.put(tparts[i - 1], pm);
+                                parent = pm;
+                                if (first == null) first = pm;
+                                leaf = pm;
+                            }
+                            if (pushed) break dispatch;                    // resume via retry
+                            f.sp = base;                                   // callable slot becomes TOS
+                            f.setTop(wantLeaf ? leaf : first);             // CPython: top pkg, or leaf w/ fromlist
+                            break dispatch;
+                        }
                         // Fast path: a plain Python function with a simple signature
                         // (exactly nPos positional params, no *args/**kw/kwonly/
                         // defaults, no kwargs at the call) can take its arguments
@@ -1705,6 +1971,15 @@ public final class Vm {
                             for (int k = 0; k < i; k++) { if (k > 0) db.append('.'); db.append(tparts[k]); }
                             String dotted = db.toString();
                             PyModule pm = loadedModules.get(dotted);
+                            if (pm != null && pm.initializing && !inOwnImportChain(f, pm)) {
+                                // Another coroutine is still running this module's top-level:
+                                // rewind to re-run this import and yield the rest of the slice
+                                // (cooperative wait, not a spin). A circular import within our
+                                // own chain proceeds instead (partial visible).
+                                f.ip = raiseIp;
+                                yielding = true;
+                                break dispatch;
+                            }
                             if (pm == null) {
                                 Object[] hit = resolveDotted(root, dotted);
                                 if (hit == null) {
@@ -1717,6 +1992,7 @@ public final class Vm {
                                 } else {
                                     MpyModule code = MpyLoader.load((byte[]) hit[0], new QstrPool());
                                     pm = new PyModule(dotted, root, code);
+                                    pm.initializing = true;            // until its top-level returns
                                     loadedModules.put(dotted, pm);     // cache before executing
                                     byCode.put(code, pm);
                                     if (parent != null) parent.ns.put(tparts[i - 1], pm);
@@ -1754,6 +2030,11 @@ public final class Vm {
                         // module file, not an attribute of pkg's __init__
                         String childDotted = pm.name + "." + name;
                         PyModule child = loadedModules.get(childDotted);
+                        if (child != null && child.initializing && !inOwnImportChain(f, child)) {
+                            f.ip = raiseIp;                            // wait for the owner to finish
+                            yielding = true;                           // ... cooperatively, not spinning
+                            break dispatch;
+                        }
                         if (child == null) {
                             Object[] hit = resolveDotted(pm.root, childDotted);
                             if (hit == null) {
@@ -1761,6 +2042,7 @@ public final class Vm {
                             }
                             MpyModule code = MpyLoader.load((byte[]) hit[0], new QstrPool());
                             child = new PyModule(childDotted, pm.root, code);
+                            child.initializing = true;                 // until its top-level returns
                             loadedModules.put(childDotted, child);
                             byCode.put(code, child);
                             pm.ns.put(name, child);
@@ -1875,13 +2157,62 @@ public final class Vm {
 
             // ---- post-instruction bookkeeping ----
             remaining--;
+            shareRemaining = remaining;               // ops_share(): this slice
+            stepRemaining = stepBase - (batchStart - remaining);  // ops(): whole step
             if (current != f) {          // a call or (non-root) return switched frames
                 f = current;
                 bc = f.bc;
             }
             if (yielding) break;         // cooperative yield: stop now, keep `remaining`
         }
+        // Diagnostic: the loop stopped with budget to spare (yield / finished /
+        // task-yield), rather than exhausting `remaining`. When a debug hook is
+        // installed, hand it the reason and the current Python stack -- this is how
+        // a "stuck" machine (each step returning early, never progressing) is traced
+        // without waiting for an exception.
+        if (earlyExitHook != null && remaining > 0) {
+            String reason = finished ? "finished"
+                          : yielding ? "yielding"
+                          : taskYielded ? "taskYielded"
+                          : "other";
+            try {
+                earlyExitHook.accept(reason, liveStack());
+            } catch (Throwable ignored) {
+            }
+        }
         return remaining;
+    }
+
+    /** Installed by the embedder to observe early (budget-remaining) runLoop exits. */
+    private java.util.function.BiConsumer<String, String> earlyExitHook;
+
+    /** Install (or clear, with null) the early-exit diagnostic hook. */
+    public void setEarlyExitHook(java.util.function.BiConsumer<String, String> hook) {
+        this.earlyExitHook = hook;
+    }
+
+    /**
+     * The current Python call stack as a traceback-style string, built from the
+     * live frame chain (not an exception). Outermost frame first, same
+     * file/line/function format as {@link net.mpy.runtime.PyExc#formatTraceback}.
+     */
+    public String liveStack() {
+        java.util.List<Frame> chain = new java.util.ArrayList<>();
+        for (Frame f = current; f != null; f = f.caller) chain.add(f);
+        java.util.Collections.reverse(chain);   // outermost first
+        StringBuilder sb = new StringBuilder("Python stack (most recent call last):\n");
+        for (Frame f : chain) {
+            if (f.code == null || f.code.module == null) {
+                sb.append("  <no code>\n");
+                continue;
+            }
+            String file = String.valueOf(f.code.module.qstr(0));
+            long line = f.code.sourceLine(f.ip);
+            String func = String.valueOf(f.code.module.qstr(f.code.prelude.simpleNameQstr));
+            sb.append("  File \"").append(file).append("\", line ").append(line)
+              .append(", in ").append(func).append('\n');
+        }
+        return sb.toString();
     }
 
     // ---- call handling ------------------------------------------------------
@@ -1894,6 +2225,42 @@ public final class Vm {
     /** Marker for the VM-native builtin function singletons (len/sorted/... and
      *  BUILD_CLASS etc.) so type()/isinstance can recognize them as functions. */
     public interface NativeBuiltin {}
+
+    /** Registry of builtin singletons keyed by their stable toString() name, so the
+     *  snapshot layer can serialize any builtin generically (by name) rather than
+     *  needing a hand-maintained byte tag for each. Populated lazily from the fields
+     *  of this class the first time it is needed. */
+    private static volatile java.util.Map<String, Object> BUILTIN_BY_NAME;
+
+    private static java.util.Map<String, Object> builtinRegistry() {
+        java.util.Map<String, Object> m = BUILTIN_BY_NAME;
+        if (m != null) return m;
+        m = new java.util.HashMap<String, Object>();
+        for (java.lang.reflect.Field fld : Vm.class.getDeclaredFields()) {
+            int mod = fld.getModifiers();
+            if (!java.lang.reflect.Modifier.isStatic(mod)) continue;
+            try {
+                Object val = fld.get(null);
+                if (val instanceof NativeBuiltin) m.put(val.toString(), val);
+            } catch (IllegalAccessException ignored) {
+            }
+        }
+        BUILTIN_BY_NAME = m;
+        return m;
+    }
+
+    /** The stable name a builtin serializes under (its toString), or null if the
+     *  value isn't a registered builtin singleton. */
+    public static String builtinName(Object v) {
+        if (!(v instanceof NativeBuiltin)) return null;
+        String name = v.toString();
+        return builtinRegistry().containsKey(name) ? name : null;
+    }
+
+    /** Resolve a builtin singleton from the name written by {@link #builtinName}. */
+    public static Object builtinByName(String name) {
+        return builtinRegistry().get(name);
+    }
 
     /** Synthetic Exception.__init__(self, *args): records args on the instance. */
     public static final Object EXC_INIT = new NativeBuiltin() {
@@ -1924,6 +2291,14 @@ public final class Vm {
     };
     public static final Object MAP_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function map>"; }
+    };
+    /** __import__(name[, globals, locals, fromlist]): dynamic import. Handled inside
+     *  CALL_FUNCTION (not a HostFunction) because loading an uncached module must
+     *  run its top-level code as a real frame: the CALL pushes that frame with
+     *  importRetryIp set, the module executes, and the CALL re-runs against the
+     *  warm cache -- the same multi-pass mechanism IMPORT_NAME uses. */
+    public static final Object IMPORT_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function __import__>"; }
     };
     public static final Object FILTER_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function filter>"; }
@@ -1968,6 +2343,18 @@ public final class Vm {
     };
     public static final Object EXEC_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function exec>"; }
+    };
+    /** Like exec(src, ns), but ns is a *sandbox*: name reads not found in ns fall
+     *  through to the VM's user globals (component/computer/libs stay usable), while
+     *  writes stay in ns and functions defined in it keep ns as their scope. Mirrors
+     *  Lua's setmetatable({}, {__index=_G}). Standard exec() is unaffected. */
+    public static final Object EXEC_SANDBOX_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function exec_sandbox>"; }
+    };
+    /** eval() counterpart of exec_sandbox: evaluate an expression against a sandbox
+     *  ns (reads fall through to user globals). */
+    public static final Object EVAL_SANDBOX_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function eval_sandbox>"; }
     };
     public static final Object EVAL_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function eval>"; }
@@ -2224,6 +2611,18 @@ public final class Vm {
         if (f.execGlobals != null) return f.execGlobals;   // exec(code, ns)
         Map<String, Object> ns = f.code.module.ns;
         return ns != null ? ns : globals;
+    }
+
+    /** Whether a name absent from {@code f}'s scope may resolve against the VM
+     *  globals. A plain module frame (execGlobals == null) always falls through
+     *  (its scope IS effectively the globals). An exec/eval ns falls through only
+     *  to builtins -- standard Python semantics: the ns is the whole global space,
+     *  and only __builtins__ is implicitly available. A sandbox ns
+     *  (exec_sandbox) falls through to everything, Lua _ENV / __index=_G style. */
+    private boolean fallsThrough(Frame f, String name) {
+        if (f.execGlobals == null) return true;      // module scope: globals is the scope
+        if (f.sandboxScope) return true;             // sandbox: read-through to all globals
+        return builtinKeys != null && builtinKeys.contains(name);  // std exec: builtins only
     }
 
     /** Enforce the frame-depth limit before attaching a new frame to `current`. */
@@ -2535,7 +2934,7 @@ public final class Vm {
         // native builtin singletons (len/sorted/map/filter/dict/list/sum/...) that
         // are dispatched specially in callInto: run them via a one-off nested call
         // so they're usable as first-class callables (e.g. sorted(key=len)).
-        if (callable == LEN_BUILTIN || callable == BOOL_BUILTIN || callable == ALL_BUILTIN || callable == ANY_BUILTIN || callable == REPR_BUILTIN || callable == PRINT_BUILTIN || callable == GLOBALS_BUILTIN || callable == LOCALS_BUILTIN || callable == COMPILE_BUILTIN || callable == EXEC_BUILTIN || callable == EVAL_BUILTIN || callable == CREATE_TASK_BUILTIN || callable == RUN_BUILTIN || callable == TEST_AND_SET_BUILTIN || callable == MAKE_SLEEP_BUILTIN || callable == FINISH_DAEMON_BUILTIN || callable == SORTED_BUILTIN || callable == MAP_BUILTIN
+        if (callable == LEN_BUILTIN || callable == BOOL_BUILTIN || callable == ALL_BUILTIN || callable == ANY_BUILTIN || callable == REPR_BUILTIN || callable == PRINT_BUILTIN || callable == GLOBALS_BUILTIN || callable == LOCALS_BUILTIN || callable == COMPILE_BUILTIN || callable == EXEC_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN || callable == EVAL_BUILTIN || callable == CREATE_TASK_BUILTIN || callable == RUN_BUILTIN || callable == TEST_AND_SET_BUILTIN || callable == MAKE_SLEEP_BUILTIN || callable == FINISH_DAEMON_BUILTIN || callable == SORTED_BUILTIN || callable == MAP_BUILTIN
                 || callable == FILTER_BUILTIN || callable == DICT_BUILTIN || callable == LIST_BUILTIN
                 || callable == SUM_BUILTIN) {
             Frame sc = current; boolean sf = finished; boolean smr = mainReturned; Object sr = returnValue;
@@ -2595,6 +2994,22 @@ public final class Vm {
     /** LOAD_ATTR semantics: instance attrs, class-chain methods (bound), class
      *  namespace entries, and built-in type methods (bound). */
     private Object loadAttr(Object obj, String name) {
+        if (obj instanceof Descriptors.Property) {
+            // property.setter / property.deleter: return a decorator that attaches
+            // the given function and yields a new Property (as @x.setter does).
+            final Descriptors.Property prop = (Descriptors.Property) obj;
+            if (name.equals("setter"))
+                return (HostFunction) a -> prop.withSetter(a.length > 0 ? a[0] : null);
+            if (name.equals("deleter"))
+                return (HostFunction) a -> prop.withDeleter(a.length > 0 ? a[0] : null);
+            if (name.equals("getter"))
+                return (HostFunction) a -> new Descriptors.Property(
+                        a.length > 0 ? a[0] : null, prop.setter, prop.deleter);
+            if (name.equals("fget")) return prop.getter;
+            if (name.equals("fset")) return prop.setter == null ? PyObj.NONE : prop.setter;
+            if (name.equals("fdel")) return prop.deleter == null ? PyObj.NONE : prop.deleter;
+            throw new PyException("AttributeError", "'property' object has no attribute '" + name + "'");
+        }
         if (obj instanceof PyObj.Complex) {
             PyObj.Complex c = (PyObj.Complex) obj;
             if (name.equals("real")) return c.re;
@@ -2646,8 +3061,17 @@ public final class Vm {
         }
         if (obj instanceof PyModule) {
             Object v = ((PyModule) obj).ns.get(name);
-            if (v == null) throw new PyException("AttributeError",
-                    "module '" + ((PyModule) obj).name + "' has no attribute '" + name + "'");
+            if (v == null) {
+                // PEP 562: a module-level __getattr__ is consulted for names not
+                // found in the namespace. The arch uses this to give the component
+                // module OpenOS-style primaries (component.gpu -> primary gpu proxy).
+                Object ga = ((PyModule) obj).ns.get("__getattr__");
+                if (ga != null && !"__getattr__".equals(name)) {
+                    return callSync(ga, new Object[]{name});
+                }
+                throw new PyException("AttributeError",
+                        "module '" + ((PyModule) obj).name + "' has no attribute '" + name + "'");
+            }
             return v;
         }
         if (obj instanceof PyObj.Tuple && ((PyObj.Tuple) obj).fieldNames != null) {
@@ -2675,6 +3099,15 @@ public final class Vm {
             throw new PyException("AttributeError", "'" + e.type.name + "' object has no attribute '" + name + "'");
         }
         if (Methods.lookup(obj, name) != null) return new Methods.BoundMethod(obj, name);
+        // function attributes (func.attr, func.__name__)
+        if (obj instanceof PyFunction || obj instanceof Closure) {
+            PyFunction fn = obj instanceof Closure ? ((Closure) obj).fun : (PyFunction) obj;
+            if (fn.attrs != null && fn.attrs.containsKey(name)) return fn.attrs.get(name);
+            if (name.equals("__name__") || name.equals("__qualname__")) return fn.name();
+            if (name.equals("__module__")) return "__main__";
+            if (name.equals("__doc__")) return PyObj.NONE;
+            throw new PyException("AttributeError", "'function' object has no attribute '" + name + "'");
+        }
         throw new PyException("AttributeError", "'" + Methods.typeName(obj)
                 + "' object has no attribute '" + name + "'");
     }
@@ -2868,8 +3301,9 @@ public final class Vm {
             current.setTop(compileSource(src, fname, mode));
             return;
         }
-        if (callable == EXEC_BUILTIN || callable == EVAL_BUILTIN) {
-            boolean isEval = callable == EVAL_BUILTIN;
+        if (callable == EXEC_BUILTIN || callable == EVAL_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN) {
+            boolean isEval = callable == EVAL_BUILTIN || callable == EVAL_SANDBOX_BUILTIN;
+            boolean sandbox = callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN;
             Object arg0 = args.length > 0 ? args[0] : PyObj.NONE;
             CompiledCode code;
             if (arg0 instanceof CompiledCode) {
@@ -2888,7 +3322,7 @@ public final class Vm {
             // optional namespace: exec(code, ns) runs against ns (a dict) instead of globals
             Map<String, Object> ns = null;
             if (args.length > 1 && args[1] instanceof PyObj.PyDict) ns = dictAsGlobals((PyObj.PyDict) args[1]);
-            runCompiled(code, ns, isEval);
+            runCompiled(code, ns, isEval, sandbox);
             return;
         }
         if (callable == GLOBALS_BUILTIN) {
@@ -3087,6 +3521,7 @@ public final class Vm {
      *  Mirrors the tail of prepareFrame (cell-local wrapping) so semantics match. */
     private Frame prepareSimpleFrame(PyFunction fn, Object self, Frame src, int srcBase, int nPos) {
         Frame f = new Frame(fn.code);
+        f.execGlobals = fn.defScope; f.sandboxScope = fn.defSandbox; f.sandboxScope = fn.defSandbox;   // inherit the defining sandbox (see prepareFrame)
         int off = 0;
         if (self != null) f.setLocal(off++, self);      // bound-method receiver -> local 0
         for (int k = 0; k < nPos; k++) f.setLocal(off + k, src.state[srcBase + k]);
@@ -3117,6 +3552,10 @@ public final class Vm {
         // keyword-only args -> the next nKwonly locals, then (if declared) the
         // *args tuple and the **kwargs dict in the following locals.
         Frame f = new Frame(fn.code);
+        f.execGlobals = fn.defScope; f.sandboxScope = fn.defSandbox; f.sandboxScope = fn.defSandbox;   // Lua-style _ENV: a function defined inside a
+                                       // sandbox exec keeps that sandbox as its scope
+                                       // (reads fall through to real globals; writes
+                                       // stay local), so its module-level names resolve.
         int nPosArgs = fn.code.prelude.nPosArgs;
         int nKwonly = fn.code.prelude.nKwonlyArgs;
         int nDef = fn.code.prelude.nDefPosArgs;
@@ -3265,6 +3704,15 @@ public final class Vm {
                 current = f;
                 throw escape(exc, original);
             }
+            // Unwinding through a module top-level that raised: the import failed.
+            // Remove the half-initialized module from the cache so a later import
+            // re-attempts (and re-raises) instead of silently returning the corpse
+            // -- matching CPython's sys.modules cleanup on failed import.
+            if (f.importRetryIp >= 0 && f.returnOverride instanceof PyModule) {
+                PyModule failed = (PyModule) f.returnOverride;
+                failed.initializing = false;
+                loadedModules.remove(failed.name);
+            }
             f = f.caller;                  // propagate: discard the frame
             current = f;
             ipForTest = f.ip;              // callers compare at their resume point
@@ -3319,6 +3767,9 @@ public final class Vm {
         if (f.importRetryIp >= 0) {
             // an imported module's top finished: rewind the importer to its
             // import instruction, which re-runs against the (now warmer) cache
+            if (f.returnOverride instanceof PyModule) {
+                ((PyModule) f.returnOverride).initializing = false;   // init complete
+            }
             f.drop(1);                       // the module top's None
             Frame importer = f.caller;
             f.caller = null;

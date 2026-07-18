@@ -32,6 +32,42 @@ import java.util.List;
 public final class Pickle {
     private Pickle() {}
 
+    /**
+     * Optional guard consulted before {@code loads} allocates any array whose size
+     * comes from the (untrusted) stream: bytes/str byte buffers, tuple/list/dict/set
+     * element arrays, bigint magnitude, namedtuple fields. Given the requested size
+     * in <b>bytes</b> (element count times a per-element estimate), it returns true
+     * to allow the allocation and false to reject it. A false result makes
+     * {@code loads} raise {@code ValueError} <i>before</i> the array is created, so a
+     * malicious blob claiming a huge length can never allocate an oversized array.
+     *
+     * <p>Left null in a bare VM (no limit, original behaviour). The OpenComputers
+     * host installs one that caps a single allocation at the machine's installed RAM,
+     * so a crafted pickle can't demand a giant array. The guard is only a size gate;
+     * it does not track cumulative memory (the VM's own memory limit does that).
+     */
+    public interface AllocGuard { boolean allow(long requestedBytes); }
+    private static volatile AllocGuard allocGuard = null;
+    public static void setAllocGuard(AllocGuard g) { allocGuard = g; }
+
+    /** Per-element byte estimate for object arrays (a reference plus overhead). */
+    private static final int REF_BYTES = 16;
+
+    /** Validate a length read from the stream before allocating {@code count}
+     *  elements of {@code elemBytes} each. Rejects negatives and, when a guard is
+     *  installed, allocations larger than the guard permits. Returns the count. */
+    private static int guardLen(int count, int elemBytes) {
+        if (count < 0) throw new PyException("ValueError", "invalid pickle length: " + count);
+        AllocGuard g = allocGuard;
+        if (g != null) {
+            long bytes = (long) count * elemBytes;
+            if (!g.allow(bytes))
+                throw new PyException("ValueError",
+                        "pickle allocation of " + bytes + " bytes exceeds the memory limit");
+        }
+        return count;
+    }
+
     // private magic + protocol -1 (as unsigned byte 0xFF) so it can't collide
     // with pickle protocols 0..5 or with our snapshot format.
     private static final int MAGIC0 = 0x6D, MAGIC1 = 0x70, MAGIC2 = 0x6A;  // "mpj"
@@ -180,18 +216,23 @@ public final class Pickle {
                 case T_TRUE: return Boolean.TRUE;
                 case T_FALSE: return Boolean.FALSE;
                 case T_LONG: return in.readLong();
-                case T_BIGINT: { byte[] b = new byte[in.readInt()]; in.readFully(b); return PyObj.normInt(new BigInteger(b)); }
+                case T_BIGINT: { byte[] b = new byte[guardLen(in.readInt(), 1)]; in.readFully(b); return PyObj.normInt(new BigInteger(b)); }
                 case T_DOUBLE: return in.readDouble();
                 case T_STR: return readStr();
                 case T_COMPLEX: return new PyObj.Complex(in.readDouble(), in.readDouble());
                 case T_RANGE: return new PyObj.Range(in.readLong(), in.readLong(), in.readLong());
-                case T_REF: return objs.get(in.readInt());
+                case T_REF: {
+                    int idx = in.readInt();
+                    if (idx < 0 || idx >= objs.size())
+                        throw new PyException("ValueError", "pickle back-reference out of range: " + idx);
+                    return objs.get(idx);
+                }
                 case T_BYTES: {
-                    byte[] b = new byte[in.readInt()]; in.readFully(b);
+                    byte[] b = new byte[guardLen(in.readInt(), 1)]; in.readFully(b);
                     PyObj.Bytes o = new PyObj.Bytes(b); objs.add(o); return o;
                 }
                 case T_TUPLE: {
-                    int n = in.readInt();
+                    int n = guardLen(in.readInt(), REF_BYTES);
                     Object[] items = new Object[n];
                     PyObj.Tuple t = new PyObj.Tuple(items);
                     objs.add(t);                         // reserve id before children
@@ -200,7 +241,7 @@ public final class Pickle {
                 }
                 case T_NAMEDTUPLE: {
                     String tname = readStr();
-                    int nf = in.readInt();
+                    int nf = guardLen(in.readInt(), REF_BYTES);
                     String[] fields = new String[nf];
                     for (int i = 0; i < nf; i++) fields[i] = readStr();
                     Object[] items = new Object[nf];
@@ -212,21 +253,21 @@ public final class Pickle {
                 case T_LIST: {
                     PyObj.PyList o = new PyObj.PyList();
                     objs.add(o);
-                    int n = in.readInt();
+                    int n = guardLen(in.readInt(), REF_BYTES);
                     for (int i = 0; i < n; i++) o.items.add(read());
                     return o;
                 }
                 case T_DICT: {
                     PyObj.PyDict o = new PyObj.PyDict();
                     objs.add(o);
-                    int n = in.readInt();
+                    int n = guardLen(in.readInt(), 2 * REF_BYTES);   // key + value per entry
                     for (int i = 0; i < n; i++) { Object k = read(); Object val = read(); o.map.put(k, val); }
                     return o;
                 }
                 case T_SET: {
                     PyObj.PySet o = new PyObj.PySet();
                     objs.add(o);
-                    int n = in.readInt();
+                    int n = guardLen(in.readInt(), REF_BYTES);
                     for (int i = 0; i < n; i++) o.items.add(read());
                     return o;
                 }
@@ -235,7 +276,7 @@ public final class Pickle {
         }
 
         String readStr() throws IOException {
-            byte[] b = new byte[in.readInt()]; in.readFully(b);
+            byte[] b = new byte[guardLen(in.readInt(), 1)]; in.readFully(b);
             return new String(b, java.nio.charset.StandardCharsets.UTF_8);
         }
     }

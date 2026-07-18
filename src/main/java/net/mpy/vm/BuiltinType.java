@@ -117,6 +117,7 @@ public final class BuiltinType {
                 if (o instanceof PyObj.Bytes) return o;
                 if (o instanceof Long || o instanceof BigInteger) {   // bytes(n) -> n zero bytes
                     int n = (int) Builtins.toBig(o).longValueExact();
+                    net.mpy.runtime.Ops.checkAlloc(n, 1);
                     return new PyObj.Bytes(new byte[n]);
                 }
                 // bytes(iterable-of-ints)

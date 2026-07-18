@@ -24,6 +24,15 @@ public final class Descriptors {
 
     public static final class Property {
         public final Object getter;
-        public Property(Object getter) { this.getter = getter; }
+        public final Object setter;
+        public final Object deleter;
+        public Property(Object getter) { this(getter, null, null); }
+        public Property(Object getter, Object setter, Object deleter) {
+            this.getter = getter; this.setter = setter; this.deleter = deleter;
+        }
+        /** @x.setter decorator: returns a copy carrying the setter. */
+        public Property withSetter(Object fset) { return new Property(getter, fset, deleter); }
+        /** @x.deleter decorator: returns a copy carrying the deleter. */
+        public Property withDeleter(Object fdel) { return new Property(getter, setter, fdel); }
     }
 }

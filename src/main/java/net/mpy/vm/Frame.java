@@ -59,6 +59,11 @@ public final class Frame {
      *  target (null = the VM's globals). When set, doReturn delivers the frame's
      *  result to the caller (exec -> None already on stack; eval -> the value). */
     public java.util.Map<String, Object> execGlobals;
+    /** When execGlobals is set: false = standard exec/eval semantics (the ns is the
+     *  whole global namespace; only builtins fall through to the VM globals); true =
+     *  sandbox semantics (reads also fall through to the VM's user globals, writes
+     *  stay in the ns), used by exec_sandbox(). Ignored when execGlobals is null. */
+    public boolean sandboxScope;
     /** True for the root frame of an exec()/eval() unit, so doReturn delivers its
      *  result to the caller instead of ending the VM. */
     public boolean isExecRoot;
