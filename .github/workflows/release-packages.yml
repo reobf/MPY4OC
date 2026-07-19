@@ -5,8 +5,8 @@ name: Release latest starter and migration packages
 
 on:
   push:
-    branches: [ master, main ]
-    tags: [ '*' ]
+    branches: [ xx ]
+    tags: [ 'xx' ]
 
 jobs:
   zip-and-release-packages:
