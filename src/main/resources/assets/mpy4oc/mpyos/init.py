@@ -64,7 +64,7 @@ def main():
 
     tty.clear()
     tty.print_color("MPYOS", term.CYAN, end="")
-    tty.print(" version 0.0.50")
+    tty.print(" version 0.0.67")
     tty.print("mpyos ready.")
     tty.write("boot device: ")
     tty.print_color(str(boot_fs), term.YELLOW)

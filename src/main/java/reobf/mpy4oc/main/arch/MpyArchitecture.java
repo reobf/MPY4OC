@@ -544,11 +544,23 @@ public class MpyArchitecture implements Architecture {
             // step runs until: the slice is spent, the VM finishes, the tier call
             // limit is hit (invokeComponent requests a yield after that call), or the
             // VM yields for another reason (sleep/pullSignal/another non-direct...).
-            int slice = opsPerTick / 10;
+            // Size the window to actually DRAIN the parked calls rather than trickle
+            // them out. Measured with three tasks parked at once: a tenth of a tick
+            // cleared one per window, a quarter cleared two, a half cleared all three
+            // and still handed back ~45% of the slice. Each resume costs a re-run of
+            // the parked instruction plus the call itself, so the window has to be
+            // worth several of those.
+            //
+            // This is not extra budget: the slice is drawn from the bank and the unused
+            // part is returned, so it only moves ops to where the work is. The
+            // per-window call cap (syncCallLimit) still bounds how much main-thread
+            // time a single window can take.
+            int slice = opsPerTick / 2;
             if (slice > bankedOps) slice = bankedOps;
             if (slice < 1) slice = 1;            // always make some progress
             int[] budget = { slice };
-            vm.step(budget);
+            // Async first: this window belongs to the parked tasks, not the main frame.
+            vm.stepAsyncFirst(budget);
             int used = slice - budget[0];
             bankedOps -= used;
             if (bankedOps < 0) bankedOps = 0;

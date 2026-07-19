@@ -55,6 +55,7 @@ public final class PyFunction {
     }
 
     @Override public String toString() {
-        return "<function " + name() + ">";
+        // MicroPython prints an address; identityHashCode is our stable stand-in
+        return "<function " + name() + " at 0x" + Integer.toHexString(System.identityHashCode(this)) + ">";
     }
 }

@@ -155,7 +155,9 @@ public final class Ops {
             if (a instanceof String && isIntStrict(b)) return repeat((String) a, (int) toLong(b));
             if (isIntStrict(a) && b instanceof String) return repeat((String) b, (int) toLong(a));
             if (a instanceof PyObj.PyList && isIntStrict(b)) return repeatList((PyObj.PyList) a, (int) toLong(b));
+            if (isIntStrict(a) && b instanceof PyObj.PyList) return repeatList((PyObj.PyList) b, (int) toLong(a));
             if (a instanceof PyObj.Tuple && isIntStrict(b)) return repeatTuple((PyObj.Tuple) a, (int) toLong(b));
+            if (isIntStrict(a) && b instanceof PyObj.Tuple) return repeatTuple((PyObj.Tuple) b, (int) toLong(a));
             if (a instanceof PyObj.Bytes && isIntStrict(b)) return repeatBytes((PyObj.Bytes) a, (int) toLong(b));
             if (isIntStrict(a) && b instanceof PyObj.Bytes) return repeatBytes((PyObj.Bytes) b, (int) toLong(a));
         }
@@ -387,7 +389,52 @@ public final class Ops {
             for (Object k : ((PyObj.PyDict) container).map.keySet()) if (pyEquals(k, item)) return true;
             return false;
         }
+        if (container instanceof PyObj.Range) {
+            // O(1) arithmetic membership, as in Python
+            PyObj.Range r = (PyObj.Range) container;
+            if (!(item instanceof Long || item instanceof java.math.BigInteger || item instanceof Boolean)) {
+                if (item instanceof Double) {
+                    double d = (Double) item;
+                    if (d != Math.floor(d) || Double.isInfinite(d)) return false;
+                    long v = (long) d;
+                    return rangeHas(r, v);
+                }
+                return false;
+            }
+            return rangeHas(r, toLong(item));
+        }
+        if (container instanceof PyObj.Bytes || container instanceof PyObj.ByteArray) {
+            byte[] data = container instanceof PyObj.Bytes
+                    ? ((PyObj.Bytes) container).data : ((PyObj.ByteArray) container).toBytes();
+            if (item instanceof Long || item instanceof java.math.BigInteger || item instanceof Boolean) {
+                long v = toLong(item);
+                if (v < 0 || v > 255) throw PyException.valueError("byte must be in range(0, 256)");
+                for (byte b : data) if ((b & 0xff) == v) return true;
+                return false;
+            }
+            byte[] sub = item instanceof PyObj.Bytes ? ((PyObj.Bytes) item).data
+                    : item instanceof PyObj.ByteArray ? ((PyObj.ByteArray) item).toBytes() : null;
+            if (sub != null) {
+                if (sub.length == 0) return true;
+                outer:
+                for (int i = 0; i + sub.length <= data.length; i++) {
+                    for (int j = 0; j < sub.length; j++) if (data[i + j] != sub[j]) continue outer;
+                    return true;
+                }
+                return false;
+            }
+        }
         throw PyException.typeError("argument of type is not iterable");
+    }
+
+    private static boolean rangeHas(PyObj.Range r, long v) {
+        if (r.step > 0) {
+            if (v < r.start || v >= r.stop) return false;
+            return (v - r.start) % r.step == 0;
+        } else {
+            if (v > r.start || v <= r.stop) return false;
+            return (r.start - v) % (-r.step) == 0;
+        }
     }
 
     // ---- subscripting -------------------------------------------------------

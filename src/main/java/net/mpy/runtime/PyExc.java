@@ -42,18 +42,31 @@ public final class PyExc {
 
     /** MicroPython-format traceback text (including the final "Type: msg" line). */
     public static String formatTraceback(Instance exc) {
+        return formatTraceback(exc, null);
+    }
+
+    /** As {@link #formatTraceback(Instance)}, optionally dropping frames whose
+     *  function name equals {@code skipName} (used to hide the Python-level thread
+     *  entry wrapper, which MicroPython's C-level entry never shows). */
+    public static String formatTraceback(Instance exc, String skipName) {
         StringBuilder sb = new StringBuilder();
-        if (!exc.traceback.isEmpty()) {
+        java.util.List<Object[]> tb = new java.util.ArrayList<>();
+        for (Object[] e : exc.traceback) {
+            if (skipName != null && skipName.equals(e[2])) continue;
+            tb.add(e);
+        }
+        if (!tb.isEmpty()) {
             sb.append("Traceback (most recent call last):\n");
-            for (int i = exc.traceback.size() - 1; i >= 0; i--) {   // outermost first
-                Object[] e = exc.traceback.get(i);
+            for (int i = tb.size() - 1; i >= 0; i--) {   // outermost first
+                Object[] e = tb.get(i);
                 sb.append("  File \"").append(e[0]).append("\", line ").append(e[1])
                   .append(", in ").append(e[2]).append('\n');
             }
         }
         String s = str(exc);
-        sb.append(exc.type.name);
-        if (!s.isEmpty()) sb.append(": ").append(s);
+        // MicroPython always prints the colon: bare `raise ValueError` shows
+        // "ValueError: " (trailing space), and tests compare against exactly that.
+        sb.append(exc.type.name).append(": ").append(s);
         return sb.toString();
     }
 

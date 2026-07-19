@@ -173,6 +173,14 @@ public final class StdLib {
                 return new PyObj.Tuple(vals.clone(), fields, tname);
             };
         });
+        globals.putIfAbsent("__thread_print_exc", (HostFunction) a -> {
+            // unhandled-exception report for _thread: hide the Python-level
+            // runner wrapper frame (MicroPython's C thread entry is invisible)
+            if (a[0] instanceof PyExc.Instance)
+                System.out.println(PyExc.formatTraceback((PyExc.Instance) a[0], "_runner"));
+            else System.out.println(net.mpy.vm.Builtins.str(a[0]));
+            return PyObj.NONE;
+        });
         globals.putIfAbsent("__sys_print_exc", (HostFunction) a -> {
             if (a[0] instanceof PyExc.Instance) System.out.println(PyExc.formatTraceback((PyExc.Instance) a[0]));
             else System.out.println(net.mpy.vm.Builtins.str(a[0]));

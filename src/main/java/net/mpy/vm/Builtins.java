@@ -68,6 +68,26 @@ public final class Builtins {
             long nd = a[1] instanceof Long ? (Long) a[1] : ((Boolean) a[1] ? 1 : 0);
             if (a[0] instanceof Long || a[0] instanceof java.math.BigInteger || a[0] instanceof Boolean) {
                 if (nd >= 0) return a[0];   // rounding an int to >=0 digits is a no-op
+                // round(int, negative) stays in INTEGER arithmetic (mp_builtin_round):
+                // scale by 10^-nd, then compare the remainder against half the scale,
+                // breaking ties to even. Going through a double instead -- which is what
+                // this used to do -- both returns a float where Python returns an int
+                // and loses precision once the value exceeds 2^53.
+                java.math.BigInteger v = a[0] instanceof java.math.BigInteger
+                        ? (java.math.BigInteger) a[0]
+                        : java.math.BigInteger.valueOf(a[0] instanceof Boolean
+                                ? ((Boolean) a[0] ? 1 : 0) : (Long) a[0]);
+                if (-nd > 1000) return PyObj.normInt(java.math.BigInteger.ZERO);
+                java.math.BigInteger mult = java.math.BigInteger.TEN.pow((int) -nd);
+                java.math.BigInteger half = mult.divide(java.math.BigInteger.valueOf(2));
+                // floorMod/floorDiv semantics: Python's % and // round toward -inf
+                java.math.BigInteger modulo = v.mod(mult);          // always >= 0
+                java.math.BigInteger rounded = v.subtract(modulo);
+                int cmp = half.compareTo(modulo);
+                if (cmp > 0) return PyObj.normInt(rounded);
+                if (cmp < 0) return PyObj.normInt(rounded.add(mult));
+                java.math.BigInteger floor = v.subtract(modulo).divide(mult);
+                return PyObj.normInt(floor.testBit(0) ? rounded.add(mult) : rounded);
             }
             // MicroPython: nearbyint(val * 10^n) / 10^n, i.e. round-half-to-even
             // on the scaled float - pure float arithmetic (Math.rint == nearbyint
@@ -106,32 +126,7 @@ public final class Builtins {
         // bytearray(): mutable byte sequence. Forms: bytearray(), bytearray(n) -> n
         // zero bytes, bytearray(bytes/bytearray) -> copy, bytearray(iterable-of-ints),
         // bytearray("text", "utf-8") -> encoded.
-        globals.putIfAbsent("bytearray", (HostFunction) a -> {
-            if (a.length == 0) return new PyObj.ByteArray(0);
-            Object x = a[0];
-            if (x instanceof Long || x instanceof BigInteger || x instanceof Boolean) {
-                int n = (int) longOf(x);
-                if (n < 0) throw PyException.valueError("negative count");
-                net.mpy.runtime.Ops.checkAlloc(n, 1);
-                return new PyObj.ByteArray(new byte[n]);
-            }
-            if (x instanceof PyObj.Bytes) return new PyObj.ByteArray(((PyObj.Bytes) x).data.clone());
-            if (x instanceof PyObj.ByteArray) return new PyObj.ByteArray(((PyObj.ByteArray) x).toBytes());
-            if (x instanceof String) {
-                // bytearray("text", encoding); default utf-8
-                java.nio.charset.Charset cs = java.nio.charset.StandardCharsets.UTF_8;
-                return new PyObj.ByteArray(((String) x).getBytes(cs));
-            }
-            // iterable of ints
-            java.util.List<Object> items = toList(x);
-            byte[] buf = new byte[items.size()];
-            for (int i = 0; i < buf.length; i++) {
-                long v = longOf(items.get(i));
-                if (v < 0 || v > 255) throw PyException.valueError("byte must be in range(0, 256)");
-                buf[i] = (byte) v;
-            }
-            return new PyObj.ByteArray(buf);
-        });
+        globals.putIfAbsent("bytearray", Vm.BYTEARRAY_BUILTIN);
         globals.putIfAbsent("complex", BuiltinType.COMPLEX);
         globals.putIfAbsent("globals", Vm.GLOBALS_BUILTIN);
         globals.putIfAbsent("locals", Vm.LOCALS_BUILTIN);
@@ -144,6 +139,12 @@ public final class Builtins {
         globals.putIfAbsent("__jasyncio_run", Vm.RUN_BUILTIN);
         globals.putIfAbsent("__thread_test_and_set", Vm.TEST_AND_SET_BUILTIN);
         globals.putIfAbsent("__jasyncio_make_sleep", Vm.MAKE_SLEEP_BUILTIN);
+        globals.putIfAbsent("__jasyncio_wake", Vm.WAKE_BUILTIN);
+        globals.putIfAbsent("__jasyncio_in_task", Vm.IN_TASK_BUILTIN);
+        globals.putIfAbsent("__jasyncio_current_coro", Vm.CURRENT_CORO_BUILTIN);
+        globals.putIfAbsent("__jasyncio_sleep_ms", Vm.SLEEP_MS_OF_BUILTIN);
+        globals.putIfAbsent("__machine_disable_irq", Vm.DISABLE_IRQ_BUILTIN);
+        globals.putIfAbsent("__machine_enable_irq", Vm.ENABLE_IRQ_BUILTIN);
         globals.putIfAbsent("finishDaemonOnExit", Vm.FINISH_DAEMON_BUILTIN);
         globals.putIfAbsent("dict", BuiltinType.DICT);
         globals.putIfAbsent("sorted", Vm.SORTED_BUILTIN);

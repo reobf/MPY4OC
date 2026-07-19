@@ -95,6 +95,19 @@ public final class Vm {
      *  While non-null, step() drives only async; once the task settles, its result
      *  is delivered to the main frame's TOS (or its exception raised) and this clears. */
     private AsyncTask mainWaitingTask;
+
+    /**
+     * While driveTask is running a coroutine, its outermost frame. Transient (never
+     * snapshotted): it only marks the unwind boundary for the duration of one drive.
+     *
+     * An exception escaping a task must NOT keep unwinding into whatever frame
+     * happened to be current when the scheduler started it -- that is the suspended
+     * main frame, whose except clauses would then run from inside the scheduler and
+     * whose stack step() would afterwards corrupt by delivering the same error twice.
+     * The task is a self-contained unit: its error belongs to the AsyncTask, and
+     * step() hands it to the awaiting frame later, in the normal way.
+     */
+    private Frame asyncTaskRoot;
     /** When on, the VM does not report finished at main-frame exit while async tasks
      *  remain — it keeps running them to completion (all step budget going to async).
      *  Off by default: at main exit the VM finishes and pending tasks are abandoned.
@@ -314,6 +327,11 @@ public final class Vm {
     public void drainAsync(int[] ops) { driveAsync(ops); }
 
     private void driveAsync(int[] ops) {
+        // safety: a task that finished (or died) while holding the IRQ lock must
+        // not freeze the machine forever -- release on its behalf.
+        if (irqDepth > 0 && irqHolder instanceof AsyncTask && ((AsyncTask) irqHolder).done) {
+            irqDepth = 0; irqHolder = null;
+        }
         // clear per-call blacklist
         for (AsyncTask t : asyncTasks) t.blacklistedThisRound = false;
         int budget = ops[0];
@@ -339,18 +357,56 @@ public final class Vm {
             // runnable = not done, not blacklisted this call, not currently sleeping
             java.util.List<AsyncTask> runnable = new java.util.ArrayList<>();
             for (AsyncTask t : asyncTasks)
-                if (!t.done && !t.blacklistedThisRound && t.sleepRemainingMs <= 0) runnable.add(t);
+                if (!t.done && !t.blacklistedThisRound && t.sleepRemainingMs <= 0
+                        && (irqDepth == 0 || irqHolder == t)) runnable.add(t);
             if (runnable.isEmpty()) break;
 
-            int n = runnable.size();
-            int slice = budget / n;
-            if (slice <= 0) slice = 1;          // ensure forward progress with tiny budgets
+            // A task that has never run goes first. asyncio starts a freshly created
+            // task at the creator's very next suspension point, so `create_task(t);
+            // await sleep(0)` already ran t's first chunk -- putting new tasks at the
+            // back of the round instead delayed them a full round.
+            for (int i = 0; i < runnable.size(); i++) {
+                AsyncTask t = runnable.get(i);
+                if (!t.coro.started) {
+                    runnable.remove(i);
+                    runnable.add(0, t);
+                    break;
+                }
+            }
+            // A task that stopped anywhere OTHER than a cooperative yield (the ops
+            // budget ran out mid-statement, or a host call intervened) is sitting on
+            // half-applied state. Resume it before anything else, so no other
+            // coroutine can ever observe it part-way through -- that atomicity is the
+            // whole point of cooperative scheduling, and slicing the budget between
+            // tasks used to break it.
+            for (int i = 0; i < runnable.size(); i++) {
+                AsyncTask t = runnable.get(i);
+                if (!t.atYieldPoint && t.suspendedFrame != null) {
+                    runnable.remove(i);
+                    runnable.add(0, t);
+                    break;
+                }
+            }
 
             int consumedThisRound = 0;
             for (AsyncTask t : runnable) {
                 if (budget <= 0) break;
-                int give = Math.min(slice, budget);
-                int used = driveTask(t, give);   // returns ops actually consumed
+                // NOTE (0.0.65): the whole-pool freeze that used to live here
+                // (someTaskParkedMidExecution -> break) is GONE. Coroutine atomicity
+                // is now structural: a run()'s coroutines are driven by their group's
+                // scheduler, which is ONE task in this pool -- when it is parked
+                // mid-member, its other members simply never run. The tasks that DO
+                // run alongside a parked task are threads and other groups, which are
+                // exactly the ones allowed to interleave. A parked task that gets
+                // re-driven before its synchronized call simply re-parks on the same
+                // rewound instruction (idempotent), as before.
+                // Hand over the WHOLE remaining budget, not a 1/n slice: a coroutine
+                // then runs until it yields of its own accord, and the next task only
+                // starts once the previous one is at a safe point. Whatever it does
+                // not use rolls on to the next task in this same round, so a tick's
+                // budget is still shared -- just at yield boundaries instead of
+                // arbitrary instruction counts.
+                int used = driveTask(t, budget);   // returns ops actually consumed
                 budget -= used;
                 consumedThisRound += used;
             }
@@ -388,6 +444,9 @@ public final class Vm {
         //    real operand via setTop and corrupt the stack.
         boolean freshOrYielded = !t.coro.started || t.atYieldPoint;
         int leftover = give;
+        Frame savedTaskRoot = asyncTaskRoot;
+        asyncTaskRoot = t.coro.frame;      // unwind boundary for this drive
+        try {
         try {
             if (freshOrYielded) {
                 resumeGen(t.coro, PyGen.MODE_CALL, 0, PyObj.NONE);
@@ -456,6 +515,10 @@ public final class Vm {
             t.suspendedFrame = deepestAtStop;
         }
         return Math.max(1, consumed);
+        } finally {
+            // every exit path restores it: a task's boundary must not outlive its drive
+            asyncTaskRoot = savedTaskRoot;
+        }
     }
 
     private void restoreTop(Frame c, boolean fin, boolean y, Object ret, AsyncTask dt) {
@@ -963,6 +1026,28 @@ public final class Vm {
      * <p>{@code remops[0]} is updated in place to the number of instructions left
      * over ({@code > 0} if everything runnable finished early, else {@code 0}).
      */
+    /**
+     * Whether this step should hand the async tasks the whole budget before the main
+     * frame gets any. Set for the synchronized window: that window exists precisely to
+     * service calls that parked, so splitting it 2/3 in favour of the main frame
+     * starves the very tasks it was opened for.
+     */
+    private boolean asyncFirstThisStep;
+
+    /**
+     * A step that services parked async work first. The host uses this for the
+     * synchronized window: parked tasks get the whole slice, and whatever they do not
+     * use rolls on to the main frame as usual.
+     */
+    public void stepAsyncFirst(int[] remops) {
+        asyncFirstThisStep = true;
+        try {
+            step(remops);
+        } finally {
+            asyncFirstThisStep = false;
+        }
+    }
+
     public void step(int[] remops) {
         try {
             stepImpl(remops);
@@ -1031,13 +1116,55 @@ public final class Vm {
             return;
         }
 
-        // async first with a third of the budget; its unused remainder rolls into main
-        int asyncShare = budget / 3;
+        // IRQs disabled: only the holder runs. A task holder gets the whole budget
+        // through driveAsync (the main frame is fenced out); a main-frame holder
+        // runs alone (driveAsync skipped entirely -- timers freeze, as they should
+        // while interrupts are off).
+        if (irqDepth > 0) {
+            if (irqHolder == MAIN_IRQ_HOLDER) {
+                remops[0] = runLoop(budget);
+            } else {
+                int[] a = { budget };
+                driveAsync(a);
+                remops[0] = a[0];
+            }
+            return;
+        }
+
+        // Budget split (0.0.66): the main frame is ONE SEAT in the pool, no longer
+        // privileged. With n runnable tasks the budget is divided into n+1 equal
+        // seats -- one per task, one for the main frame -- so the main "thread"
+        // competes fairly instead of taking a flat two thirds. Sleeping tasks hold
+        // no seat (they would spend nothing and their share would just bank), and
+        // with no runnable task the main frame takes everything, as before.
+        // In a synchronized window (asyncFirstThisStep) async still gets ALL of it:
+        // that window was opened to run a call that parked, so the parked tasks
+        // must come first. Whatever async leaves unused falls to the main frame.
+        int runnableSeats = 0;
+        for (AsyncTask t : asyncTasks)
+            if (!t.done && t.sleepRemainingMs <= 0) runnableSeats++;
+        int asyncShare;
+        if (asyncFirstThisStep) {
+            asyncShare = budget;
+        } else if (runnableSeats == 0) {
+            // every task is sleeping: driveAsync must still run (it is what advances
+            // and expires the sleep timers), and sleepers spend nothing anyway --
+            // hand it the whole budget and let the remainder fall to the main frame.
+            asyncShare = budget;
+        } else {
+            asyncShare = budget - budget / (runnableSeats + 1);
+        }
         int mainShare = budget - asyncShare;
         if (asyncShare > 0) {
             int[] a = { asyncShare };
             driveAsync(a);
             mainShare += a[0];        // hand async's leftover to the main frame
+        }
+        // A task may have taken the IRQ lock DURING driveAsync: the main frame
+        // must not run for the rest of this step (its unused share banks).
+        if (irqDepth > 0 && irqHolder != MAIN_IRQ_HOLDER) {
+            remops[0] = mainShare;
+            return;
         }
         remops[0] = runLoop(mainShare);
     }
@@ -1100,6 +1227,13 @@ public final class Vm {
         HostPause() { super(null, null, false, false); }
     }
     private static final HostPause HOST_PAUSE = new HostPause();
+
+    /** The builtin methods whose argument is an iterable they consume. Only these
+     *  may materialise a generator argument (see CALL_METHOD); all other methods
+     *  take the generator itself, as an ordinary object. */
+    private static final java.util.Set<String> ITERABLE_ARG_METHODS =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "extend", "join", "update", "union", "intersection", "difference"));
 
     /**
      * Whether the most recent batch stopped because the script yielded (rather than
@@ -1635,6 +1769,21 @@ public final class Vm {
                             }
                         }
                         f.sp = base; // result lands in the method slot
+                        if (callable instanceof Methods.Ref && nKw != 0 && self instanceof PyObj.PyList
+                                && ((Methods.Ref) callable).name.equals("sort")) {
+                            // list.sort(key=..., reverse=...): the key function is Python,
+                            // so this must run in the VM (Methods are static) -- same
+                            // decorate-sort-undecorate as sorted().
+                            Object skey = null; boolean srev = false;
+                            for (int k = 0; k < nKw; k++) {
+                                if ("key".equals(kwN[k])) skey = kwV[k];
+                                else if ("reverse".equals(kwN[k])) srev = Ops.isTrue(kwV[k]);
+                                else throw PyException.typeError("sort() got an unexpected keyword argument '" + kwN[k] + "'");
+                            }
+                            sortInPlace(((PyObj.PyList) self).items, skey, srev);
+                            f.setTop(PyObj.NONE);
+                            break dispatch;
+                        }
                         if (callable instanceof Methods.Ref && self instanceof PyGen) {
                             String mname = ((Methods.Ref) callable).name;
                             if (mname.equals("send")) {
@@ -1642,15 +1791,64 @@ public final class Vm {
                                 resumeGen((PyGen) self, PyGen.MODE_CALL, 0, pos[0]);
                                 break dispatch;
                             }
+                            if (mname.equals("throw") || mname.equals("close")) {
+                                // gen.throw(exc) / gen.close(): resume the generator by
+                                // RAISING at its suspension point rather than delivering a
+                                // value there. This is what makes cooperative cancellation
+                                // possible -- a task's CancelledError has to surface inside
+                                // the coroutine, where its own except/finally can see it.
+                                PyGen g = (PyGen) self;
+                                boolean isClose = mname.equals("close");
+                                if (g.done || !g.started) {
+                                    // never started or already finished: close() is a no-op,
+                                    // throw() raises in the caller (as in CPython).
+                                    g.done = true;
+                                    if (isClose) { f.setTop(PyObj.NONE); break dispatch; }
+                                    current = f;
+                                    raiseIp = f.ip;
+                                    raiseInto(coerceToExc(nPos > 0 ? pos[0] : null), null);
+                                    break dispatch;
+                                }
+                                PyExc.Instance exc = isClose
+                                        ? PyExc.from(new PyException("GeneratorExit", "GeneratorExit"))
+                                        : coerceToExc(nPos > 0 ? pos[0] : null);
+                                if (isClose) {
+                                    // close() runs the generator's finally blocks and then
+                                    // SWALLOWS the GeneratorExit -- it returns None rather
+                                    // than propagating, unlike throw().
+                                    Frame callerF = f;
+                                    try {
+                                        genThrowInto(g, exc, true);
+                                    } catch (PyException pe) {
+                                        if (!"GeneratorExit".equals(pe.pyType)) throw pe;
+                                    }
+                                    g.done = true;
+                                    current = callerF;
+                                    callerF.setTop(PyObj.NONE);
+                                    break dispatch;
+                                }
+                                genThrowInto(g, exc, false);
+                                break dispatch;
+                            }
                             throw new PyException("AttributeError", "'generator' object has no attribute '" + mname + "'");
                         }
                         if (callable instanceof Methods.Ref) {
                             if (nKw != 0) throw PyException.typeError("built-in methods do not accept keyword arguments");
-                            // A generator passed to a builtin method (e.g. ",".join(x for x in xs))
-                            // must be drained here: Methods run statically and cannot drive the
-                            // interpreter, so materialise any PyGen args into lists first.
-                            for (int gi = 0; gi < pos.length; gi++) {
-                                if (pos[gi] instanceof PyGen) pos[gi] = new PyObj.PyList(materialize(pos[gi]));
+                            // A generator passed to a builtin method that CONSUMES an iterable
+                            // (",".join(x for x in xs), lst.extend(g), s.update(g), ...) must be
+                            // drained here: Methods run statically and cannot drive the
+                            // interpreter, so materialise those PyGen args into lists first.
+                            // Every OTHER method must receive the generator AS AN OBJECT --
+                            // lst.append(g) stores it, lst.remove(g)/index(g)/count(g) compare
+                            // by identity, exactly as Python does. Draining unconditionally
+                            // destroyed generators kept as data (e.g. a Python-level scheduler
+                            // holding its coroutines in a list: append() ran the coroutine on
+                            // the spot and remove() threw ValueError because the drained list
+                            // never matched the stored generator).
+                            if (ITERABLE_ARG_METHODS.contains(((Methods.Ref) callable).name)) {
+                                for (int gi = 0; gi < pos.length; gi++) {
+                                    if (pos[gi] instanceof PyGen) pos[gi] = new PyObj.PyList(materialize(pos[gi]));
+                                }
                             }
                             Methods.Impl impl = Methods.lookup(self, ((Methods.Ref) callable).name);
                             f.setTop(impl.call(self, pos));
@@ -2393,11 +2591,61 @@ public final class Vm {
     public static final Object MAKE_SLEEP_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _make_sleep>"; }
     };
+    /** jasyncio bridge: clear a pending sleep so a task becomes runnable at once.
+     *  Task.cancel() needs it -- a coroutine parked in `await sleep(1)` is held out of
+     *  the runnable set until the timer expires, so it would not look at the
+     *  cancellation flag for a whole second. Cancelling should be prompt. */
+    public static final Object WAKE_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _wake>"; }
+    };
     /** jasyncio bridge: turn on daemon-finish mode — after the main frame returns,
      *  keep running async tasks to completion instead of finishing immediately. */
     public static final Object FINISH_DAEMON_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function finishDaemonOnExit>"; }
     };
+    /** jasyncio bridge: True when the caller is running inside a scheduled task
+     *  (drivingTask != null) rather than on the main frame. run() uses it to pick
+     *  between blocking the main frame (mainWaitingTask) and waiting cooperatively. */
+    public static final Object IN_TASK_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _in_task>"; }
+    };
+    /** jasyncio bridge: the root coroutine of the pool task we are running inside
+     *  (None on the main frame). run() compares it against the live group-scheduler
+     *  generators to decide "am I inside a coroutine?" -- a GLOBAL flag cannot answer
+     *  that, because another task suspended mid-coroutine leaves its marks visible
+     *  to everyone (which mis-flagged threads calling run() while a run was live). */
+    public static final Object CURRENT_CORO_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _current_coro>"; }
+    };
+    /** jasyncio bridge: the milliseconds of a SleepRequest, or None for any other
+     *  value. The Python-level group scheduler uses it to recognise a sleep yielded
+     *  by one of its member coroutines (the SleepRequest object itself is opaque to
+     *  Python). Stateless — no snapshot impact. */
+    public static final Object SLEEP_MS_OF_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _sleep_ms_of>"; }
+    };
+    /** bytearray() as a VM-dispatched builtin, so a generator argument can be
+     *  materialised (a static HostFunction cannot drive the interpreter). */
+    public static final Object BYTEARRAY_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function bytearray>"; }
+    };
+    /** machine.disable_irq(): a cooperative global critical section. In this VM
+     *  "interrupts" are the scheduler itself, and the scheduler is ours -- so the
+     *  honest implementation is exact: while IRQs are disabled, no task other
+     *  than the holder runs, and the main frame runs only if IT is the holder.
+     *  Returns the previous depth as the state token; enable_irq(state) restores
+     *  it. NOT serialised in snapshots: a save taken mid-critical-section resumes
+     *  with IRQs enabled (a tick-boundary save can only interrupt a section that
+     *  was split by budget exhaustion -- rare, and documented). */
+    public static final Object DISABLE_IRQ_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function disable_irq>"; }
+    };
+    public static final Object ENABLE_IRQ_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function enable_irq>"; }
+    };
+    private int irqDepth = 0;
+    private Object irqHolder = null;              // AsyncTask, or MAIN_IRQ_HOLDER
+    private static final Object MAIN_IRQ_HOLDER = new Object();
 
     /** Synchronously exhaust a generator into a list by running its frame as the
      *  root of nested mini-executions (one per yield). Used by list(gen). */
@@ -2526,6 +2774,87 @@ public final class Vm {
 
     /** Resume a generator: attach its frame to the current one and continue there.
      *  mode says where yields/returns deliver; exhaustIp is FOR_ITER's jump target. */
+    /** Turn a thrown value (class or instance) into an exception instance. */
+    private PyExc.Instance coerceToExc(Object v) {
+        if (v == null) return PyExc.from(new PyException("RuntimeError", "throw() requires an exception"));
+        return toExcInstance(v);   // one place decides what counts as raisable
+    }
+
+    /**
+     * Resume {@code g} by raising {@code exc} at the point it is suspended, so the
+     * generator's own try/except/finally around the yield gets a chance to run.
+     * Mirrors CPython's gen.throw()/gen.close().
+     */
+    /**
+     * The innermost generator {@code g} is suspended in, following the yield-from /
+     * await delegation chain.
+     *
+     * <p>A coroutine parked on {@code await inner()} is not stopped in its own frame:
+     * it is stopped on a YIELD_FROM whose delegate (the generator being awaited) sits
+     * at the top of its stack, and that one may in turn be delegating further down.
+     * CPython's gen.throw() walks to the bottom of that chain and raises there, so the
+     * innermost frame's except/finally runs first and the exception then propagates
+     * back up through each awaiting frame. Raising at the outermost frame instead --
+     * which is what we used to do -- skips every intermediate handler, so a coroutine
+     * sitting in `await sleep()` never saw its own CancelledError.
+     */
+    private PyGen innermostSuspended(PyGen g) {
+        PyGen cur = g;
+        // Re-link each delegating frame as we descend. While suspended, a generator's
+        // caller link is cleared (it is not on any call stack), so an exception raised
+        // deep in the chain would have nowhere to unwind to. Restoring the links makes
+        // the chain a real call stack again, so an unhandled exception walks back out
+        // through every awaiting frame -- inner first, then its awaiter, and so on.
+        // Bounded walk: a delegation chain is finite, and the guard also stops a
+        // pathological self-referencing stack from spinning.
+        for (int depth = 0; depth < 256; depth++) {
+            Frame f = cur.frame;
+            if (f == null || cur.done || !cur.started) return cur;
+            // A frame suspended in `yield from` / `await` is parked WITH ip pointing at
+            // the YIELD_FROM opcode itself (it re-executes on resume), and its stack is
+            // (..., delegate, send_value) -- so the delegate is one below the top.
+            if (f.ip < 0 || f.ip >= f.bc.length) return cur;
+            if ((f.bc[f.ip] & 0xff) != Opcodes.YIELD_FROM) return cur;
+            Object delegate = f.sp >= 1 ? f.peek(1) : null;
+            if (!(delegate instanceof PyGen)) return cur;
+            PyGen sub = (PyGen) delegate;
+            if (sub.done || !sub.started || sub.frame == null) return cur;
+            sub.frame.caller = f;                 // inner unwinds back into its awaiter
+            sub.resumeMode = PyGen.MODE_YIELD_FROM;
+            // Match the shape the normal resume path leaves behind, or deliverYield
+            // will corrupt this frame when the inner generator hands a value back:
+            //   ip PAST the YIELD_FROM   (deliverYield does `ip -= 1` to re-run it)
+            //   stack = (..., delegate)  (the send_value was popped on the way in)
+            f.ip += 1;
+            f.pop();
+            cur = sub;
+        }
+        return cur;
+    }
+
+    private void genThrowInto(PyGen g, PyExc.Instance exc, boolean isClose) {
+        PyGen target = innermostSuspended(g);   // deliver where execution actually is
+        Frame gf = target.frame;
+        // Only the OUTERMOST generator is being resumed by us; the ones below it are
+        // resumed by their awaiter, so their MODE_YIELD_FROM (set while descending)
+        // must survive -- that is what tells raiseInto to hand the value/exception
+        // back through the awaiting YIELD_FROM rather than treating it as a call.
+        // The outermost generator is the one WE are resuming, so it links back to us
+        // and resumes as a plain call. Any generators below it were re-linked to their
+        // awaiter while descending, and must keep MODE_YIELD_FROM so a value or
+        // exception travels back out through the awaiting YIELD_FROM.
+        g.frame.caller = current;
+        if (target == g) g.resumeMode = PyGen.MODE_CALL;
+        current = gf;
+        // Raise right here, at the generator's own suspension point: raiseInto walks
+        // this frame's handler table first, so a try/except/finally wrapped around the
+        // yield sees the exception exactly as CPython's gen.throw() delivers it. If the
+        // generator does not handle it, raiseInto keeps unwinding into our frame and the
+        // caller sees it -- again matching CPython.
+        raiseIp = gf.ip;
+        raiseInto(exc, null);
+    }
+
     private void resumeGen(PyGen gen, int mode, int exhaustIp, Object sendValue) {
         gen.resumeMode = mode;
         gen.forIterExhaustIp = exhaustIp;
@@ -2603,6 +2932,28 @@ public final class Vm {
             raiseIp = current.ip;
             raiseInto(PyExc.STOP_ITERATION.make(a), null);
         }
+    }
+
+    /** Sort `items` in place; a Python key function runs via callSync.
+     *  Decorate-sort-undecorate, dunder-aware comparison (shared by sorted()
+     *  and list.sort(key=...)). */
+    private void sortInPlace(java.util.List<Object> items, Object key, boolean reverse) {
+        final Object keyFn = (key == null || key == PyObj.NONE) ? null : key;
+        java.util.List<Object[]> deco = new java.util.ArrayList<>(items.size());
+        for (Object it : items) deco.add(new Object[]{keyFn == null ? it : callSync(keyFn, new Object[]{it}), it});
+        deco.sort((x, y) -> {
+            // dunder-aware: a < b via __lt__ when present, else structural
+            if (x[0] instanceof PyInstance || y[0] instanceof PyInstance) {
+                Object lt = binaryOpDispatch(Ops.LESS, x[0], y[0]);
+                if (truthy(lt)) return -1;
+                Object gt = binaryOpDispatch(Ops.LESS, y[0], x[0]);
+                return truthy(gt) ? 1 : 0;
+            }
+            return Ops.compare(x[0], y[0]);
+        });
+        if (reverse) java.util.Collections.reverse(deco);
+        items.clear();
+        for (Object[] d : deco) items.add(d[1]);
     }
 
     /** Build an argless frame for a PyFunction or Closure (class bodies). */
@@ -2944,7 +3295,7 @@ public final class Vm {
         // native builtin singletons (len/sorted/map/filter/dict/list/sum/...) that
         // are dispatched specially in callInto: run them via a one-off nested call
         // so they're usable as first-class callables (e.g. sorted(key=len)).
-        if (callable == LEN_BUILTIN || callable == BOOL_BUILTIN || callable == ALL_BUILTIN || callable == ANY_BUILTIN || callable == REPR_BUILTIN || callable == PRINT_BUILTIN || callable == GLOBALS_BUILTIN || callable == LOCALS_BUILTIN || callable == COMPILE_BUILTIN || callable == EXEC_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN || callable == EVAL_BUILTIN || callable == CREATE_TASK_BUILTIN || callable == RUN_BUILTIN || callable == TEST_AND_SET_BUILTIN || callable == MAKE_SLEEP_BUILTIN || callable == FINISH_DAEMON_BUILTIN || callable == SORTED_BUILTIN || callable == MAP_BUILTIN
+        if (callable == LEN_BUILTIN || callable == BOOL_BUILTIN || callable == ALL_BUILTIN || callable == ANY_BUILTIN || callable == REPR_BUILTIN || callable == PRINT_BUILTIN || callable == GLOBALS_BUILTIN || callable == LOCALS_BUILTIN || callable == COMPILE_BUILTIN || callable == EXEC_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN || callable == EVAL_BUILTIN || callable == CREATE_TASK_BUILTIN || callable == RUN_BUILTIN || callable == TEST_AND_SET_BUILTIN || callable == MAKE_SLEEP_BUILTIN || callable == WAKE_BUILTIN || callable == IN_TASK_BUILTIN || callable == CURRENT_CORO_BUILTIN || callable == SLEEP_MS_OF_BUILTIN || callable == BYTEARRAY_BUILTIN || callable == DISABLE_IRQ_BUILTIN || callable == ENABLE_IRQ_BUILTIN || callable == FINISH_DAEMON_BUILTIN || callable == SORTED_BUILTIN || callable == MAP_BUILTIN
                 || callable == FILTER_BUILTIN || callable == DICT_BUILTIN || callable == LIST_BUILTIN
                 || callable == SUM_BUILTIN) {
             Frame sc = current; boolean sf = finished; boolean smr = mainReturned; Object sr = returnValue;
@@ -3249,9 +3600,73 @@ public final class Vm {
             current.setTop(new PyObj.PyList(out));
             return;
         }
+        if (callable == WAKE_BUILTIN) {
+            Object arg = args.length >= 1 ? args[0] : null;
+            Object res = Boolean.FALSE;
+            if (arg instanceof PyGen) {
+                for (AsyncTask t : asyncTasks) {
+                    if (t.coro == arg && !t.done) { t.sleepRemainingMs = 0; res = Boolean.TRUE; break; }
+                }
+            }
+            current.setTop(res);
+            return;
+        }
         if (callable == MAKE_SLEEP_BUILTIN) {
             long ms = args.length >= 1 ? asLong(args[0]) : 0;
             current.setTop(new SleepRequest(ms));
+            return;
+        }
+        if (callable == IN_TASK_BUILTIN) {
+            current.setTop(drivingTask != null ? Boolean.TRUE : Boolean.FALSE);
+            return;
+        }
+        if (callable == CURRENT_CORO_BUILTIN) {
+            current.setTop(drivingTask != null ? (Object) drivingTask.coro : PyObj.NONE);
+            return;
+        }
+        if (callable == SLEEP_MS_OF_BUILTIN) {
+            Object arg = args.length >= 1 ? args[0] : null;
+            current.setTop(arg instanceof SleepRequest ? (Object) ((SleepRequest) arg).ms : PyObj.NONE);
+            return;
+        }
+        if (callable == BYTEARRAY_BUILTIN) {
+            if (args.length == 0) { current.setTop(new PyObj.ByteArray(0)); return; }
+            Object x = args[0];
+            if (x instanceof Long || x instanceof java.math.BigInteger || x instanceof Boolean) {
+                int n = (int) asLong(x);
+                if (n < 0) throw PyException.valueError("negative count");
+                Ops.checkAlloc(n, 1);
+                current.setTop(new PyObj.ByteArray(new byte[n]));
+                return;
+            }
+            if (x instanceof PyObj.Bytes) { current.setTop(new PyObj.ByteArray(((PyObj.Bytes) x).data.clone())); return; }
+            if (x instanceof PyObj.ByteArray) { current.setTop(new PyObj.ByteArray(((PyObj.ByteArray) x).toBytes())); return; }
+            if (x instanceof String) {
+                current.setTop(new PyObj.ByteArray(((String) x).getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                return;
+            }
+            // any iterable of ints -- generators included (materialize drives the VM)
+            java.util.List<Object> items = materialize(x);
+            byte[] buf = new byte[items.size()];
+            for (int i = 0; i < buf.length; i++) {
+                long v = asLong(items.get(i));
+                if (v < 0 || v > 255) throw PyException.valueError("byte must be in range(0, 256)");
+                buf[i] = (byte) v;
+            }
+            current.setTop(new PyObj.ByteArray(buf));
+            return;
+        }
+        if (callable == DISABLE_IRQ_BUILTIN) {
+            if (irqDepth == 0) irqHolder = drivingTask != null ? (Object) drivingTask : MAIN_IRQ_HOLDER;
+            current.setTop((long) irqDepth);
+            irqDepth++;
+            return;
+        }
+        if (callable == ENABLE_IRQ_BUILTIN) {
+            long st = args.length >= 1 ? asLong(args[0]) : 0;
+            irqDepth = st < 0 ? 0 : (int) st;
+            if (irqDepth == 0) irqHolder = null;
+            current.setTop(PyObj.NONE);
             return;
         }
         if (callable == FINISH_DAEMON_BUILTIN) {
@@ -3289,10 +3704,19 @@ public final class Vm {
         if (callable == RUN_BUILTIN) {
             if (args.length < 1 || !(args[0] instanceof PyGen))
                 throw PyException.typeError("run() requires a coroutine");
-            // run() is only meaningful from the top-level (main) frame — it blocks it.
+            // run() is only meaningful from the top-level (main) frame -- it blocks it.
             // Nesting run() inside a coroutine is a programming error (as in CPython).
-            if (current.genOwner != null)
-                throw new PyException("RuntimeError", "run() cannot be called from a running coroutine");
+            //
+            // Walk the whole call chain, not just the current frame: jasyncio.run is
+            // itself a plain Python function, so by the time this builtin runs, `current`
+            // is run()'s own frame (genOwner == null) even when the caller was a
+            // coroutine. Checking only the top frame let the nested call through, which
+            // then suspended the main frame from inside a coroutine and quietly wedged
+            // the whole thing -- the coroutine simply returned None with no error.
+            for (Frame fr = current; fr != null; fr = fr.caller) {
+                if (fr.genOwner != null)
+                    throw new PyException("RuntimeError", "run() cannot be called from a running coroutine");
+            }
             AsyncTask t = registerTask((PyGen) args[0]);
             mainWaitingTask = t;
             // Leave a placeholder on the main frame's TOS; step() will overwrite it
@@ -3414,24 +3838,8 @@ public final class Vm {
                 if (kwNames[i].equals("key")) key = kwValues[i];
                 else if (kwNames[i].equals("reverse")) reverse = Ops.isTrue(kwValues[i]);
             }
-            final Object keyFn = (key == null || key == PyObj.NONE) ? null : key;
-            // decorate-sort-undecorate so a Python key fn is called via callSync
-            java.util.List<Object[]> deco = new java.util.ArrayList<>(items.size());
-            for (Object it : items) deco.add(new Object[]{keyFn == null ? it : callSync(keyFn, new Object[]{it}), it});
-            deco.sort((x, y) -> {
-                // dunder-aware: a < b via __lt__ when present, else structural
-                if (x[0] instanceof PyInstance || y[0] instanceof PyInstance) {
-                    Object lt = binaryOpDispatch(Ops.LESS, x[0], y[0]);
-                    if (truthy(lt)) return -1;
-                    Object gt = binaryOpDispatch(Ops.LESS, y[0], x[0]);
-                    return truthy(gt) ? 1 : 0;
-                }
-                return Ops.compare(x[0], y[0]);
-            });
-            if (reverse) java.util.Collections.reverse(deco);
-            java.util.List<Object> out = new java.util.ArrayList<>(deco.size());
-            for (Object[] d : deco) out.add(d[1]);
-            current.setTop(new PyObj.PyList(out));
+            sortInPlace(items, key, reverse);
+            current.setTop(new PyObj.PyList(items));
             return;
         }
         if (callable == MAP_BUILTIN) {
@@ -3695,6 +4103,11 @@ public final class Vm {
                 Frame resumer = f.caller;
                 f.caller = null;
                 if (resumer == null) { current = f; throw escape(exc, original); }
+                if (f == asyncTaskRoot) {
+                    // boundary: the error is this task's, not the resumer's
+                    current = f;
+                    throw escape(exc, original);
+                }
                 current = resumer;
                 if (gen.resumeMode == PyGen.MODE_FOR_ITER && PyExc.isSub(exc.type, PyExc.STOP_ITERATION)) {
                     // a StopIteration raised inside the gen = normal exhaustion
@@ -3712,6 +4125,18 @@ public final class Vm {
             }
             if (f.caller == null) {
                 current = f;
+                // SystemExit reaching the top of the MAIN frame is a clean exit,
+                // not a crash -- CPython and MicroPython terminate silently with
+                // no traceback. (Inside tasks it never gets here: the Python-level
+                // drivers catch it. exec/eval roots keep raising: exec("raise
+                // SystemExit") surfaces to the caller in MicroPython too.)
+                if (drivingTask == null && !f.isExecRoot
+                        && PyExc.isSub(exc.type, PyExc.SYSTEM_EXIT)) {
+                    returnValue = PyObj.NONE;
+                    mainReturned = true;
+                    finished = true;
+                    return;
+                }
                 throw escape(exc, original);
             }
             // Unwinding through a module top-level that raised: the import failed.
@@ -3884,6 +4309,14 @@ public final class Vm {
     private static PyExc.Instance toExcInstance(Object o) {
         if (o instanceof PyExc.Instance) return (PyExc.Instance) o;
         if (o instanceof PyExc.Type) return ((PyExc.Type) o).make(null);
+        // `raise SomeUserError` (the CLASS, not an instance). A user-defined exception
+        // class is a PyClass carrying the PyExc.Type built for it when the class was
+        // created; without this, raising the class only worked for built-in exceptions
+        // and any `raise MyError` in user code -- or in our own stdlib -- came back as
+        // "exceptions must derive from BaseException".
+        if (o instanceof PyClass && ((PyClass) o).excType != null) {
+            return ((PyClass) o).excType.make(null);
+        }
         throw PyException.typeError("exceptions must derive from BaseException");
     }
 }

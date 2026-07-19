@@ -179,8 +179,27 @@ public final class Methods {
             d.map.putAll(((PyObj.PyDict) s).map); return d; });
         DICT.put("update", (s, a) -> { arity(a, 1, 1, "update");
             PyObj.PyDict d = (PyObj.PyDict) s;
-            if (!(a[0] instanceof PyObj.PyDict)) throw PyException.typeError("update expects a dict");
-            for (var e : ((PyObj.PyDict) a[0]).map.entrySet()) Ops.subscrStore(d, e.getKey(), e.getValue());
+            if (a[0] instanceof PyObj.PyDict) {
+                for (var e : ((PyObj.PyDict) a[0]).map.entrySet()) Ops.subscrStore(d, e.getKey(), e.getValue());
+                return PyObj.NONE;
+            }
+            // an iterable of key/value pairs, as in CPython/MicroPython:
+            // d.update([(k, v), ...]) -- generators arrive here already
+            // materialised into a list by CALL_METHOD.
+            java.util.List<Object> pairs =
+                    a[0] instanceof PyObj.PyList ? ((PyObj.PyList) a[0]).items
+                  : a[0] instanceof PyObj.Tuple ? java.util.Arrays.asList(((PyObj.Tuple) a[0]).items)
+                  : null;
+            if (pairs == null) throw PyException.typeError("update expects a dict or iterable of pairs");
+            for (Object p : pairs) {
+                Object k, v;
+                if (p instanceof PyObj.Tuple && ((PyObj.Tuple) p).items.length == 2) {
+                    k = ((PyObj.Tuple) p).items[0]; v = ((PyObj.Tuple) p).items[1];
+                } else if (p instanceof PyObj.PyList && ((PyObj.PyList) p).items.size() == 2) {
+                    k = ((PyObj.PyList) p).items.get(0); v = ((PyObj.PyList) p).items.get(1);
+                } else throw PyException.typeError("dictionary update sequence element is not a pair");
+                Ops.subscrStore(d, k, v);
+            }
             return PyObj.NONE; });
     }
 
