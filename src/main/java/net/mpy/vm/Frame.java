@@ -94,13 +94,27 @@ public final class Frame {
 
     // ---- value stack --------------------------------------------------------
     public void push(Object v) { state[++sp] = v; }
-    public Object pop() { return state[sp--]; }
+    // Nulling on pop keeps popped slots invisible to BOTH the JVM GC and the
+    // memory audit (MemEstimator walks the whole state array): a value that has
+    // left the stack is garbage and must not be retained -- or billed --
+    // through a stale slot. A suspended generator/task frame otherwise pins
+    // whatever last passed through its operand stack for as long as it sleeps.
+    public Object pop() { Object v = state[sp]; state[sp--] = null; return v; }
     public Object top() { return state[sp]; }
     public void setTop(Object v) { state[sp] = v; }
     /** Peek n items below the top (peek(0) == top). */
     public Object peek(int n) { return state[sp - n]; }
     public void set(int depth, Object v) { state[sp - depth] = v; }
-    public void drop(int n) { sp -= n; }
+    /** Discard the top n slots, nulling them: every caller is a pure discard
+     *  (POP_TOP, jump-pops, cleanup), and a discarded value must not be retained
+     *  -- or billed by the memory audit -- through a stale slot. */
+    public void drop(int n) { while (n-- > 0) state[sp--] = null; }
+
+    /** Lower sp to exactly newSp, nulling the vacated slots. No-op if newSp >= sp.
+     *  For unwind paths (exception handler entry, iterator-buffer teardown) where
+     *  the region above newSp is dead. NOT for hostPause rewind -- that path
+     *  RAISES sp to resurrect the operand stack and depends on slots surviving. */
+    public void dropTo(int newSp) { while (sp > newSp) state[sp--] = null; }
 
     // ---- locals -------------------------------------------------------------
     public Object local(int k) { return state[nState - 1 - k]; }

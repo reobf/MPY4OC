@@ -114,6 +114,14 @@ public final class Ops {
         // in-place operators behave like their normal counterparts for our model
         if (op >= INPLACE_OR && op <= INPLACE_POWER) op += (OR - INPLACE_OR);
 
+        // fast path: small-int (long) arithmetic/comparison without BigInteger.
+        // Returns null on overflow or an op it does not cover -- the general
+        // path below then produces the identical result (or raises).
+        if (a instanceof Long && b instanceof Long) {
+            Object r = longFast(op, (Long) a, (Long) b);
+            if (r != null) return r;
+        }
+
         switch (op) {
             case EXCEPTION_MATCH: return PyExc.matches(a, b);
             case IS:  return identical(a, b);
@@ -229,8 +237,12 @@ public final class Ops {
             case OR:  return PyObj.normInt(x.or(y));
             case XOR: return PyObj.normInt(x.xor(y));
             case AND: return PyObj.normInt(x.and(y));
-            case LSHIFT: return PyObj.normInt(x.shiftLeft(y.intValueExact()));
-            case RSHIFT: return PyObj.normInt(x.shiftRight(y.intValueExact()));
+            case LSHIFT:
+                if (y.signum() < 0) throw PyException.valueError("negative shift count");
+                return PyObj.normInt(x.shiftLeft(y.intValueExact()));
+            case RSHIFT:
+                if (y.signum() < 0) throw PyException.valueError("negative shift count");
+                return PyObj.normInt(x.shiftRight(y.intValueExact()));
             default: throw PyException.typeError("bad int op " + op);
         }
     }
@@ -265,8 +277,49 @@ public final class Ops {
         }
     }
 
+    /** Long-long fast path for BINARY_OP: exact result or null (overflow /
+     *  uncovered op / would-raise), in which case the general path decides.
+     *  Semantics identical to the BigInteger path -- floor division/modulo,
+     *  Python shift rules -- just without the allocation. */
+    public static Object longFast(int op, long x, long y) {
+        switch (op) {
+            case ADD: { long r = x + y; return ((x ^ r) & (y ^ r)) >= 0 ? (Object) r : null; }
+            case SUBTRACT: { long r = x - y; return ((x ^ y) & (x ^ r)) >= 0 ? (Object) r : null; }
+            case MULTIPLY: {
+                long r = x * y;
+                long ax = Math.abs(x), ay = Math.abs(y);
+                if (((ax | ay) >>> 31) == 0) return r;                       // no overflow possible
+                if (y != 0 && (r / y != x || (x == Long.MIN_VALUE && y == -1))) return null;
+                return r;
+            }
+            case FLOOR_DIVIDE:
+                if (y == 0 || (x == Long.MIN_VALUE && y == -1)) return null; // raise / overflow: general path
+                return Math.floorDiv(x, y);
+            case MODULO:
+                if (y == 0) return null;                                     // raise: general path
+                return Math.floorMod(x, y);
+            case AND: return x & y;
+            case OR:  return x | y;
+            case XOR: return x ^ y;
+            case LSHIFT:
+                if (y < 0 || y > 62) return null;
+                { long r = x << y; return (r >> y) == x ? (Object) r : null; }
+            case RSHIFT:
+                if (y < 0) return null;                                      // raise: general path
+                return x >> Math.min(y, 63);
+            case LESS:       return x < y;
+            case MORE:       return x > y;
+            case LESS_EQUAL: return x <= y;
+            case MORE_EQUAL: return x >= y;
+            case EQUAL:      return x == y;
+            case NOT_EQUAL:  return x != y;
+        }
+        return null;   // TRUE_DIVIDE / POWER / everything else: general path
+    }
+
     /** Three-way comparison for ordered types. */
     public static int compare(Object a, Object b) {
+        if (a instanceof Long && b instanceof Long) return Long.compare((Long) a, (Long) b);
         if (isNumeric(a) && isNumeric(b)) {
             if (a instanceof Double || b instanceof Double) return Double.compare(toDouble(a), toDouble(b));
             return toBig(a).compareTo(toBig(b));

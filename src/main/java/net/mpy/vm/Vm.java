@@ -1202,6 +1202,11 @@ public final class Vm {
      *  to the main thread) the VM re-runs that instruction idempotently -- the same
      *  multi-pass mechanism import uses. Call only from inside a host function
      *  invoked by the running instruction; pairs with {@link #requestYield()}. */
+    // NOTE: rewind RAISES sp back to the instruction start -- it resurrects the
+    // operand stack so the instruction re-runs on identical inputs. The slots in
+    // between hold the call's arguments and MUST NOT be nulled here (call
+    // handlers read args in place and lower sp without pop() for exactly this
+    // reason). This is the one sp-restoring path that depends on slot survival.
     public void rewindCurrentInstruction() { current.ip = raiseIp; current.sp = raiseSp; }
 
     /** Park the running instruction: rewind it and abort the current batch by
@@ -1278,12 +1283,26 @@ public final class Vm {
         while (remaining > 0 && !finished && !taskYielded) {
             try {
             if (limits.memoryCheckInterval > 0 && --memCheckCountdown <= 0) {
-                memCheckCountdown = limits.memoryCheckInterval;
                 long used = MemEstimator.estimate(current, globals);
                 if (used > limits.memoryLimit) {
+                    memCheckCountdown = limits.memoryCheckInterval;
                     throw new PyException("MemoryError",
                             "memory allocation failed, allocating " + used + " bytes");
                 }
+                // The audit walks the whole reachable graph -- O(live objects) --
+                // so at a fixed 1024-op cadence it dominated execution on any
+                // program with real state (measured: 40%+ lost with a 20k-entry
+                // dict). Scale the NEXT audit to the size of what was just walked,
+                // so audit overhead stays a roughly constant few percent of
+                // execution regardless of heap size: interval ~ used/8 ops when
+                // far from the limit, ~ used/32 (4x more often) in the top
+                // quarter. Floor at the configured base. The limit stays
+                // enforced; only detection latency scales, and a single huge
+                // allocation is still gated up front by checkAlloc.
+                int base = limits.memoryCheckInterval;
+                boolean near = limits.memoryLimit > 0 && used * 4 >= limits.memoryLimit * 3;
+                long next = near ? used >> 5 : used >> 3;
+                memCheckCountdown = (int) Math.max(base, Math.min(1 << 22, next));
             }
             // ---- decode inline (mirror of Instruction.decode; no allocation) ----
             raiseIp = f.ip;   // C's code_state->ip: the START of this instruction,
@@ -1380,17 +1399,31 @@ public final class Vm {
 
                     case Opcodes.LOAD_NAME: {
                         String name = f.code.module.qstr((int) arg);
-                        if (f.names != null && f.names.containsKey(name)) { f.push(f.names.get(name)); break dispatch; }
+                        // single-lookup fast path: a stored value is virtually never
+                        // Java null (Python None is PyObj.NONE), so get()+null-check
+                        // replaces containsKey+get; the rare null falls back.
+                        if (f.names != null) {
+                            Object v = f.names.get(name);
+                            if (v != null || f.names.containsKey(name)) { f.push(v); break dispatch; }
+                        }
                         Map<String, Object> scope = scopeOf(f);
-                        if (scope.containsKey(name)) { f.push(scope.get(name)); break dispatch; }
-                        if (scope != globals && globals.containsKey(name) && fallsThrough(f, name)) { f.push(globals.get(name)); break dispatch; }
+                        Object v = scope.get(name);
+                        if (v != null || scope.containsKey(name)) { f.push(v); break dispatch; }
+                        if (scope != globals) {
+                            v = globals.get(name);
+                            if ((v != null || globals.containsKey(name)) && fallsThrough(f, name)) { f.push(v); break dispatch; }
+                        }
                         throw PyException.nameError("name '" + name + "' is not defined");
                     }
                     case Opcodes.LOAD_GLOBAL: {
                         String name = f.code.module.qstr((int) arg);
                         Map<String, Object> scope = scopeOf(f);
-                        if (scope.containsKey(name)) { f.push(scope.get(name)); break dispatch; }
-                        if (scope != globals && globals.containsKey(name) && fallsThrough(f, name)) { f.push(globals.get(name)); break dispatch; }
+                        Object v = scope.get(name);
+                        if (v != null || scope.containsKey(name)) { f.push(v); break dispatch; }
+                        if (scope != globals) {
+                            v = globals.get(name);
+                            if ((v != null || globals.containsKey(name)) && fallsThrough(f, name)) { f.push(v); break dispatch; }
+                        }
                         throw PyException.nameError("name '" + name + "' is not defined");
                     }
                     case Opcodes.STORE_NAME: {
@@ -2918,7 +2951,7 @@ public final class Vm {
             return;
         }
         if (gen.resumeMode == PyGen.MODE_FOR_ITER) {
-            current.sp -= NSLOTS;          // pop the iterator buffer
+            current.dropTo(current.sp - NSLOTS);   // pop the iterator buffer (nulling it)
             current.ip = gen.forIterExhaustIp;
         } else if (gen.resumeMode == PyGen.MODE_YIELD_FROM) {
             current.setTop(value);         // the yield-from expression's value
@@ -3038,6 +3071,13 @@ public final class Vm {
      *  otherwise fall back to the structural Ops.binaryOp. Comparison ops also
      *  consult __eq__/__lt__/... and their reflections. */
     Object binaryOpDispatch(int op, Object lhs, Object rhs) {
+        // fast path: long op long is by far the most common case, and can never
+        // involve a user dunder. Overflow (null) falls through unchanged.
+        if (lhs instanceof Long && rhs instanceof Long) {
+            int nop = (op >= Ops.INPLACE_OR && op <= Ops.INPLACE_POWER) ? op + (Ops.OR - Ops.INPLACE_OR) : op;
+            Object r = Ops.longFast(nop, (Long) lhs, (Long) rhs);
+            if (r != null) return r;
+        }
         // pass-through for operators that never dispatch to user dunders here
         // (is / in / exception-match are handled structurally)
         if (op == Ops.IS || op == Ops.EXCEPTION_MATCH) {
@@ -4089,7 +4129,7 @@ public final class Vm {
             if (f.excSp >= 0) {
                 int i = f.excSp;
                 f.ip = f.excHandler[i];
-                f.sp = f.excValSp[i];      // unwind the value stack to SETUP level
+                f.dropTo(f.excValSp[i]);   // unwind the value stack to SETUP level (nulling the dead region)
                 f.excPrevExc[i] = exc;     // save for RAISE_LAST
                 handledException = exc;    // for traceback.format_exc()
                 f.push(exc);               // handler receives the exception at TOS
@@ -4111,7 +4151,7 @@ public final class Vm {
                 current = resumer;
                 if (gen.resumeMode == PyGen.MODE_FOR_ITER && PyExc.isSub(exc.type, PyExc.STOP_ITERATION)) {
                     // a StopIteration raised inside the gen = normal exhaustion
-                    resumer.sp -= NSLOTS;
+                    resumer.dropTo(resumer.sp - NSLOTS);
                     resumer.ip = gen.forIterExhaustIp;
                     return;
                 }
@@ -4189,8 +4229,10 @@ public final class Vm {
                     // enter the finally: move ret_val down over any live iterators,
                     // push the -1 sentinel, jump; END_FINALLY resumes the return.
                     Object ret = f.state[f.sp];
+                    int oldSp = f.sp;
                     f.sp = f.excValSp[i] + 1;
                     f.state[f.sp] = ret;
+                    for (int d = f.sp + 1; d <= oldSp; d++) f.state[d] = null;  // vacated region is dead
                     f.push(-1L);
                     f.ip = f.excHandler[i];
                     return;                 // block stays; END_FINALLY pops it
@@ -4289,7 +4331,7 @@ public final class Vm {
             f.excSp--;
         }
         f.ip = (int) (long) (Long) f.pop(); // destination
-        if (unum != 0) f.sp -= NSLOTS;      // 0x80 flag: pop the exhausted iterator
+        if (unum != 0) f.dropTo(f.sp - NSLOTS);   // 0x80 flag: pop the exhausted iterator (nulling it)
     }
 
     /** vm.c's CANCEL_ACTIVE_FINALLY: a new unwind superseding one in progress. */
@@ -4297,10 +4339,13 @@ public final class Vm {
         if (f.state[f.sp - 1] instanceof Long) {
             // (..., prev_dest_ip, prev_cause, dest_ip): replace the previous unwind
             f.state[f.sp - 2] = f.state[f.sp];
+            f.state[f.sp] = null;
+            f.state[f.sp - 1] = null;
             f.sp -= 2;
         } else {
             // (..., None/exception, dest_ip): silence the finally's pending value
             f.state[f.sp - 1] = f.state[f.sp];
+            f.state[f.sp] = null;
             f.sp -= 1;
         }
     }
