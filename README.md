@@ -32,7 +32,7 @@ jasyncio.run(main())          # asyncio 也有
 | 产物 | 配方 |
 |---|---|
 | MPY CPU(一/二/三级) | OC 原版**同级** CPU + 线 |
-| MPY APU(一/二/三级) | OC 原版 APU(一/二级)或**创造 APU**(当三级)+ 线 |
+| MPY APU(一/二/三级) | OC 原版 APU(一/二级)或**创造 APU**(三级)+ 线 |
 | MPYOS BIOS | 任意 EEPROM + 线(原内容被改写,就是刷写) |
 | MPYOS LiveCD 软盘 | **空白**软盘 + 线 |
 | SFTP 服务器卡 | 卡基板 + 线 |
@@ -62,8 +62,8 @@ SFTP 卡:`component.sftp.start("user", "password")` 开服务,`getPort()` 看端
 ./gradlew build        # 产物在 build/libs/
 ```
 
-基于 GTNH 的 [ExampleMod1.7.10](https://github.com/GTNewHorizons/ExampleMod1.7.10) 构建体系。依赖 OpenComputers(GTNH 版)。
+基于 GTNH 的 [ExampleMod1.7.10](https://github.com/GTNewHorizons/ExampleMod1.7.10) 构建体系。依赖 OpenComputers(GTNH 版),不保证在其他分支稳定运行。
 
 ## 许可
 
-见 [LICENSE](LICENSE)。
+MIT
