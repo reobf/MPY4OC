@@ -21,8 +21,8 @@ jasyncio.run(main())          # asyncio 也有
 - **同步 / 异步两族处理器,各三档**(CPU 与带内置显卡的 APU):
   - 同步:跑在服务器主线程,组件调用零延迟,每 tick 保证执行——默认选它;
   - 异步:跑在 OC 计算线程,对 TPS 友好,非 direct 组件调用自动回主线程执行,语义与 OC 的 Lua 架构一致。
-- **线程 + asyncio 双并发模型**。`threading` 是有栈的(普通函数任意深度直接 `time.sleep`,整条栈保留);`jasyncio` 是 asyncio 风格的事件循环,每次 `run()` 独立、可以多开、线程里也能开。MicroPython 官方测试:threading 套件 **32/33**(唯一跳过的需要真实 stdin),asyncio 18/33。
-- **按 tick 的 ops 预算**。脚本每 tick 按 CPU 档次限速(500/2000/16000 条指令),空闲时主动让出能攒预算(至 10 倍),真干活时一次爆发——奖励协作、惩罚空转。
+- **线程 + asyncio 双并发模型**。`threading` 是有栈的(普通函数任意深度直接 `time.sleep`,整条栈保留);`jasyncio` 是 asyncio 风格的事件循环,每次 `run()` 独立、可以多开、线程里也能开。
+- **按 tick 的 ops 预算**。脚本每 tick 按 CPU 档次限速(500/2000/16000 条指令),空闲时主动让出能攒预算(至 10 倍)。
 - **24 个标准库模块**:`json` `re`(超集)`struct` `hashlib` `collections` `functools` `pickle` `traceback` `machine` `micropython` …,多数行为与官方逐字节一致。
 
 ## 合成配方
@@ -54,7 +54,6 @@ SFTP 卡:`component.sftp.start("user", "password")` 开服务,`getPort()` 看端
 ## 文档
 
 - **[Wiki](../../wiki)** — 玩家手册与 MicroPython 编程指南(和标准 Python 的差异、组件操作、多值返回、ops 预算、存档注意点)
-- **[docs/DIFFERENCES.md](docs/DIFFERENCES.md)** — 与标准 MicroPython 的逐项差异清单(开发向)
 
 ## 构建
 
