@@ -58,9 +58,9 @@ public class ItemSFTPCard extends Item implements HostAware {
                 .create();
 
         ItemStack stack;
-        boolean isAlive;
-        String name;
-        int lastupdate;
+        volatile boolean isAlive;
+        volatile String name;
+        volatile int lastupdate;
 
         /**
          * Keystrokes queued by SSH threads, drained on the server thread. The SSH
@@ -102,7 +102,76 @@ public class ItemSFTPCard extends Item implements HostAware {
         @Override
         public void update() {
             lastupdate = MinecraftServer.getServer().getTickCounter();
+            // Reload-restore: we carry saved credentials but no live registration,
+            // meaning we were serving when the chunk was saved. The resumed
+            // program believes the service is up -- make it so. Retried every
+            // tick until the filesystem is reachable again (the network may
+            // still be assembling right after the reload).
+            if (name == null && savedUser != null && isAlive) {
+                tryRestore();
+            }
             deliverKeys();
+        }
+
+        private void tryRestore() {
+            String err;
+            try {
+                err = registerService(savedUser, savedPwd, savedAddr);
+            } catch (RuntimeException occupied) {
+                // The name is taken. If by a dead registration left over from an
+                // unclean save, purging frees it; if by a LIVE service (another
+                // card restored first, or a genuinely different machine), fall
+                // back to user-1, user-2, ... -- the base name stays saved, so a
+                // later restore tries the original first. The program can learn
+                // the effective name via getCredentials().
+                SSHDServer.killDead();
+                try {
+                    err = registerService(savedUser, savedPwd, savedAddr);
+                } catch (RuntimeException stillHeld) {
+                    for (int i = 1; i <= 64; i++) {
+                        try {
+                            if (registerService(savedUser + "-" + i, savedPwd, savedAddr) == null) return;
+                        } catch (RuntimeException taken) {
+                            // next suffix
+                        }
+                    }
+                    return;   // absurdly crowded; try again next tick
+                }
+            }
+            // err != null means the filesystem is not reachable yet (the network
+            // is still assembling after the reload) -- retried next tick, and
+            // deliberately NOT suffixed: that would rename on a transient state.
+        }
+
+        /**
+         * Resolve the filesystem at {@code addr} and register the account
+         * serving it (shared by start() and the reload-restore path).
+         * Returns null on success, or a reason string when the filesystem is
+         * not (yet) reachable. Throws if the username is taken.
+         */
+        private String registerService(String user, String password, String addr) {
+            Node fsNode = node().network() == null ? null : node().network().node(addr);
+            final Object hst = fsNode == null ? null : fsNode.host();
+            if (!(hst instanceof FileSystem)) {
+                return "'" + addr + "' is not a filesystem component!";
+            }
+            FileSystem v = (FileSystem) hst;
+
+            SyncedFileSystem fs = new SyncedFileSystem(v.fileSystem(), () -> {
+                try {
+                    return isAlive
+                            && ((li.cil.oc.api.network.Environment) hst).node().network() == node().network()
+                            && Math.abs(lastupdate - MinecraftServer.getServer().getTickCounter()) < 20;
+                } catch (Exception w) {
+                    return false;
+                }
+            });
+
+            // Registering the bridge alongside the filesystem is what gives this
+            // account an interactive shell as well as SFTP.
+            SSHDServer.register(user, password, fs, this);
+            name = user;
+            return null;
         }
 
         /**
@@ -216,6 +285,15 @@ public class ItemSFTPCard extends Item implements HostAware {
             return true;
         }
 
+        /**
+         * Service credentials that survive a save/load cycle. The MPY snapshot
+         * resumes the Python program mid-execution -- it believes start() is
+         * still in effect -- so on UNLOAD we keep these and silently restore the
+         * registration after reload. On SHUTDOWN they are cleared: a rebooted
+         * program re-runs init.py and calls start() itself.
+         */
+        private volatile String savedUser, savedPwd, savedAddr;
+
         @Override
         public void onConnect(Node node) {
             isAlive = true;
@@ -223,15 +301,37 @@ public class ItemSFTPCard extends Item implements HostAware {
 
         @Override
         public void onDisconnect(Node node) {
+            // Unload / card removed: cut the account and every live connection
+            // NOW, but keep the saved credentials -- a later reload restores the
+            // service to match the resumed program's belief that it is running.
             if (node == _node) {
                 isAlive = false;
-                SSHDServer.killDead();
-                name = null;
+                if (name != null) {
+                    SSHDServer.unregister(name);   // also kills live sessions
+                    name = null;
+                }
+                SSHDServer.killDead();             // sweep anything else stale
             }
         }
 
         @Override
         public void onMessage(Message message) {
+            // The computer powering off takes the SFTP service down for good:
+            // kill the account and its connections, and forget the credentials
+            // so power-on does NOT auto-restore (the rebooted program calls
+            // start() itself). The broadcast reaches every card on the network,
+            // so make sure it is OUR computer that stopped.
+            if ("computer.stopped".equals(message.name())) {
+                Object h = message.source().host();
+                if (h instanceof li.cil.oc.api.machine.Machine
+                        && ((li.cil.oc.api.machine.Machine) h).host() == envHost) {
+                    if (name != null) {
+                        SSHDServer.unregister(name);
+                        name = null;
+                    }
+                    savedUser = savedPwd = savedAddr = null;
+                }
+            }
         }
 
         @Override
@@ -241,6 +341,13 @@ public class ItemSFTPCard extends Item implements HostAware {
 
             if (nbt.hasKey("screenAddress")) screenAddress = nbt.getString("screenAddress");
 
+            // Saved-while-running: restore the service once we are back on a
+            // network (see tryRestore, driven from update()).
+            if (nbt.hasKey("svcUser")) {
+                savedUser = nbt.getString("svcUser");
+                savedPwd = nbt.getString("svcPwd");
+                savedAddr = nbt.getString("svcAddr");
+            }
         }
 
         @Override
@@ -251,6 +358,15 @@ public class ItemSFTPCard extends Item implements HostAware {
 
             if (screenAddress != null) nbt.setString("screenAddress", screenAddress);
 
+            // Persist the running service so an unload/reload cycle restores it.
+            // (Cleared on computer shutdown and stop(), so a saved-while-off card
+            // carries nothing.) The password is stored as plain NBT, same trust
+            // model as the EEPROM data it sits next to.
+            if (savedUser != null && savedPwd != null && savedAddr != null) {
+                nbt.setString("svcUser", savedUser);
+                nbt.setString("svcPwd", savedPwd);
+                nbt.setString("svcAddr", savedAddr);
+            }
         }
 
         // ---- SessionBridge (called from SSH threads) ----------------------
@@ -344,6 +460,18 @@ public class ItemSFTPCard extends Item implements HostAware {
             return new Object[] { Double.valueOf(SSHDServer.reportedPort()) };
         }
 
+        @Callback(doc = "getCredentials():string, string -- The username and password the card "
+                + "is currently serving with, or nil if the service is stopped. The username can "
+                + "differ from what start() was given: a collision during the automatic "
+                + "reload-restore is resolved by appending -1, -2, ...",
+                direct = true, limit = 8)
+        public Object[] getCredentials(Context context, Arguments arguments) throws Exception {
+            String u = name;                  // volatile read; may race a shutdown, so
+            String p = savedPwd;              // snapshot both before the null check
+            if (u == null) return new Object[] { null };
+            return new Object[] { u, p };
+        }
+
         @Callback(doc = "term():string -- Mirror the real, in-world screen the GPU is "
                 + "currently bound to onto the SSH terminal. What you see over SSH is exactly "
                 + "what is on that screen.",
@@ -396,12 +524,13 @@ public class ItemSFTPCard extends Item implements HostAware {
             return null;
         }
 
-        @Callback(doc = "stop():string -- Stop the server for this card.",
+        @Callback(doc = "stop():string -- Stop the server for this card and disconnect its clients.",
                 direct = false, limit = 1)
         public Object[] stop(Context context, Arguments arguments) throws Exception {
             if (name == null) throw new RuntimeException("Nothing to stop!");
-            SSHDServer.unregister(name);
+            SSHDServer.unregister(name);   // also kills live sessions
             name = null;
+            savedUser = savedPwd = savedAddr = null;   // an explicit stop() is not restored
             return new Object[] { "Stopped." };
         }
 
@@ -409,7 +538,8 @@ public class ItemSFTPCard extends Item implements HostAware {
                 + "filesystem over SFTP, plus an SSH terminal mirroring the screen. Without an "
                 + "address the computer's boot filesystem is used. The address may be given in "
                 + "any position; the remaining two arguments are user and password, in that order. "
-                + "Shuts down automatically when unloaded.",
+                + "Powering the computer off stops the service and disconnects clients; an "
+                + "unload/reload cycle restores it automatically.",
                 direct = false, limit = 1)
         public Object[] start(Context context, Arguments arguments) throws Exception {
             if (Config.port == -1) throw new RuntimeException("SFTP disabled by an admin!");
@@ -448,27 +578,15 @@ public class ItemSFTPCard extends Item implements HostAware {
                 }
             }
 
-            Node fsNode = node().network().node(addr);
-            final Object hst = fsNode == null ? null : fsNode.host();
-            if (!(hst instanceof FileSystem)) {
-                throw new RuntimeException("'" + addr + "' is not a filesystem component!");
-            }
-            FileSystem v = (FileSystem) hst;
+            String err = registerService(user, password, addr);
+            if (err != null) throw new RuntimeException(err);
 
-            SyncedFileSystem fs = new SyncedFileSystem(v.fileSystem(), () -> {
-                try {
-                    return isAlive
-                            && ((li.cil.oc.api.network.Environment) hst).node().network() == node().network()
-                            && Math.abs(lastupdate - MinecraftServer.getServer().getTickCounter()) < 20;
-                } catch (Exception w) {
-                    return false;
-                }
-            });
-
-            // Registering the bridge alongside the filesystem is what gives this
-            // account an interactive shell as well as SFTP.
-            SSHDServer.register(user, password, fs, this);
-            name = user;
+            // Remember the service so an unload/reload cycle restores it (the
+            // snapshot-resumed program believes it is still running). Cleared on
+            // computer shutdown and stop().
+            savedUser = user;
+            savedPwd = password;
+            savedAddr = addr;
             return new Object[] { "Started, serving " + addr };
         }
 

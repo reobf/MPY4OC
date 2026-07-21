@@ -282,7 +282,7 @@ public class MyMod {
         // The mpyos LiveCD: a floppy whose contents come from assets/mpy4oc/mpyos/
         // in the jar (read-only, exactly like OpenOS's loot disks). Boot it, run
         // install, and it copies itself onto a hard disk.
-        li.cil.oc.api.Items.registerFloppy("MPYOS", 6 /* cyan */,
+        net.minecraft.item.ItemStack mpyosDisk = li.cil.oc.api.Items.registerFloppy("MPYOS", 6 /* cyan */,
             new java.util.concurrent.Callable<li.cil.oc.api.fs.FileSystem>() {
                 @Override
                 public li.cil.oc.api.fs.FileSystem call() {
@@ -300,6 +300,97 @@ public class MyMod {
                 net.minecraftforge.oredict.RecipeSorter.Category.SHAPELESS,
                 "after:minecraft:shapeless");
         }
+
+        registerStringRecipes(biosStack, mpyosDisk);
+    }
+
+    /**
+     * Survival recipes, all shapeless "X + a piece of string" -- the string is
+     * the marker for "the MPY flavour of X":
+     *   - MPY CPU (each tier)  = the OC CPU of the same tier + string
+     *   - MPYOS BIOS           = any EEPROM + string (flashing overwrites the old
+     *                            contents, same semantics as the floppy recipe)
+     *   - MPYOS LiveCD floppy  = a BLANK floppy + string (custom matcher -- loot
+     *                            disks and written floppies are the same item
+     *                            distinguished only by NBT, and must not be eaten)
+     *   - SFTP card            = OC card base + string
+     * The sync and async families CONVERT into each other in the crafting grid:
+     * a lone MPY CPU crafts into the async CPU of the same tier and back, same
+     * for the APUs -- picking sync vs async is a free choice, not a cost.
+     * APU mapping (user decision): OC apu1/apu2 for tiers 1/2, and OC's
+     * CREATIVE APU stands in as the "tier 3" ingredient (OC has no regular
+     * tier-3 APU).
+     */
+    private void registerStringRecipes(net.minecraft.item.ItemStack biosStack,
+                                       net.minecraft.item.ItemStack mpyosDisk) {
+        // sync CPUs: oc cpu1/cpu2/cpu3 -> MPY CPU tier 1/2/3 (damage 0/1/2)
+        for (int tier = 0; tier < 3; tier++) {
+            net.minecraft.item.ItemStack ocCpu = ocItemStack("cpu" + (tier + 1));
+            if (ocCpu != null) {
+                cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                    new net.minecraft.item.ItemStack(mpyCpu, 1, tier),
+                    ocCpu, new net.minecraft.item.ItemStack(net.minecraft.init.Items.string));
+            }
+        }
+        // BIOS: any EEPROM + string (vanilla matching ignores NBT -- that IS
+        // flashing: a Lua BIOS reflashes to the MPY BIOS just fine)
+        net.minecraft.item.ItemStack eeprom = ocItemStack("eeprom");
+        if (biosStack != null && eeprom != null) {
+            cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                biosStack.copy(), eeprom,
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.string));
+        }
+        // LiveCD floppy: strictly blank floppy + string (custom matcher)
+        if (mpyosDisk != null) {
+            cpw.mods.fml.common.registry.GameRegistry.addRecipe(
+                new reobf.mpy4oc.main.recipe.BlankFloppyStringRecipe(mpyosDisk));
+            net.minecraftforge.oredict.RecipeSorter.register(
+                "mpy4oc:floppystring", reobf.mpy4oc.main.recipe.BlankFloppyStringRecipe.class,
+                net.minecraftforge.oredict.RecipeSorter.Category.SHAPELESS,
+                "after:minecraft:shapeless");
+        }
+        // APUs: oc apu1/apu2 -> tiers 1/2; the creative APU is treated as the
+        // tier-3 counterpart (decision recorded in the javadoc above)
+        String[] apuNames = { "apu1", "apu2", "apuCreative" };
+        for (int tier = 0; tier < 3; tier++) {
+            net.minecraft.item.ItemStack ocApu = ocItemStack(apuNames[tier]);
+            if (ocApu != null) {
+                cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                    new net.minecraft.item.ItemStack(mpyApu, 1, tier),
+                    ocApu, new net.minecraft.item.ItemStack(net.minecraft.init.Items.string));
+            }
+        }
+        // SFTP card: OC card base + string
+        net.minecraft.item.ItemStack cardBase = ocItemStack("card");
+        if (cardBase != null) {
+            cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                new net.minecraft.item.ItemStack(sftpCard),
+                cardBase, new net.minecraft.item.ItemStack(net.minecraft.init.Items.string));
+        }
+        // sync <-> async conversion, per tier, both directions, 1:1 -- the two
+        // families are the same silicon scheduled differently, so switching is
+        // free rather than a crafting cost.
+        for (int tier = 0; tier < 3; tier++) {
+            cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                new net.minecraft.item.ItemStack(mpyCpuAsync, 1, tier),
+                new net.minecraft.item.ItemStack(mpyCpu, 1, tier));
+            cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                new net.minecraft.item.ItemStack(mpyCpu, 1, tier),
+                new net.minecraft.item.ItemStack(mpyCpuAsync, 1, tier));
+            cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                new net.minecraft.item.ItemStack(mpyApuAsync, 1, tier),
+                new net.minecraft.item.ItemStack(mpyApu, 1, tier));
+            cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                new net.minecraft.item.ItemStack(mpyApu, 1, tier),
+                new net.minecraft.item.ItemStack(mpyApuAsync, 1, tier));
+        }
+        LOG.info("mpy4oc: registered string-craft + sync/async conversion recipes");
+    }
+
+    /** The OC item registered under {@code name}, as a 1-stack; null if absent. */
+    private static net.minecraft.item.ItemStack ocItemStack(String name) {
+        li.cil.oc.api.detail.ItemInfo info = li.cil.oc.api.Items.get(name);
+        return info == null ? null : info.createItemStack(1);
     }
 
     /** Read a classpath resource as bytes, or null if absent. */

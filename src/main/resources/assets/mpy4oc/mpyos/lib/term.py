@@ -217,30 +217,58 @@ class Terminal:
     # -- writing --
     def write(self, text):
         """Write text at the cursor, wrapping at the right edge and scrolling at the
-        bottom. Handles \\n and \\r; \\t expands to the next 4-column stop."""
-        for ch in text:
+        bottom. Handles \\n and \\r; \\t expands to the next 4-column stop.
+
+        Runs of printable characters are drawn in BATCHES: one gpu.set per
+        screen-row segment instead of one per character. gpu.set takes a whole
+        string anyway, and every call burns one unit of the GPU's per-tick
+        direct-call budget -- per-character output made a 50-column line cost 50
+        calls, blow the budget, and visibly trickle out over several ticks."""
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
             if ch == "\n":
                 self._newline()
-                continue
-            if ch == "\r":
+                i += 1
+            elif ch == "\r":
                 self.x = 1
-                continue
-            if ch == "\t":
-                spaces = 4 - ((self.x - 1) % 4)
-                self.write(" " * spaces)
-                continue
-            if ch == "\b":
+                i += 1
+            elif ch == "\t":
+                # expand from the CURRENT column, like the old per-char path
+                self._blit(" " * (4 - ((self.x - 1) % 4)))
+                i += 1
+            elif ch == "\b":
                 if self.x > 1:
                     self.x -= 1
-                continue
-            # printable
+                i += 1
+            else:
+                # batch everything up to the next control character
+                j = i + 1
+                while j < n:
+                    c = text[j]
+                    if c == "\n" or c == "\r" or c == "\t" or c == "\b":
+                        break
+                    j += 1
+                self._blit(text[i:j])
+                i = j
+
+    def _blit(self, s):
+        """Draw a run of printable characters, wrapping at the right edge: one
+        gpu.set per row segment. Same semantics as the old per-character loop
+        (wrap happens BEFORE drawing, so a char may sit in the last column and
+        only the next one triggers the newline)."""
+        while s:
             if self.x > self.w:
                 self._newline()
+            room = self.w - self.x + 1
+            seg = s[:room]
             try:
-                self.gpu.set(self.x, self.y, ch)
+                self.gpu.set(self.x, self.y, seg)
             except Exception:
                 pass
-            self.x += 1
+            self.x += len(seg)
+            s = s[room:]
 
     def print(self, *parts, **kw):
         sep = kw.get("sep", " ")

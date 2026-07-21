@@ -50,11 +50,36 @@ public class SSHDServer {
 		userpasswd.put(user, pwd);
 		if (bridge != null) shells.put(user, bridge);
 	}
+	/**
+	 * Remove an account AND sever every live connection authenticated as it.
+	 * Unregistering only used to block new logins; an SFTP client that was
+	 * already connected kept its session (and the shell its screen) until it
+	 * happened to touch the dead filesystem. Cutting the sessions here makes
+	 * "stopped" mean stopped.
+	 */
 	public static void unregister(String user) {
 		users.remove(user);
 		userpasswd.remove(user);
 		shells.remove(user);
-		
+		killSessions(user);
+	}
+
+	/** Force-close every active SSH session authenticated as {@code user}
+	 *  ({@code null} = all sessions). Safe from any thread. */
+	public static void killSessions(String user) {
+		SshServer s = sshd;
+		if (s == null) return;
+		try {
+			for (org.apache.sshd.common.session.helpers.AbstractSession session : s.getActiveSessions()) {
+				try {
+					if (user == null || user.equals(session.getUsername())) {
+						session.close(true);
+					}
+				} catch (Throwable ignored) {
+				}
+			}
+		} catch (Throwable ignored) {
+		}
 	}
 	
 	static public void init() {
@@ -152,11 +177,10 @@ public class SSHDServer {
 			var n=k.next();
 			if(n.getValue().isAlivePredicate.get()==false) {
 				userpasswd.remove(n.getKey());
+				shells.remove(n.getKey());     // was leaking the bridge
+				killSessions(n.getKey());      // a dead account keeps no connections
 				k.remove();
-				
 			}
-			
 		}
-		
 	}
 }
