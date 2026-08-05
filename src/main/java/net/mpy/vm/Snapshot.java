@@ -106,6 +106,7 @@ final class Snapshot {
             }
             out.writeInt(f.importRetryIp);
             out.writeInt(f.withEnterArg);
+            out.writeBoolean(f.propPushNull);
             writeValue(f.returnOverride);
             writeValue(f.buildingClass);
             // names alias either the class being built or the module being imported
@@ -525,6 +526,7 @@ final class Snapshot {
             }
             f.importRetryIp = in.readInt();
             f.withEnterArg = in.readInt();
+            f.propPushNull = in.readBoolean();
             f.returnOverride = readValue();
             f.buildingClass = (PyClass) readValue();
             int namesKind = in.readByte();

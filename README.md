@@ -1,5 +1,7 @@
 # MPY4OC — 在 OpenComputers 里写 Python
 
+*中文 · [English](README.en.md)*
+
 > Run real MicroPython on your OpenComputers computers. Minecraft 1.7.10 / GTNH.
 
 一套给 OpenComputers 的 **MicroPython 处理器**:把 MPY CPU 插进机箱、刷好 BIOS,这台 OC 电脑就说 Python 了。附带 **mpyos**(shell、行编辑、文件系统、编辑器)和一张 **SFTP 服务器卡**——用 MobaXterm 之类的客户端直接 SFTP 进电脑磁盘改 `init.py`,还能在 SSH 终端里看到游戏内屏幕、远程打字。
@@ -24,6 +26,7 @@ jasyncio.run(main())          # asyncio 也有
 - **线程 + asyncio 双并发模型**。`threading` 是有栈的(普通函数任意深度直接 `time.sleep`,整条栈保留);`jasyncio` 是 asyncio 风格的事件循环,每次 `run()` 独立、可以多开、线程里也能开。
 - **按 tick 的 ops 预算**。脚本每 tick 按 CPU 档次限速(500/2000/16000 条指令),空闲时主动让出能攒预算(至 10 倍)。
 - **24 个标准库模块**:`json` `re`(超集)`struct` `hashlib` `collections` `functools` `pickle` `traceback` `machine` `micropython` …,多数行为与官方逐字节一致。
+- **联网就用 `requests` / `urllib` / `socket`**。插上 OC 的因特网卡,`requests.get(url).json()` 就是你想的那个意思;`urlopen` 返回类文件对象,`socket` 走裸 TCP。这些库**永远都在**(没插卡也 import 得进来),只在真正发请求时抛 `OSError`——等待全程按 tick 让出,不占服务器。
 
 ## 合成配方
 

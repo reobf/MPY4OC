@@ -114,7 +114,7 @@ class Filesystem:
             return None
         h = self.open(path, "rb")
         try:
-            # bytes.join is not available in this VM; accumulate instead.
+            # (bytes.join exists these days; += is fine for file-sized data.)
             data = b""
             while True:
                 chunk = self._read_chunk(h, 4096)

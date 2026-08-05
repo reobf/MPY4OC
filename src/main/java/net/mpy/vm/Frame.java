@@ -55,6 +55,13 @@ public final class Frame {
      *  inside it (e.g. a Lock.acquire spin) yields to the scheduler correctly,
      *  instead of being driven synchronously by callSync. */
     public int withEnterArg = -1;
+    /** Set on a property-getter subframe pushed by LOAD_METHOD: on return, the
+     *  getter's result is delivered to the caller's slot and the extra `null`
+     *  self-slot that LOAD_METHOD always pushes is appended. (LOAD_ATTR needs no
+     *  flag -- its result simply replaces the slot.) Like withEnterArg, this is
+     *  what lets a getter that waits cooperatively (a network read polling with
+     *  time.sleep) yield instead of burning callSync's fuel. */
+    public boolean propPushNull;
     /** For frames created by exec()/eval(): the namespace their global name ops
      *  target (null = the VM's globals). When set, doReturn delivers the frame's
      *  result to the caller (exec -> None already on stack; eval -> the value). */

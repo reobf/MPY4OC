@@ -276,7 +276,11 @@ public final class Methods {
         STR.put("rstrip", (s, a) -> { arity(a, 0, 1, "rstrip");
             return strip((String) s, a.length == 1 ? (String) a[0] : WS, false, true); });
         STR.put("split", (s, a) -> { arity(a, 0, 2, "split");
-            return split((String) s, a.length >= 1 && a[0] != PyObj.NONE ? (String) a[0] : null); });
+            return split((String) s, a.length >= 1 && a[0] != PyObj.NONE ? (String) a[0] : null,
+                    a.length >= 2 && a[1] != PyObj.NONE ? (int) asInt(a[1]) : -1); });
+        STR.put("rsplit", (s, a) -> { arity(a, 0, 2, "rsplit");
+            return rsplit((String) s, a.length >= 1 && a[0] != PyObj.NONE ? (String) a[0] : null,
+                    a.length >= 2 && a[1] != PyObj.NONE ? (int) asInt(a[1]) : -1); });
         STR.put("join", (s, a) -> { arity(a, 1, 1, "join");
             StringBuilder sb = new StringBuilder();
             boolean first = true;
@@ -325,22 +329,60 @@ public final class Methods {
         return s.substring(b, e);
     }
 
-    private static PyObj.PyList split(String s, String sep) {
+    private static PyObj.PyList split(String s, String sep, int max) {
         List<Object> out = new ArrayList<>();
         if (sep == null) { // whitespace runs, no empty tokens
-            int i = 0, n = s.length();
+            int i = 0, n = s.length(), count = 0;
             while (i < n) {
                 while (i < n && WS.indexOf(s.charAt(i)) >= 0) i++;
+                if (i >= n) break;
+                if (max >= 0 && count >= max) { out.add(s.substring(i)); break; }
                 int b = i;
                 while (i < n && WS.indexOf(s.charAt(i)) < 0) i++;
-                if (i > b) out.add(s.substring(b, i));
+                out.add(s.substring(b, i));
+                count++;
             }
         } else {
             if (sep.isEmpty()) throw PyException.valueError("empty separator");
-            int i = 0, j;
-            while ((j = s.indexOf(sep, i)) >= 0) { out.add(s.substring(i, j)); i = j + sep.length(); }
+            int i = 0, j, count = 0;
+            while ((max < 0 || count < max) && (j = s.indexOf(sep, i)) >= 0) {
+                out.add(s.substring(i, j)); i = j + sep.length(); count++;
+            }
             out.add(s.substring(i));
         }
+        return new PyObj.PyList(out);
+    }
+
+    /** str.rsplit: like split but counting splits from the right. With no (or
+     *  unlimited) maxsplit the result equals split()'s, so we reuse it. */
+    private static PyObj.PyList rsplit(String s, String sep, int max) {
+        if (max < 0) return split(s, sep, -1);
+        List<Object> rev = new ArrayList<>();
+        if (sep == null) {
+            int i = s.length(), count = 0;
+            while (i > 0) {
+                while (i > 0 && WS.indexOf(s.charAt(i - 1)) >= 0) i--;
+                if (i <= 0) break;
+                if (count >= max) { rev.add(s.substring(0, i)); i = 0; break; }
+                int e = i;
+                while (i > 0 && WS.indexOf(s.charAt(i - 1)) < 0) i--;
+                rev.add(s.substring(i, e));
+                count++;
+            }
+        } else {
+            if (sep.isEmpty()) throw PyException.valueError("empty separator");
+            int end = s.length(), count = 0;
+            while (count < max) {
+                int j = end >= sep.length() ? s.lastIndexOf(sep, end - sep.length()) : -1;
+                if (j < 0) break;
+                rev.add(s.substring(j + sep.length(), end));
+                end = j;
+                count++;
+            }
+            rev.add(s.substring(0, end));
+        }
+        List<Object> out = new ArrayList<>();
+        for (int k = rev.size() - 1; k >= 0; k--) out.add(rev.get(k));
         return new PyObj.PyList(out);
     }
 

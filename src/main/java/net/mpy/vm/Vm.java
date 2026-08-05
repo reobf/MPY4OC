@@ -1658,6 +1658,17 @@ public final class Vm {
                     case Opcodes.LOAD_ATTR: {
                         String name = f.code.module.qstr((int) arg);
                         Object obj = f.top();
+                        Descriptors.Property prop = suspendableProperty(obj, name);
+                        if (prop != null) {
+                            // Run the getter as a real subframe (not callSync) so that a
+                            // getter which waits cooperatively -- e.g. Response.content
+                            // polling an internet-card read with time.sleep -- yields to
+                            // the scheduler instead of exhausting callSync's fuel. The
+                            // callable slot is TOS, so the return value lands in place.
+                            f.setTop(prop.getter);
+                            callInto(prop.getter, new Object[]{obj});
+                            break dispatch;
+                        }
                         f.setTop(loadAttr(obj, name));
                         break dispatch;
                     }
@@ -1718,7 +1729,17 @@ public final class Vm {
                                         "'" + inst.cls.name + "' object has no attribute '" + name + "'");
                             }
                             if (m instanceof Descriptors.Property) {
-                                f.setTop(callSync(((Descriptors.Property) m).getter, new Object[]{inst})); f.push(null);
+                                Object getter = ((Descriptors.Property) m).getter;
+                                if (getter instanceof PyFunction || getter instanceof Closure) {
+                                    // suspendable getter (see LOAD_ATTR): the callable slot
+                                    // receives the result; the self slot is pushed on return
+                                    f.setTop(getter);
+                                    callInto(getter, new Object[]{inst});
+                                    if (current != f) current.propPushNull = true;
+                                    else f.push(null);      // resolved in place
+                                    break dispatch;
+                                }
+                                f.setTop(callSync(getter, new Object[]{inst})); f.push(null);
                             } else if (m instanceof Descriptors.StaticMethod) {
                                 f.setTop(((Descriptors.StaticMethod) m).fn); f.push(null);
                             } else if (m instanceof Descriptors.ClassMethod) {
@@ -1735,6 +1756,12 @@ public final class Vm {
                             if (e.type.userClass != null) {
                                 Object m = ((PyClass) e.type.userClass).lookup(name);
                                 if (m instanceof PyFunction || m instanceof Closure) { f.setTop(m); f.push(e); break dispatch; }
+                                if (m instanceof Descriptors.Property) {   // @property on an exception class
+                                    f.setTop(callSync(((Descriptors.Property) m).getter, new Object[]{e}));
+                                    f.push(null); break dispatch;
+                                }
+                                if (m instanceof Descriptors.StaticMethod) { f.setTop(((Descriptors.StaticMethod) m).fn); f.push(null); break dispatch; }
+                                if (m instanceof Descriptors.ClassMethod) { f.setTop(((Descriptors.ClassMethod) m).fn); f.push(e.type.userClass); break dispatch; }
                                 if (m != null) { f.setTop(m); f.push(null); break dispatch; }
                             }
                             // fall through to args/value pseudo-attrs via loadAttr
@@ -1743,8 +1770,15 @@ public final class Vm {
                         }
                         if (obj instanceof PyClass) {
                             Object m = ((PyClass) obj).lookup(name);
-                            if (m == null) throw new PyException("AttributeError",
-                                    "type object '" + ((PyClass) obj).name + "' has no attribute '" + name + "'");
+                            if (m == null) {
+                                // Base.__init__(self, ...) on a user exception subclass
+                                // (see loadAttr / LOAD_SUPER_METHOD)
+                                if (name.equals("__init__") && ((PyClass) obj).excType != null) {
+                                    f.setTop(EXC_INIT); f.push(null); break dispatch;
+                                }
+                                throw new PyException("AttributeError",
+                                        "type object '" + ((PyClass) obj).name + "' has no attribute '" + name + "'");
+                            }
                             if (m instanceof Descriptors.StaticMethod) {
                                 f.setTop(((Descriptors.StaticMethod) m).fn); f.push(null);
                             } else if (m instanceof Descriptors.ClassMethod) {
@@ -1757,6 +1791,11 @@ public final class Vm {
                         if (obj instanceof PyModule) {              // module.fn(...)
                             f.setTop(loadAttr(obj, name));
                             f.push(null);
+                            break dispatch;
+                        }
+                        if (obj instanceof PyExc.Type && name.equals("__init__")) {
+                            // OSError.__init__(self, msg) longhand (see loadAttr)
+                            f.setTop(EXC_INIT); f.push(null);
                             break dispatch;
                         }
                         if (obj instanceof PyGen) {                 // gen.send(v) etc.
@@ -3442,6 +3481,8 @@ public final class Vm {
         }
         if (obj instanceof PyExc.Type) {
             if (name.equals("__name__")) return ((PyExc.Type) obj).name;
+            // OSError.__init__(self, msg) longhand from a subclass's __init__
+            if (name.equals("__init__")) return EXC_INIT;
             throw new PyException("AttributeError",
                     "type object '" + ((PyExc.Type) obj).name + "' has no attribute '" + name + "'");
         }
@@ -3453,8 +3494,14 @@ public final class Vm {
         if (obj instanceof PyClass) {
             if (name.equals("__name__")) return ((PyClass) obj).name;
             Object m = ((PyClass) obj).lookup(name);
-            if (m == null) throw new PyException("AttributeError",
-                    "type object '" + ((PyClass) obj).name + "' has no attribute '" + name + "'");
+            if (m == null) {
+                // Base.__init__(self, ...) written out longhand on a user exception
+                // subclass: the built-in Exception base's __init__ just records args
+                // (same synthetic native init that LOAD_SUPER_METHOD hands back).
+                if (name.equals("__init__") && ((PyClass) obj).excType != null) return EXC_INIT;
+                throw new PyException("AttributeError",
+                        "type object '" + ((PyClass) obj).name + "' has no attribute '" + name + "'");
+            }
             if (m instanceof Descriptors.StaticMethod) return ((Descriptors.StaticMethod) m).fn;
             if (m instanceof Descriptors.ClassMethod) return new BoundPyMethod(((Descriptors.ClassMethod) m).fn, obj);
             if (m instanceof Descriptors.Property) return m;   // C.p returns the property object itself
@@ -3495,6 +3542,11 @@ public final class Vm {
             if (e.type.userClass != null) {
                 Object m = ((PyClass) e.type.userClass).lookup(name);
                 if (m instanceof PyFunction || m instanceof Closure) return new BoundPyMethod(m, e);
+                if (m instanceof Descriptors.Property)   // @property on a user exception class
+                    return callSync(((Descriptors.Property) m).getter, new Object[]{e});
+                if (m instanceof Descriptors.StaticMethod) return ((Descriptors.StaticMethod) m).fn;
+                if (m instanceof Descriptors.ClassMethod)
+                    return new BoundPyMethod(((Descriptors.ClassMethod) m).fn, e.type.userClass);
                 if (m != null) return m;
             }
             throw new PyException("AttributeError", "'" + e.type.name + "' object has no attribute '" + name + "'");
@@ -4305,7 +4357,29 @@ public final class Vm {
             f.caller = null;
             current.setTop(delivered);
         }
-        else { current = f.caller; current.setTop(res); }
+        else {
+            current = f.caller;
+            current.setTop(res);
+            // a LOAD_METHOD property getter finished: restore the self slot it owes
+            if (f.propPushNull) current.push(null);
+        }
+    }
+
+    /**
+     * The property whose getter LOAD_ATTR/LOAD_METHOD would have to run for
+     * {@code obj.name}, when that getter is ordinary Python code and can therefore
+     * be pushed as a real subframe. Returns null whenever the attribute resolves
+     * some other way (instance dict, method, native value) or the getter is not a
+     * Python function -- those paths stay on the fast in-place route.
+     */
+    private Descriptors.Property suspendableProperty(Object obj, String name) {
+        if (!(obj instanceof PyInstance)) return null;
+        PyInstance inst = (PyInstance) obj;
+        if (inst.attrs.get(name) != null) return null;      // instance attr wins here
+        Object m = inst.cls.lookup(name);
+        if (!(m instanceof Descriptors.Property)) return null;
+        Object g = ((Descriptors.Property) m).getter;
+        return (g instanceof PyFunction || g instanceof Closure) ? (Descriptors.Property) m : null;
     }
 
     /**
