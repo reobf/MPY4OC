@@ -4,9 +4,9 @@
 # and control never returns here. Runs before mpyos exists, so only the injected host
 # primitives (component, computer, exec) are available.
 #
-# SIZE LIMIT: OpenComputers clips EEPROM code to eepromSize (4096 bytes by default)
-# when the loot item is registered and when the component is saved -- silently. Keep
-# this file well under that (MyMod logs an error at startup if it no longer fits).
+# SIZE LIMIT: OpenComputers silently clips EEPROM code to eepromSize (4096 bytes by
+# default) when the loot item is registered. Keep this file well under that (MyMod
+# logs an error at startup if it no longer fits).
 
 
 def _read_file(fs, path):

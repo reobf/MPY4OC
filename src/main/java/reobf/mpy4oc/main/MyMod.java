@@ -23,11 +23,13 @@ import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.event.FMLServerStartingEvent;
 
 
-// required-after:OpenComputers -- preInit calls Items.registerEEPROM/registerFloppy and init
-// calls Machine.add; OC wires those API objects up in ITS preInit, so without this ordering
-// constraint FML may run us first and the calls silently return null (no BIOS, no LiveCD, no
-// recipes). acceptableRemoteVersions="*" -- the mod has no wire protocol of its own, so a
-// server may update (e.g. to fix the BIOS) without locking out clients on an older build.
+// required-after:OpenComputers -- everything here is built on OC's API (architecture, EEPROM,
+// floppy, OC items in recipes), so make OC a hard requirement (a clear FML message instead of
+// NoClassDefFoundError when it is missing) and have FML initialise OC before us.
+// acceptableRemoteVersions="*" -- the mod has no packets of its own, so any mpy4oc version on
+// the other side is fine. FML checks the mod list on BOTH ends, each against its own setting,
+// so this only helps between builds that both carry it (v0.0.1p6-beta and later): a p1-p5
+// client still refuses a newer server with its own exact-version check.
 @Mod(modid = MyMod.MODID, version = Tags.VERSION, name = "mpy4oc", acceptedMinecraftVersions = "[1.7.10]",
         dependencies = "required-after:OpenComputers", acceptableRemoteVersions = "*",
         guiFactory = "reobf.mpy4oc.main.ModGuiFactory")
@@ -298,8 +300,9 @@ public class MyMod {
             }
             if (kept >= 0 && kept < bios.length) {
                 LOG.error("mpy BIOS is " + bios.length + " bytes but OpenComputers keeps only "
-                        + kept + " (eepromSize); the registered EEPROM is truncated and WILL NOT"
-                        + " BOOT. Shrink assets/mpy4oc/bios/bios.py.");
+                        + kept + " (eepromSize): every MPYOS BIOS item is truncated. Machines fall back"
+                        + " to the bundled bios, but the item itself is broken. Shrink"
+                        + " assets/mpy4oc/bios/bios.py.");
             } else {
                 LOG.info("Registered EEPROM: mpy BIOS (" + bios.length + " bytes)");
             }

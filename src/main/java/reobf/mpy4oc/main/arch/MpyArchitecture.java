@@ -805,32 +805,32 @@ public class MpyArchitecture implements Architecture {
                 mpy = MyMod.compile(biosSource);
                 from = "eeprom";
             } catch (Exception ex) {
-                // Say what we were given, not just where the parser gave up. OC clips
-                // EEPROM code to eepromSize (4096 by default) silently, both when a
-                // loot EEPROM is registered and when the component is saved; a bios
-                // that is exactly that long and does not end in a newline is the
-                // signature of that, and "line N+1: invalid syntax" at EOF follows.
+                // Say what we were given, not just where the parser gave up. OC's
+                // Items.registerEEPROM silently keeps only eepromSize bytes (4096 by
+                // default) of the code when it builds the loot EEPROM, so an oversized
+                // bios ends mid-line and fails with "line N+1: invalid syntax" at EOF.
                 String where = describeSource(biosSource) + offendingLine(biosSource, ex.getMessage());
-                boolean clipped = isClipped(biosSource);
-                if (clipped) where += clippedHint();
+                if (isClipped(biosSource)) where += clippedHint();
                 MyMod.LOG.warn("[mpy] bios compile failed: " + ex.getMessage() + " -- " + where);
 
-                // A clipped EEPROM that carries OUR label is our own loot BIOS from a
-                // build whose bios.py did not fit (or from an older client: creative
-                // picks send the client's item NBT, so a server update alone cannot
-                // fix the item). The bios is a fixed, read-only, mod-provided program,
-                // so booting the bundled copy instead is safe and keeps those machines
-                // usable; the item itself stays clipped, hence the loud message.
-                byte[] bundled = clipped && MyMod.BIOS_LABEL.equals(readEepromLabel(eeprom))
+                // An EEPROM labelled as OUR bios that does not compile is a stale copy
+                // of the mod's own read-only loot BIOS -- in practice one clipped by an
+                // earlier build whose bios.py did not fit. Booting the bundled copy
+                // instead keeps those machines usable. This deliberately does not look
+                // at the current eepromSize: the copy was clipped under whatever limit
+                // applied when the item was made, and raising the limit since then
+                // does not give the lost bytes back.
+                byte[] bundled = MyMod.BIOS_LABEL.equals(readEepromLabel(eeprom))
                         ? compileBundledBios() : null;
                 if (bundled == null) {
                     fail("compile error in bios: " + ex.getMessage() + " [" + where + "]");
                     return false;
                 }
-                print("[mpy] EEPROM holds a clipped " + MyMod.BIOS_LABEL + " (" + describeSource(biosSource)
-                        + "); booting the bundled bios instead. Re-craft the BIOS with a current mod build.");
+                print("[mpy] this " + MyMod.BIOS_LABEL + " does not compile (" + ex.getMessage() + "; "
+                        + describeSource(biosSource) + "), booting the bundled bios instead."
+                        + " Re-craft the BIOS with a current mod build.");
                 mpy = bundled;
-                from = "bundled bios (eeprom copy is clipped)";
+                from = "bundled bios (the EEPROM copy does not compile)";
             }
         } else {
             // No bios: scan filesystems for /init.mpy or /init.py directly.
@@ -952,19 +952,20 @@ public class MpyArchitecture implements Architecture {
     }
 
     /**
-     * A bios that is exactly OC's eepromSize long and does not end in a newline was
-     * almost certainly clipped by OpenComputers (it silently truncates EEPROM code to
-     * that size); say so, because "line N: invalid syntax" alone sends people hunting
-     * for a typo that is not there.
+     * Heuristic, for the error message only: a bios at least as long as OC's
+     * eepromSize (or the 4096 default) that does not end in a newline was probably
+     * clipped when its item was made. Say so, because "line N: invalid syntax" alone
+     * sends people hunting for a typo that is not there.
      */
     private static boolean isClipped(String src) {
         int bytes = src.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-        return bytes >= eepromSizeLimit() && !src.endsWith("\n");
+        return bytes >= Math.min(4096, eepromSizeLimit()) && !src.endsWith("\n");
     }
 
     private static String clippedHint() {
-        return "; bios is exactly OC's eepromSize (" + eepromSizeLimit() + " bytes) and has no final newline"
-                + " -- OpenComputers clipped it. Shrink the bios or raise eepromSize in OC's config";
+        return "; it fills a whole EEPROM and has no final newline, so it was probably clipped when the item"
+                + " was made (OpenComputers keeps only eepromSize bytes of a registered EEPROM). Raising"
+                + " eepromSize does not repair existing items -- re-craft the BIOS";
     }
 
     private static int eepromSizeLimit() {
