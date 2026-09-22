@@ -37,13 +37,11 @@ Every recipe is **shapeless**, and a vanilla piece of **String** is the "MPY fla
 | MPY CPU (tier 1/2/3) | OC's **same-tier** CPU + String |
 | MPY APU (tier 1/2/3) | OC's APU (tier 1/2) or the **Creative APU** (as tier 3) + String |
 | MPYOS BIOS | Any EEPROM + String (the old contents are overwritten — it *is* a flash) |
-| MPYOS LiveCD floppy | A **blank** floppy + String |
+| MPYOS LiveCD floppy | Any floppy + String (the old contents are overwritten — a flash, like the BIOS) |
 | SFTP server card | Card board + String |
 | Sync ↔ async (CPU/APU, same tier) | Drop a single processor into the crafting grid to convert, 1:1 both ways |
 
 Two pre-existing paths still work: any EEPROM + an MPYOS floppy also crafts the BIOS, and a wrench + any loot floppy cycles through to the MPYOS disk.
-
-> Only a blank floppy crafts the LiveCD — floppies that have been written to, and loot disks like OpenOS, will not be eaten by this recipe.
 
 ## Getting started
 

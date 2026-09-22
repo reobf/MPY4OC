@@ -1,12 +1,14 @@
 package reobf.mpy4oc.main.recipe;
 
+import java.util.Arrays;
+
 import net.minecraft.inventory.InventoryCrafting;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.crafting.ShapelessRecipes;
 import net.minecraft.world.World;
-import net.minecraft.item.crafting.IRecipe;
 
 /**
- * Shapeless: any EEPROM + the mpyos LiveCD floppy -> a "mpy BIOS" EEPROM.
+ * Shapeless: any EEPROM + the mpyos LiveCD floppy -> a "MPYOS BIOS" EEPROM.
  * The floppy is identified by its oc:lootFactory NBT ("mpy4oc:MPYOS"), so other
  * loot disks do not match; the EEPROM ingredient may be blank or anything else
  * (its old contents are overwritten, which is what flashing means). The floppy
@@ -14,12 +16,19 @@ import net.minecraft.item.crafting.IRecipe;
  *
  * This exists because registerEEPROM() only creates the item; it does not make
  * it obtainable in survival.
+ *
+ * Extends {@link ShapelessRecipes} so NEI can draw it (it ignores bare IRecipe
+ * implementations); the strict NBT-aware matching is in {@code matches}.
  */
-public class MpyBiosRecipe implements IRecipe {
-    private final ItemStack output;
+public class MpyBiosRecipe extends ShapelessRecipes {
 
-    public MpyBiosRecipe(ItemStack output) {
-        this.output = output;
+    /**
+     * @param eeprom     any OC EEPROM (display ingredient)
+     * @param mpyosDisk  the MPYOS LiveCD floppy from registerFloppy
+     * @param output     the MPYOS BIOS EEPROM from registerEEPROM
+     */
+    public MpyBiosRecipe(ItemStack eeprom, ItemStack mpyosDisk, ItemStack output) {
+        super(output, Arrays.asList(eeprom, mpyosDisk));
     }
 
     @Override
@@ -44,20 +53,5 @@ public class MpyBiosRecipe implements IRecipe {
     private static boolean isMpyosDisk(ItemStack s) {
         if (!s.hasTagCompound()) return false;
         return "mpy4oc:MPYOS".equals(s.getTagCompound().getString("oc:lootFactory"));
-    }
-
-    @Override
-    public ItemStack getCraftingResult(InventoryCrafting inv) {
-        return output.copy();
-    }
-
-    @Override
-    public int getRecipeSize() {
-        return 2;
-    }
-
-    @Override
-    public ItemStack getRecipeOutput() {
-        return output;
     }
 }

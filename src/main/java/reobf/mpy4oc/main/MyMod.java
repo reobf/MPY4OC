@@ -23,13 +23,24 @@ import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.event.FMLServerStartingEvent;
 
 
+// required-after:OpenComputers -- preInit calls Items.registerEEPROM/registerFloppy and init
+// calls Machine.add; OC wires those API objects up in ITS preInit, so without this ordering
+// constraint FML may run us first and the calls silently return null (no BIOS, no LiveCD, no
+// recipes). acceptableRemoteVersions="*" -- the mod has no wire protocol of its own, so a
+// server may update (e.g. to fix the BIOS) without locking out clients on an older build.
 @Mod(modid = MyMod.MODID, version = Tags.VERSION, name = "mpy4oc", acceptedMinecraftVersions = "[1.7.10]",
+        dependencies = "required-after:OpenComputers", acceptableRemoteVersions = "*",
         guiFactory = "reobf.mpy4oc.main.ModGuiFactory")
 public class MyMod {
 
 	
     public static final String MODID = "mpy4oc";
     public static final Logger LOG = LogManager.getLogger(MODID);
+
+    /** Label of the loot EEPROM we register; the architecture uses it to recognise our bios. */
+    public static final String BIOS_LABEL = "MPYOS BIOS";
+    /** bios.py as shipped in this jar (set in preInit); the architecture's fallback for a clipped EEPROM. */
+    public static volatile String BIOS_SOURCE;
  
     private File extractBinary(File targetDir) throws IOException {
         String os = System.getProperty("os.name").toLowerCase();
@@ -273,8 +284,25 @@ public class MyMod {
         byte[] bios = readResourceBytes("assets/mpy4oc/bios/bios.py");
         net.minecraft.item.ItemStack biosStack = null;
         if (bios != null) {
-            biosStack = li.cil.oc.api.Items.registerEEPROM("MPYOS BIOS", bios, null, true);
-            LOG.info("Registered EEPROM: mpy BIOS (" + bios.length + " bytes)");
+            BIOS_SOURCE = new String(bios, java.nio.charset.StandardCharsets.UTF_8);
+            biosStack = li.cil.oc.api.Items.registerEEPROM(BIOS_LABEL, bios, null, true);
+            // OC clips the code section to eepromSize (4096 by default) when it builds
+            // the loot stack -- silently. A clipped bios fails to compile at EOF with
+            // "line N: invalid syntax" on every machine that gets a fresh EEPROM, so
+            // read back what the stack actually carries and shout if it lost anything.
+            int kept = -1;
+            if (biosStack != null && biosStack.hasTagCompound()
+                    && biosStack.getTagCompound().hasKey("oc:data")) {
+                kept = biosStack.getTagCompound().getCompoundTag("oc:data")
+                        .getByteArray("oc:eeprom").length;
+            }
+            if (kept >= 0 && kept < bios.length) {
+                LOG.error("mpy BIOS is " + bios.length + " bytes but OpenComputers keeps only "
+                        + kept + " (eepromSize); the registered EEPROM is truncated and WILL NOT"
+                        + " BOOT. Shrink assets/mpy4oc/bios/bios.py.");
+            } else {
+                LOG.info("Registered EEPROM: mpy BIOS (" + bios.length + " bytes)");
+            }
         } else {
             LOG.warn("mpy BIOS resource missing; EEPROM not registered");
         }
@@ -289,16 +317,20 @@ public class MyMod {
                     return li.cil.oc.api.FileSystem.fromClass(MyMod.class, "mpy4oc", "mpyos");
                 }
             }, true);   // recipe cycling: wrench + any loot disk reaches mpyos in survival
-        LOG.info("Registered floppy: mpyos LiveCD");
+        if (mpyosDisk != null) {
+            nameLootFloppy(mpyosDisk, "MPYOS");
+            LOG.info("Registered floppy: mpyos LiveCD");
+        } else {
+            LOG.warn("mpy4oc: OpenComputers refused to register the mpyos LiveCD floppy");
+        }
 
         // Survival path for the BIOS: any EEPROM + the mpyos floppy = mpy BIOS.
-        if (biosStack != null) {
+        // (MpyBiosRecipe extends ShapelessRecipes, so RecipeSorter already files it
+        // under minecraft:shapeless and NEI draws it from the ingredient list.)
+        net.minecraft.item.ItemStack anyEeprom = ocItemStack("eeprom");
+        if (biosStack != null && mpyosDisk != null && anyEeprom != null) {
             cpw.mods.fml.common.registry.GameRegistry.addRecipe(
-                new reobf.mpy4oc.main.recipe.MpyBiosRecipe(biosStack));
-            net.minecraftforge.oredict.RecipeSorter.register(
-                "mpy4oc:biosflash", reobf.mpy4oc.main.recipe.MpyBiosRecipe.class,
-                net.minecraftforge.oredict.RecipeSorter.Category.SHAPELESS,
-                "after:minecraft:shapeless");
+                new reobf.mpy4oc.main.recipe.MpyBiosRecipe(anyEeprom, mpyosDisk.copy(), biosStack.copy()));
         }
 
         registerStringRecipes(biosStack, mpyosDisk);
@@ -310,9 +342,9 @@ public class MyMod {
      *   - MPY CPU (each tier)  = the OC CPU of the same tier + string
      *   - MPYOS BIOS           = any EEPROM + string (flashing overwrites the old
      *                            contents, same semantics as the floppy recipe)
-     *   - MPYOS LiveCD floppy  = a BLANK floppy + string (custom matcher -- loot
-     *                            disks and written floppies are the same item
-     *                            distinguished only by NBT, and must not be eaten)
+     *   - MPYOS LiveCD floppy  = any floppy + string (vanilla matching ignores NBT,
+     *                            so a written or loot floppy is simply rewritten --
+     *                            the same flashing semantics as the BIOS recipe)
      *   - SFTP card            = OC card base + string
      * The sync and async families CONVERT into each other in the crafting grid:
      * a lone MPY CPU crafts into the async CPU of the same tier and back, same
@@ -340,14 +372,12 @@ public class MyMod {
                 biosStack.copy(), eeprom,
                 new net.minecraft.item.ItemStack(net.minecraft.init.Items.string));
         }
-        // LiveCD floppy: strictly blank floppy + string (custom matcher)
-        if (mpyosDisk != null) {
-            cpw.mods.fml.common.registry.GameRegistry.addRecipe(
-                new reobf.mpy4oc.main.recipe.BlankFloppyStringRecipe(mpyosDisk));
-            net.minecraftforge.oredict.RecipeSorter.register(
-                "mpy4oc:floppystring", reobf.mpy4oc.main.recipe.BlankFloppyStringRecipe.class,
-                net.minecraftforge.oredict.RecipeSorter.Category.SHAPELESS,
-                "after:minecraft:shapeless");
+        // LiveCD floppy: any OC floppy + string
+        net.minecraft.item.ItemStack floppy = ocItemStack("floppy");
+        if (mpyosDisk != null && floppy != null) {
+            cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                mpyosDisk.copy(), floppy,
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.string));
         }
         // APUs: oc apu1/apu2 -> tiers 1/2; the creative APU is treated as the
         // tier-3 counterpart (decision recorded in the javadoc above)
@@ -385,6 +415,42 @@ public class MyMod {
                 new net.minecraft.item.ItemStack(mpyApuAsync, 1, tier));
         }
         LOG.info("mpy4oc: registered string-craft + sync/async conversion recipes");
+    }
+
+    /**
+     * Give a loot floppy a real item name.
+     *
+     * <p>OC never overrides {@code displayName} for floppies: the item is always
+     * "Floppy" and the label only shows in the tooltip. OC's own loot disks
+     * (OpenOS, ...) get around that by {@code setStackDisplayName} on the stack
+     * ({@code Loot.createLootDisk}); the public {@code registerFloppy} path does not,
+     * so ours came out as a nameless "Floppy". Do what OC does -- and do it to every
+     * copy OC keeps, because {@code registerFloppy} hands us a copy: the original
+     * sits in {@code Loot.disksForCyclingServer} (wrench cycling output, sent to
+     * clients) and another copy in {@code Items.registeredItems} (creative tab).
+     * Those two are OC internals, not API, so that part is best-effort.
+     */
+    private static void nameLootFloppy(net.minecraft.item.ItemStack ours, String name) {
+        ours.setStackDisplayName(name);
+        String factory = ours.getTagCompound().getString("oc:lootFactory");
+        try {
+            nameMatchingLootFloppies(li.cil.oc.common.Loot.disksForCyclingServer(), factory, name);
+            nameMatchingLootFloppies(li.cil.oc.common.init.Items.registeredItems(), factory, name);
+        } catch (Throwable t) {
+            LOG.warn("mpy4oc: could not name OC's internal copies of the " + name
+                    + " floppy (creative tab / wrench cycling will show a plain Floppy)", t);
+        }
+    }
+
+    private static void nameMatchingLootFloppies(scala.collection.mutable.ArrayBuffer<net.minecraft.item.ItemStack> list,
+                                                 String factory, String name) {
+        for (int i = 0; i < list.length(); i++) {
+            net.minecraft.item.ItemStack s = list.apply(i);
+            if (s != null && s.hasTagCompound()
+                    && factory.equals(s.getTagCompound().getString("oc:lootFactory"))) {
+                s.setStackDisplayName(name);
+            }
+        }
     }
 
     /** The OC item registered under {@code name}, as a 1-stack; null if absent. */

@@ -37,13 +37,11 @@ jasyncio.run(main())          # asyncio 也有
 | MPY CPU(一/二/三级) | OC 原版**同级** CPU + 线 |
 | MPY APU(一/二/三级) | OC 原版 APU(一/二级)或**创造 APU**(三级)+ 线 |
 | MPYOS BIOS | 任意 EEPROM + 线(原内容被改写,就是刷写) |
-| MPYOS LiveCD 软盘 | **空白**软盘 + 线 |
+| MPYOS LiveCD 软盘 | 任意软盘 + 线(原内容被改写,同样是刷写) |
 | SFTP 服务器卡 | 卡基板 + 线 |
 | 同步 ↔ 异步(CPU/APU,同级) | 单独放入工作台即可互相转换,双向 1:1 |
 
 另外两条既有途径:任意 EEPROM + MPYOS 软盘也能合成 BIOS;扳手 + 任意战利品软盘可循环切换到 MPYOS 盘。
-
-> 空白软盘才能合成 LiveCD——写过数据的软盘和 OpenOS 等战利品盘不会被这个配方吃掉。
 
 ## 快速上手
 

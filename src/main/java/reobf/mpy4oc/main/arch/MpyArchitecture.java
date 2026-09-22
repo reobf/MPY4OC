@@ -798,14 +798,39 @@ public class MpyArchitecture implements Architecture {
         byte[] mpy = null;
         String from = null;
 
-        String biosSource = readEepromCode();
+        String eeprom = eepromAddress();
+        String biosSource = eeprom == null ? null : readEepromCode(eeprom);
         if (biosSource != null && !biosSource.isEmpty()) {
             try {
                 mpy = MyMod.compile(biosSource);
                 from = "eeprom";
             } catch (Exception ex) {
-                fail("compile error in bios: " + ex.getMessage());
-                return false;
+                // Say what we were given, not just where the parser gave up. OC clips
+                // EEPROM code to eepromSize (4096 by default) silently, both when a
+                // loot EEPROM is registered and when the component is saved; a bios
+                // that is exactly that long and does not end in a newline is the
+                // signature of that, and "line N+1: invalid syntax" at EOF follows.
+                String where = describeSource(biosSource) + offendingLine(biosSource, ex.getMessage());
+                boolean clipped = isClipped(biosSource);
+                if (clipped) where += clippedHint();
+                MyMod.LOG.warn("[mpy] bios compile failed: " + ex.getMessage() + " -- " + where);
+
+                // A clipped EEPROM that carries OUR label is our own loot BIOS from a
+                // build whose bios.py did not fit (or from an older client: creative
+                // picks send the client's item NBT, so a server update alone cannot
+                // fix the item). The bios is a fixed, read-only, mod-provided program,
+                // so booting the bundled copy instead is safe and keeps those machines
+                // usable; the item itself stays clipped, hence the loud message.
+                byte[] bundled = clipped && MyMod.BIOS_LABEL.equals(readEepromLabel(eeprom))
+                        ? compileBundledBios() : null;
+                if (bundled == null) {
+                    fail("compile error in bios: " + ex.getMessage() + " [" + where + "]");
+                    return false;
+                }
+                print("[mpy] EEPROM holds a clipped " + MyMod.BIOS_LABEL + " (" + describeSource(biosSource)
+                        + "); booting the bundled bios instead. Re-craft the BIOS with a current mod build.");
+                mpy = bundled;
+                from = "bundled bios (eeprom copy is clipped)";
             }
         } else {
             // No bios: scan filesystems for /init.mpy or /init.py directly.
@@ -860,22 +885,94 @@ public class MpyArchitecture implements Architecture {
         }
     }
 
-    /** Read the EEPROM code section (the bios), or null if there is no EEPROM. */
-    private String readEepromCode() {
+    /** Address of the machine's EEPROM component, or null if it has none. */
+    private String eepromAddress() {
         for (Map.Entry<String, String> e : machine.components().entrySet()) {
-            if (!"eeprom".equals(e.getValue())) continue;
-            try {
-                Object[] r = machine.invoke(e.getKey(), "get", new Object[0]);
-                if (r != null && r.length > 0 && r[0] != null) {
-                    Object code = r[0];
-                    if (code instanceof byte[]) return new String((byte[]) code, java.nio.charset.StandardCharsets.UTF_8);
-                    return code.toString();
-                }
-            } catch (Throwable ignored) {
-            }
-            return null;   // found an eeprom but could not read it
+            if ("eeprom".equals(e.getValue())) return e.getKey();
         }
-        return null;       // no eeprom
+        return null;
+    }
+
+    /** Read the EEPROM code section (the bios), or null if it could not be read. */
+    private String readEepromCode(String eeprom) {
+        Object code = invokeFirst(eeprom, "get");
+        if (code instanceof byte[]) return new String((byte[]) code, java.nio.charset.StandardCharsets.UTF_8);
+        return code == null ? null : code.toString();
+    }
+
+    /** The EEPROM's label ("MPYOS BIOS", "EEPROM (Lua BIOS)", ...), or null. */
+    private String readEepromLabel(String eeprom) {
+        Object label = invokeFirst(eeprom, "getLabel");
+        if (label instanceof byte[]) return new String((byte[]) label, java.nio.charset.StandardCharsets.UTF_8);
+        return label == null ? null : label.toString();
+    }
+
+    /** First return value of a component callback, or null on any failure. */
+    private Object invokeFirst(String address, String method) {
+        try {
+            Object[] r = machine.invoke(address, method, new Object[0]);
+            return r != null && r.length > 0 ? r[0] : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** The bios shipped in this jar, compiled; null if it is missing or broken. */
+    private static byte[] compileBundledBios() {
+        String src = MyMod.BIOS_SOURCE;
+        if (src == null) return null;
+        try {
+            return MyMod.compile(src);
+        } catch (Exception ex) {
+            MyMod.LOG.warn("[mpy] bundled bios does not compile either: " + ex.getMessage());
+            return null;
+        }
+    }
+
+    // ---- bios compile diagnostics ----------------------------------------- //
+
+    /** "4096 bytes / 117 lines, ends with newline=false" for a source string. */
+    private static String describeSource(String src) {
+        int bytes = src.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        int lines = 0;
+        for (int i = 0; i < src.length(); i++) if (src.charAt(i) == '\n') lines++;
+        if (!src.endsWith("\n")) lines++;
+        return bytes + " bytes / " + lines + " lines, ends with newline=" + src.endsWith("\n");
+    }
+
+    /** If the compiler message names a line ("line 118: ..."), quote that line. */
+    private static String offendingLine(String src, String message) {
+        if (message == null) return "";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("line (\\d+)").matcher(message);
+        if (!m.find()) return "";
+        int n = Integer.parseInt(m.group(1));
+        String[] lines = src.split("\n", -1);
+        if (n < 1 || n > lines.length) return "; line " + n + " is past the end (" + lines.length + " lines)";
+        return "; line " + n + " reads: `" + lines[n - 1] + "`";
+    }
+
+    /**
+     * A bios that is exactly OC's eepromSize long and does not end in a newline was
+     * almost certainly clipped by OpenComputers (it silently truncates EEPROM code to
+     * that size); say so, because "line N: invalid syntax" alone sends people hunting
+     * for a typo that is not there.
+     */
+    private static boolean isClipped(String src) {
+        int bytes = src.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        return bytes >= eepromSizeLimit() && !src.endsWith("\n");
+    }
+
+    private static String clippedHint() {
+        return "; bios is exactly OC's eepromSize (" + eepromSizeLimit() + " bytes) and has no final newline"
+                + " -- OpenComputers clipped it. Shrink the bios or raise eepromSize in OC's config";
+    }
+
+    private static int eepromSizeLimit() {
+        try {
+            return li.cil.oc.Settings.get().eepromSize();
+        } catch (Throwable t) {
+            return 4096;   // OC default; only reached if the Settings API moved
+        }
     }
 
     /** Read a whole file from a filesystem component as text, or null if absent. */
