@@ -13,7 +13,6 @@ import reobf.mpy4oc.main.MyMod;
 
 public class Test {
 public static void main(String args[]) throws Exception {
-	MyMod.MPY_CROSS="D:\\MPY4OC\\run\\client\\mpy_binary\\mpy-cross-win-x64.exe";
 	//System.out.println("aa");
 	byte b[]=MyMod.compile(
 			"""

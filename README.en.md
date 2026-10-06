@@ -18,7 +18,7 @@ jasyncio.run(main())          # asyncio is here too
 
 ## Features
 
-- **Real MicroPython bytecode.** A pure-Java compiler is built in, and its output is **byte-for-byte identical** to the official `mpy-cross` (749/749 on the official compile test suite). You can also switch to the real mpy-cross binary as the backend in the mod config — same behaviour either way.
+- **Real MicroPython bytecode.** A pure-Java compiler is built in, and its output is **byte-for-byte identical** to the official `mpy-cross` (749/749 on the official compile test suite). No external program needed.
 - **Full-state snapshots.** Saving the world freezes the entire VM into the save file: variables, call stacks, generators, coroutines, threads and component proxies all survive. Loading resumes **exactly where the save was taken**, without restarting your program. Every timer (`time.sleep`, coroutine sleeps) ignores the time you were offline.
 - **Two processor families, three tiers each** (CPU, and APU with an integrated GPU):
   - Synchronous: runs on the server main thread, zero-latency component calls, guaranteed execution every tick — pick this one by default;

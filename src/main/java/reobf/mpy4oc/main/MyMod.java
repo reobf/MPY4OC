@@ -1,10 +1,7 @@
 package reobf.mpy4oc.main;
 
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -44,152 +41,15 @@ public class MyMod {
     /** bios.py as shipped in this jar (set in preInit); the architecture's fallback for a clipped EEPROM. */
     public static volatile String BIOS_SOURCE;
  
-    private File extractBinary(File targetDir) throws IOException {
-        String os = System.getProperty("os.name").toLowerCase();
-        String arch = System.getProperty("os.arch").toLowerCase();
 
-        boolean isX64 = arch.equals("amd64") || arch.equals("x86_64");
-        if (!isX64) {
-            throw new UnsupportedOperationException("Unsupported Arch: " + arch);
-        }
-
-        String resourcePath;
-        String fileName;
-        if (os.contains("linux")) {
-            resourcePath = "binary/mpy-cross-linux-x64";
-            fileName = "mpy-cross-linux-x64";
-        } else if (os.contains("windows")) {
-            resourcePath = "binary/mpy-cross-win-x64.exe";
-            fileName = "mpy-cross-win-x64.exe";
-        } else {
-            throw new UnsupportedOperationException("Unsupported OS: " + os);
-        }
-
-        if (!targetDir.exists() && !targetDir.mkdirs()) {
-            throw new IOException("Cannot create dir: " + targetDir);
-        }
-
-        File target = new File(targetDir, fileName);
-
-        // 文件已存在则跳过拷贝，但仍要保证权限正确
-        if (!target.exists() || target.length() == 0) {
-            InputStream in = MyMod.class.getClassLoader().getResourceAsStream(resourcePath);
-            if (in == null) {
-                throw new IOException("Resource not found in jar: " + resourcePath);
-            }
-            try {
-                OutputStream out = new FileOutputStream(target);
-                try {
-                    byte[] buf = new byte[8192];
-                    int len;
-                    while ((len = in.read(buf)) != -1) {
-                        out.write(buf, 0, len);
-                    }
-                } finally {
-                    out.close();
-                }
-            } finally {
-                in.close();
-            }
-        }
-
-        // Linux 每次都确保可执行权限（即使文件已存在）
-        if (os.contains("linux")) {
-            target.setExecutable(true, false);
-        }
-
-        return target;
-    }
-
-
-    /** Absolute path of the extracted mpy-cross, or null when none is available. */
-    public static String MPY_CROSS;
-    /** Why the binary backend is unavailable, for the one-time log line. */
-    private static String binaryUnavailableReason;
-    private static boolean warnedBinaryMissing;
-
-    /** True when a native mpy-cross was extracted and can be run. */
-    public static boolean isBinaryBackendAvailable() {
-        return MPY_CROSS != null;
-    }
-
-    /**
-     * Compile Python source to .mpy bytecode using the configured backend.
-     *
-     * <p>The backend is read fresh from the config every call, so switching it in the
-     * in-game config screen applies to the very next compile.
-     *
-     * <p>Only a MISSING binary backend falls back to Java. A backend that runs and
-     * rejects the source propagates its error: silently retrying on the other backend
-     * would turn a real disagreement between the two into a mystery, and would make a
-     * genuine syntax error look like it compiled fine.
-     */
+    /** Compile Python source to .mpy bytecode with the built-in pure-Java compiler. */
     static public byte[] compile(String source) throws Exception {
-        if (Config.wantsBinaryBackend()) {
-            if (isBinaryBackendAvailable()) {
-                return compileWithBinary(source);
-            }
-            if (!warnedBinaryMissing) {
-                warnedBinaryMissing = true;
-                LOG.warn("mpy4oc: config selects the 'binary' compiler backend, but no usable "
-                        + "mpy-cross is available (" + binaryUnavailableReason
-                        + "); using the built-in Java backend instead.");
-            }
-        }
-        return compileWithJava(source);
-    }
-
-    /** Run the extracted mpy-cross as a subprocess. */
-    private static byte[] compileWithBinary(String source) throws Exception {
-        Process p = new ProcessBuilder(MPY_CROSS, "-", "-o", "-").start();
-        p.getOutputStream().write(source.getBytes("UTF-8"));
-        p.getOutputStream().close();
-        byte[] out = p.getInputStream().readAllBytes();
-        if (p.waitFor() != 0) throw new RuntimeException("compile failed");
-        return out;
-    }
-
-    /** Compile in-process with the bundled pure-Java compiler. */
-    private static byte[] compileWithJava(String source) throws Exception {
         return net.mpy.compiler.MpyCross.compile(source);
     }
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
-        File configFile = event.getSuggestedConfigurationFile();
-        File gameDir = configFile.getParentFile().getParentFile();
-        File mpyBinaryDir = new File(gameDir, "mpy_binary");
-
         // SFTP port etc.
-        Config.synchronizeConfiguration(configFile);
-
-        // Re-read the config whenever it is edited from the in-game screen, so the
-        // compiler-backend switch applies without a restart.
-        cpw.mods.fml.common.FMLCommonHandler.instance().bus().register(new Object() {
-            @cpw.mods.fml.common.eventhandler.SubscribeEvent
-            public void onConfigChanged(
-                    cpw.mods.fml.client.event.ConfigChangedEvent.OnConfigChangedEvent event) {
-                if (MODID.equals(event.modID)) {
-                    Config.loadFromConfig();
-                    LOG.info("mpy4oc: compiler backend is now '" + Config.compilerBackend + "'");
-                }
-            }
-        });
-
-        // The binary is ALWAYS extracted, whichever backend is configured: the setting
-        // can be flipped at any time from the in-game screen, and a mod that only
-        // unpacked it lazily would then have to do file I/O mid-game. Failing to
-        // extract is no longer fatal either -- on a platform with no bundled binary
-        // (macOS, ARM, ...) the mod still runs fine on the Java backend.
-        try {
-            File exe = extractBinary(mpyBinaryDir);
-            MPY_CROSS = exe.getAbsolutePath();
-            LOG.info("mpy4oc: mpy-cross available at " + MPY_CROSS);
-        } catch (Exception e) {
-            MPY_CROSS = null;
-            binaryUnavailableReason = String.valueOf(e.getMessage());
-            LOG.info("mpy4oc: no native mpy-cross for this platform (" + binaryUnavailableReason
-                    + "); the 'binary' backend will fall back to the Java one.");
-        }
+        Config.synchronizeConfiguration(event.getSuggestedConfigurationFile());
 
         // The MPY CPU item. Items must be registered during preInit.
         mpyCpu = new reobf.mpy4oc.main.item.ItemMpyCPU();
