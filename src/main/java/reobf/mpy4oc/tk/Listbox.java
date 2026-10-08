@@ -106,11 +106,20 @@ public final class Listbox extends TkWidget {
     public void moveto(boolean x, double fraction) {
         alive(); if (!Double.isFinite(fraction)) throw new IllegalArgumentException("finite fraction required");
         bounds(); int at = (int) (Math.max(0, Math.min(1, fraction)) * (x ? maxWidth() : size()));
-        if (x) scrollX = at; else top = at; tree.changed(false);
+        if (x) scrollX = at; else top = at; clampScroll(); tree.changed(false);
     }
     public void scroll(boolean x, int amount, boolean pages) {
         alive(); bounds(); long next = (x ? scrollX : top) + (long) amount * (pages ? x ? pixels() : Math.max(1, page() - 1) : x ? 8 : 1);
-        int at = (int) Math.max(0, Math.min(Integer.MAX_VALUE, next)); if (x) scrollX = at; else top = at; tree.changed(false);
+        int at = (int) Math.max(0, Math.min(Integer.MAX_VALUE, next)); if (x) scrollX = at; else top = at; clampScroll(); tree.changed(false);
+    }
+    /**
+     * Size-independent bounds for the view. {@link #viewport()} narrows them against the
+     * laid-out size, but only for a painted Listbox; these keep every stored value
+     * within what the NBT loader accepts (rows are at most 1 KiB, i.e. 8192 pixels).
+     */
+    void clampScroll() {
+        top = Math.max(0, Math.min(top, Math.max(0, size() - 1)));
+        scrollX = Math.max(0, Math.min(scrollX, 8192));
     }
     void press(int y, int modifiers) {
         if (size() == 0) return;
@@ -124,6 +133,7 @@ public final class Listbox extends TkWidget {
     void drag(int y) {
         if (size() == 0 || selectmode.equals("single") || selectmode.equals("multiple")) return;
         if (y < bounds.y) top = Math.max(0, top - 1); else if (y >= bounds.y + bounds.height) top++;
+        clampScroll();
         int at = clamp(top + Math.floorDiv(y - bounds.y - pady - border, 16)); BitSet before = (BitSet) selected.clone();
         active = at; selected.clear(); selected.set(selectmode.equals("extended") ? Math.min(anchor, at) : at, selectmode.equals("extended") ? Math.max(anchor, at) + 1 : at + 1);
         if (!before.equals(selected)) selectionVersion++; tree.changed(false);

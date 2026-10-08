@@ -31,6 +31,7 @@ mpy4oc.config.tkSurfaceEnabled.tooltip=在方块表面显示实时 Tk 内容。�
 mpy4oc.config.tkSurfaceDistance=Tk 表面可视距离
 mpy4oc.config.tkSurfaceDistance.tooltip=以方块为单位的最大距离（8–64），客户端和服务器的限制同时生效。
 mpy4oc.tk.clientRequired=此客户端需要支持相同版本的 MPY4OC Tk 显示器协议。
+mpy4oc.tk.busy=显示器正忙于向你发送数据,请稍后再试。
 
 # --- 提示文字 --------------------------------------------------------------
 # %1$s = 档位, %2$s = 每 tick 指令预算

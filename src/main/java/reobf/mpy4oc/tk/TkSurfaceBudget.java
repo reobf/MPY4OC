@@ -7,8 +7,12 @@ public final class TkSurfaceBudget {
     private int available=BURST;
     public TkSurfaceBudget(long tick){this.tick=tick;}
     public boolean take(long now,int bytes) {
-        if(now>tick) {available=(int)Math.min(BURST,available+Math.min(64,now-tick)*(long)PER_TICK);tick=now;}
-        if(bytes<0||bytes>available)return false;
+        if(bytes<0||bytes>available(now))return false;
         available-=bytes;return true;
+    }
+    /** The balance at {@code now}, after refilling. */
+    public int available(long now) {
+        if(now>tick) {available=(int)Math.min(BURST,available+Math.min(64,now-tick)*(long)PER_TICK);tick=now;}
+        return available;
     }
 }

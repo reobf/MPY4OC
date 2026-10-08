@@ -108,7 +108,7 @@ public final class TkTreePersistence {
                         throw new IllegalArgumentException("invalid Entry selection");
                     e.selectionFirst = selection[0]; e.selectionLast = selection[1];
                 }
-                e.restoreScroll(TkOptions.integer(n.getInteger("scrollX"), 0, 8192));
+                e.restoreScroll(Math.max(0, Math.min(8192, n.getInteger("scrollX"))));
             }
             if (n.hasKey("pack", 10)) {
                 NBTTagCompound p = n.getCompoundTag("pack"); int[] pads = p.getIntArray("padding");
@@ -138,7 +138,9 @@ public final class TkTreePersistence {
         tree.nextId = state.getInteger("nextId");
         if (tree.nextId <= previous) throw new IllegalArgumentException("invalid next widget ID");
         tree.render(); int focus = state.getInteger("focus");
-        if (focus != 0) tree.focus(focus);
+        // Best effort: the saved focus may no longer be focusable at the restored size
+        // (a clipped or unmapped widget). Losing focus beats discarding the whole tree.
+        if (focus != 0) try { tree.focus(focus); } catch (IllegalArgumentException unfocusable) { /* keep 0 */ }
         tree.setOnChange(onChange); return tree;
     }
 }

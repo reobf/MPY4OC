@@ -75,12 +75,38 @@ class Shell:
         # fall through to the system globals. Nothing the command defines leaks
         # back into the shell, so no save/restore of main globals is needed.
         ns = {"args": args, "tty": self.tty, "sh": self}
+        self._depth = getattr(self, "_depth", 0) + 1
         try:
             exec_sandbox(src, ns)
         except SystemExit:
             pass
         except Exception as e:
             self.tty.print(name + ": " + str(e))
+        finally:
+            self._depth -= 1
+            if self._depth == 0:
+                self._release_windows()
+
+    def _release_windows(self):
+        # Like process exit closing a CPython program's windows: a command that ends
+        # without destroy() (an error, quit() then return) would otherwise keep its
+        # Tk display claimed, and every later Tk() would fail until reboot. Commands
+        # run from inside another command leave the outer one's windows alone.
+        try:
+            try:
+                # tkinter hooks this in when it creates its first window, so programs
+                # that never use Tk pay neither the import nor its memory.
+                release = computer._tk_release
+            except AttributeError:
+                # Not hooked (no window yet, or the hook was not restored from a saved
+                # VM): import only if a display exists, since windows need one.
+                if not list(component.list("tk_display")):
+                    return
+                import tkinter
+                release = tkinter._release_all
+            release()
+        except Exception:
+            pass
 
     def _cd(self, args):
         target = self.resolve(args[0]) if args else "/"

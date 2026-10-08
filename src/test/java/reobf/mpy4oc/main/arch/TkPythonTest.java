@@ -497,4 +497,55 @@ class TkPythonTest {
     private static void set(Object object, String name, Object value) throws Exception {
         java.lang.reflect.Field field = object.getClass().getDeclaredField(name); field.setAccessible(true); field.set(object, value);
     }
+
+    @Test void releaseAllFreesDisplaysLeftBehindByEndedPrograms() throws Exception {
+        // MPYOS calls _release_all() when a command ends; before, a program that stopped
+        // without destroy() kept its display until reboot.
+        Host host = new Host(); host.tiles.put("screen-a", new TileTkDisplay());
+        host.start(String.join("\n", "import tkinter as tk", "r = tk.Tk()", "blocked = False", "try:", "    tk.Tk()",
+                "except OSError:", "    blocked = True", "assert blocked", "tk._release_all()", "assert not r.winfo_exists()",
+                "r2 = tk.Tk()", "assert r2.winfo_screen() == 'screen-a'", "passed = True", ""));
+        host.runUntil("passed");
+    }
+
+    @Test void destroyAfterTheDisplayVanishedStillForgetsTheWindow() throws Exception {
+        Host host = new Host(); host.tiles.put("screen-a", new TileTkDisplay()); host.tiles.put("screen-b", new TileTkDisplay());
+        host.start(String.join("\n", "import tkinter as tk", "go = False", "r = tk.Tk(screenName='screen-a')", "armed = True",
+                "while not go:", "    r.update()", "r.destroy()", "assert not r.winfo_exists()",
+                "r2 = tk.Tk(screenName='screen-b')", "passed = True", ""));
+        host.runUntil("armed");
+        host.tiles.remove("screen-a"); host.vm.globals.put("go", Boolean.TRUE);
+        host.runUntil("passed");
+    }
+
+    @Test void closeButtonSendsWmDeleteWindowWhichAProtocolHandlerCanIntercept() throws Exception {
+        Host host = new Host(); TileTkDisplay tile = new TileTkDisplay(); host.tiles.put("screen-a", tile);
+        host.start(String.join("\n", "import tkinter as tk", "r = tk.Tk(screenName='screen-a')", "asked = []",
+                "r.protocol('WM_DELETE_WINDOW', lambda: asked.append(1))", "assert 'WM_DELETE_WINDOW' in r.protocol()",
+                "armed = True", "while not asked:", "    r.update()", "assert r.winfo_exists()",
+                "r._protocols.clear()", "second = True",
+                "r.mainloop()", "assert not r.winfo_exists()", "passed = True", ""));
+        host.runUntil("armed");
+        host.signal("tk_close", "screen-a", tile.application().token(), 0, "Player");
+        host.runUntil("second");
+        // Without a handler, tkinter's default destroys the window and mainloop returns.
+        host.signal("tk_close", "screen-a", tile.application().token(), 0, "Player");
+        host.runUntil("passed");
+        assertEquals("", tile.application().token(), "the display was released");
+    }
+
+    @Test void scaleKeepsFractionsTimersAreDistinctAcrossWindowsAndListboxGetBatches() throws Exception {
+        Host host = new Host(); host.tiles.put("screen-a", new TileTkDisplay()); host.tiles.put("screen-b", new TileTkDisplay());
+        host.start(String.join("\n", "import tkinter as tk", "r = tk.Tk(screenName='screen-a')",
+                "s = tk.Scale(r, from_=0, to=1, resolution=0.1)", "s.pack()", "s.set(0.7)", "s.configure(length=150)",
+                "assert abs(s.get() - 0.7) < 1e-9, s.get()",
+                "top = tk.Toplevel(r, screen='screen-b')",
+                "a = r.after(10000, print)", "b = top.after(10000, print)", "assert a != b",
+                "top.after_cancel(a)", "assert a not in r._timers and b in top._timers",
+                "lb = tk.Listbox(r)", "lb.insert(tk.END, *[str(i) for i in range(600)])",
+                "got = lb.get(0, tk.END)", "assert len(got) == 600 and got[599] == '599', len(got)",
+                "assert lb.get(598, tk.END) == ('598', '599')",
+                "passed = True", ""));
+        host.runUntil("passed");
+    }
 }

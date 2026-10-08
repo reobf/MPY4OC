@@ -241,26 +241,39 @@
 > 复核属实：genStdlib 幂等、原 25 模块与 HEAD 逐字节一致；`gradlew build` 通过、JUnit 350/0/0/0；发布 jar 的 Tk 类全为 major 52；实测截图与日志真实存在。arch tick 守卫正确（还修了不尊重 OC 读档后 pause 的旧 bug）；toPy 的 Scala Map 分支只影响原先会退化成字符串的值；CI 能跑测试，release 流程不受影响；Tk 许可证合规。
 
 阻断级：
-- [ ] 绘制预算溢出只在 `render()` 检查，异常逃出 TE tick → **服务器崩溃**（或 TE 被删）；`writeToNBT` 里同样抛出 → 该 TE 连同 OC 地址从区块存档丢失。改为变更时校验/回滚，`render()` 降级而非抛出，tick/保存调用点加 try/catch。（`TileTkDisplay.java:41`、`TkTree.java:77`）
-- [ ] GUI 出站流量无字节预算：右键、Resync（每 tick 可 32 次全量场景，可达 267 KB）、CopyResult（可达 512 KiB）→ 单客户端可让服务器每秒发上百 MB，积压至 OOM。复用 `TkSurfaceBudget` 计费；Resync 每 20 tick 至多一次；`openFor` 重用新近会话。（`TileTkDisplay.java:157`、`TkNetwork.java:123`）
+- [x] 绘制预算溢出只在 `render()` 检查，异常逃出 TE tick → **服务器崩溃**（或 TE 被删）；`writeToNBT` 里同样抛出 → 该 TE 连同 OC 地址从区块存档丢失。改为变更时校验/回滚，`render()` 降级而非抛出，tick/保存调用点加 try/catch。（`TileTkDisplay.java:41`、`TkTree.java:77`）
+- [x] GUI 出站流量无字节预算：右键、Resync（每 tick 可 32 次全量场景，可达 267 KB）、CopyResult（可达 512 KiB）→ 单客户端可让服务器每秒发上百 MB，积压至 OOM。复用 `TkSurfaceBudget` 计费；Resync 每 20 tick 至多一次；`openFor` 重用新近会话。（`TileTkDisplay.java:157`、`TkNetwork.java:123`）
 
 严重级：
-- [ ] 全局 2048 槽请求队列入队前不按连接限流 → 一个客户端挤掉所有人的心跳/表面续租；丢失的 Resync 不重试致 GUI 冻结。（`TkNetwork.java:135`，三个视角独立发现）
-- [ ] 输入预算不计工作量：Entry 粘贴 O(n²)、Text 编辑 O(n)，单观看者每 tick 80~130 ms。单遍计算可接受前缀、TkTree 缓存文本字节总数、Text 增量更新。（`Entry.java:173`）
-- [ ] NBT 加载拒绝运行时会产生的状态（Listbox top/scrollX 未钳制、焦点在被裁掉的控件上），一个字段失败即丢弃整棵树和令牌 → 读档后程序失去显示器。设置时钳制、焦点/视口尽力恢复、保存前 `refreshWidgets()`。（`TkControlPersistence.java:40`、`TkTreePersistence.java:141`）
-- [ ] 不检查 OC 电脑用户列表：OC 屏幕/键盘用 `computer.checked_signal` + `canInteract`，Tk 用普通 signal 且改控件前不校验 → 非授权玩家可操作别人电脑的界面。（`TileTkDisplay.java:232`）
-- [ ] Canvas 多边形客户端细分无上限：合法场景可让渲染线程卡约 7 s，表面渲染波及路人。服务端限制自交数/总顶点，客户端编译成显示列表。（`TkVectorRenderer.java:162`）
-- [ ] 残留根窗口：MPYOS 命令异常退出未 destroy 时 `_roots` 留在 VM 模块缓存，之后 `Tk()` 一律 "no tk display" 直到重启；示例无退出路径。shell/REPL 结束时释放，或允许接管不在 mainloop 中的根。（`stdlib/tkinter.py:521`）
-- [ ] AltGr / Option 输入被丢（@ { } [ ] \ | ~ € 等）：Entry/Text 把修饰位 4 当 Alt 直接丢弃。（`Entry.java:142`、`Text.java:195`）
-- [ ] 无 variable 的 Scale 在任何 `configure()` 后丢失小数（私有变量是 IntVar）。（`stdlib/tkinter.py:800,818`）
-- [ ] `tk_input`/`tk_clipboard` 原始信号无人消费，堆积进 VM 快照（约 890 KB）且不计内存限额。（`TkHostApi.java:41`）
+- [x] 全局 2048 槽请求队列入队前不按连接限流 → 一个客户端挤掉所有人的心跳/表面续租；丢失的 Resync 不重试致 GUI 冻结。（`TkNetwork.java:135`，三个视角独立发现）
+- [x] 输入预算不计工作量：Entry 粘贴 O(n²)、Text 编辑 O(n)，单观看者每 tick 80~130 ms。单遍计算可接受前缀、TkTree 缓存文本字节总数、Text 增量更新。（`Entry.java:173`）
+- [x] NBT 加载拒绝运行时会产生的状态（Listbox top/scrollX 未钳制、焦点在被裁掉的控件上），一个字段失败即丢弃整棵树和令牌 → 读档后程序失去显示器。设置时钳制、焦点/视口尽力恢复、保存前 `refreshWidgets()`。（`TkControlPersistence.java:40`、`TkTreePersistence.java:141`）
+- [x] 不检查 OC 电脑用户列表：OC 屏幕/键盘用 `computer.checked_signal` + `canInteract`，Tk 用普通 signal 且改控件前不校验 → 非授权玩家可操作别人电脑的界面。（`TileTkDisplay.java:232`）
+- [x] Canvas 多边形客户端细分无上限：合法场景可让渲染线程卡约 7 s，表面渲染波及路人。服务端限制自交数/总顶点，客户端编译成显示列表。（`TkVectorRenderer.java:162`）
+- [x] 残留根窗口：MPYOS 命令异常退出未 destroy 时 `_roots` 留在 VM 模块缓存，之后 `Tk()` 一律 "no tk display" 直到重启；示例无退出路径。shell/REPL 结束时释放，或允许接管不在 mainloop 中的根。（`stdlib/tkinter.py:521`）
+- [x] AltGr / Option 输入被丢（@ { } [ ] \ | ~ € 等）：Entry/Text 把修饰位 4 当 Alt 直接丢弃。（`Entry.java:142`、`Text.java:195`）
+- [x] 无 variable 的 Scale 在任何 `configure()` 后丢失小数（私有变量是 IntVar）。（`stdlib/tkinter.py:800,818`）
+- [x] `tk_input`/`tk_clipboard` 原始信号无人消费，堆积进 VM 快照（约 890 KB）且不计内存限额。（`TkHostApi.java:41`）
 
 兼容性（轻微级，但影响发布说明）：
-- [ ] 新注册方块 → p6 及更早客户端**完全无法进入**本版服务器（FML 注册表同步 "Fatally missing blocks and items"），与是否使用 Tk 无关；`docs/tkinter.md:114` 与 MyMod 注释写成"只是不能用 Tk GUI"，需更正，发布说明写明所有人须更新。
+- [x] 新注册方块 → p6 及更早客户端**完全无法进入**本版服务器（FML 注册表同步 "Fatally missing blocks and items"），与是否使用 Tk 无关；`docs/tkinter.md:114` 与 MyMod 注释写成"只是不能用 Tk GUI"，需更正，发布说明写明所有人须更新。
 
 轻微级（约 25 条，详见报告）：bind 的 add/unbind 语义、keysym、禁用控件不触发绑定、点击抢焦点、Toplevel 的 after id 冲突、`Listbox.get` 超 256 行报错、颜色名只认 8 个、数字 `text=`/元组 `sticky`、无 variable 的 Radiobutton 不互斥、Tab 顺序、文本禁 Tab、计时器精度与顺序；坏包每次打 WARN 堆栈、字形图集无限增长、41 格外 z-fighting、FBO 创建失败泄漏、区块 NBT 超 1 MiB 会被原版静默放弃保存；test 任务不感知 `stdlib/` 改动、golden JSON 为 CRLF、GenStdlib 单字符串常量 64 KB 上限（tkinter 已用 38%）；`docs/tkinter.md:63` 写了 grid `uniform` 但未实现。
 
 - 完成标准：阻断与严重级全部修复并各有回归测试；双客户端复测一轮；然后提交（作者按仓库历史）。
+- 结果（2026-10-08，Claude）：快照提交 `2a61af3` 之后修复，360 个 JUnit 全过（新增 `TkHardeningTest` 7 个、`TkPythonTest` 3 个）。
+  - 渲染：`TkTree.render()` 永不抛出；超预算按绘制顺序截断（`overflowed()`），其他异常保留上一帧。TE tick、`writeToNBT`、服务端 tick 循环各自兜底；读档捕获 `RuntimeException`（含 ReportedException）只丢控件树、不丢 TE。
+  - 出站：GUI 流量（OpenGui/SceneSync/CopyResult）按编码字节走每连接预算（1 MiB 突发、16 KiB/tick）；增量只有真正发出才确认（`Viewer.prepare/sent`），超额下 tick 合并重发；每连接每 10 tick 至多开一次 GUI；Resync 改为标记全量、每 20 tick 至多一次；客户端每 2 秒重试未回应的 Resync。
+  - 入站：每连接最多排队 64 个请求（关闭请求另有 8 个预留）；文本编辑类输入（可打印字符/退格/删除/回车/Tab/粘贴/剪切）令牌桶限速，平均 4 次/tick、突发 8 次；Entry 粘贴改单遍；Text 粘贴过滤控制字符并只插入放得下的部分。
+  - 权限：输入、粘贴、复制要求占用该屏的电脑 `canInteract(player)`；玩家引起的 `tk_command/tk_event/tk_changed` 改用 `computer.checked_signal`；去掉无人消费的 `tk_input/tk_clipboard`。
+  - 存档：Listbox 视图在设置时钳制（`clampScroll`），加载时钳制而非拒绝；焦点恢复失败只丢焦点；保存前按保存尺寸重新布局。
+  - Canvas：填充多边形自交上限 128、整树 512（`TkVector.crossings()` 缓存于不可变向量）。
+  - Python：`destroy()` 在显示器失效时也清理本地状态；新增 `tkinter._release_all()`，MPYOS 命令结束时调用（网络里没有 Tk 显示器则不导入）；Scale 私有变量改 DoubleVar；after id 全局唯一、`after_cancel` 跨窗口查找；`bind/tag_bind` 的 add 任意真值即追加；`Listbox.get(a, b)` 分批读取。AltGr/Option 字符可键入。
+  - 文档：删去 grid `uniform`；写明旧客户端（p6 及更早）完全无法进入新服务器、权限规则、粘贴过滤、多边形与流量限制、MPYOS 命令结束自动关窗。
+  - 仍未做：Text 每次编辑仍是 O(n)（靠每 tick 4 次上限约束）；其余轻微级（keysym、禁用控件绑定、点击抢焦点、颜色名、uniform 实现、`unbind(seq, funcid)` 对追加绑定无效、z-fighting、字形图集增长、FBO 失败泄漏、区块 NBT 超 1 MiB、golden CRLF、GenStdlib 64 KB 常量）。
+- 复核（2026-10-08，第二轮对抗审查 4 视角 + 查漏）：确认 3 条已修——关闭请求无限绕过队列上限（改为 8 个预留）、自交计数把接触算作交叉（改为只计真正交叉，基线面积图不再被拒）、客户端仍把 AltGr+V 当粘贴；另修轻微：剪切改为回包发出后再删除、编辑上限改令牌桶且只计改文本的键、超预算时不重复编码、连接不可写时暂停发送（背压）、服务端兜底改为关闭出错显示器的 GUI 而非每 tick 刷日志、读档时关闭在线 GUI 且场景版本单调递增、保存时只布局不发布场景、粘贴/剪切后立即发出其排队的视图回调、Windows 左 Alt+字母不再打字、tkinter 通过 `computer._tk_release` 挂钩让 shell 无需导入即可关窗；新增权限判断单测。完整报告：`build/tk-review-hardening-20261008.json`。
+- 新功能（2026-10-08，用户要求）：GUI 标题栏右上角 × 关闭按钮——发 `WindowClose` 包（协议升为 `mpy4oc_tk10`），有权操作且屏上有程序时向程序发 `tk_close`（tkinter `_delete_window`：有 `protocol('WM_DELETE_WINDOW', f)` 调 f，否则 `destroy()`），否则只关自己的 GUI；程序 `release` 显示器时关闭所有观看者的 GUI。新增 `Tk.protocol/wm_protocol`；363 个测试通过。
+- [ ] 双客户端游戏内复测（权限、限流、粘贴、AltGr、读档、× 按钮）后提交。
 
 ## 后续可选
 - Toplevel 多屏实测、messagebox/simpledialog、Menu、完整 Text(tag/mark/undo/search)、ttk 别名。

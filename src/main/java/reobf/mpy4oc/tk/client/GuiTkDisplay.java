@@ -21,7 +21,7 @@ public final class GuiTkDisplay extends GuiScreen {
     private final TkPointerInput pointer;
     private boolean serverClosed, resyncPending;
     private int left, top, canvasWidth, canvasHeight;
-    private int ticks;
+    private int ticks, resyncTick;
     private char highSurrogate;
     private boolean repeatSaved, previousRepeat;
 
@@ -54,16 +54,24 @@ public final class GuiTkDisplay extends GuiScreen {
         drawRect(left, top - 18, left + canvasWidth, top, 0xFF303030);
         drawRect(left, top, left + canvasWidth, top + canvasHeight, 0xFF000000 | scene.background);
         renderer.draw(mc, scene, left, top, canvasWidth, canvasHeight);
-        renderer.title(scene.title, left + 4, top - 17, Math.max(0, canvasWidth - 8));
+        renderer.title(scene.title, left + 4, top - 17, Math.max(0, canvasWidth - 8 - CLOSE_SIZE));
+        drawCloseButton(onClose(mouseX, mouseY));
         super.drawScreen(mouseX, mouseY, partialTick);
     }
 
     public void sync(TkPackets.SceneSync update) {
         if (!state.target.equals(update.target)) return;
-        if (!state.accept(update) && !resyncPending) {
-            resyncPending = true;
-            TkNetwork.sendToServer(new TkPackets.Resync(state.target));
-        } else if (update.isFull()) resyncPending = false;
+        if (!state.accept(update) && !resyncPending) requestResync();
+        else if (update.isFull()) resyncPending = false;
+    }
+
+    /**
+     * The server honours at most one resync per second and may drop a request it cannot
+     * queue; until a full scene arrives every delta is rejected, so keep asking.
+     */
+    private void requestResync() {
+        resyncPending = true; resyncTick = ticks;
+        TkNetwork.sendToServer(new TkPackets.Resync(state.target));
     }
 
     public void closeFromServer() {
@@ -84,11 +92,35 @@ public final class GuiTkDisplay extends GuiScreen {
         else {
             pointer.tick();
             if (++ticks % 20 == 0) TkNetwork.sendToServer(new TkPackets.Heartbeat(state.target));
+            if (resyncPending && ticks - resyncTick >= 40) requestResync();
+        }
+    }
+
+    /** Width and height of the title bar's close button, in GUI pixels. */
+    private static final int CLOSE_SIZE = 18;
+
+    private boolean onClose(int x, int y) {
+        return x >= left + canvasWidth - CLOSE_SIZE && x < left + canvasWidth && y >= top - CLOSE_SIZE && y < top;
+    }
+
+    /** A desktop-style close button: a cross that turns red under the pointer. */
+    private void drawCloseButton(boolean hover) {
+        int x0 = left + canvasWidth - CLOSE_SIZE, y0 = top - CLOSE_SIZE;
+        if (hover) drawRect(x0, y0, x0 + CLOSE_SIZE, y0 + CLOSE_SIZE, 0xFFE81123);
+        int color = hover ? 0xFFFFFFFF : 0xFFC8C8C8, cx = x0 + (CLOSE_SIZE - 9) / 2, cy = y0 + (CLOSE_SIZE - 9) / 2;
+        for (int i = 0; i < 9; i++) {
+            drawRect(cx + i, cy + i, cx + i + 1, cy + i + 1, color);
+            drawRect(cx + 8 - i, cy + i, cx + 9 - i, cy + i + 1, color);
         }
     }
 
     @Override
     protected void mouseClicked(int x, int y, int button) {
+        if (button == 0 && onClose(x, y)) {
+            // The server decides: WM_DELETE_WINDOW for the application, or close just this GUI.
+            TkNetwork.sendToServer(new TkPackets.WindowClose(state.target));
+            return;
+        }
         if (!inside(x, y)) return;
         samplePointer(x, y);
         if (button == 2) paste();
@@ -130,9 +162,17 @@ public final class GuiTkDisplay extends GuiScreen {
             point = Character.toCodePoint(highSurrogate, character);
         }
         highSurrogate = 0;
+        boolean alt = Keyboard.isKeyDown(Keyboard.KEY_LMENU) || Keyboard.isKeyDown(Keyboard.KEY_RMENU);
+        // Windows reports AltGr as Ctrl+Alt: AltGr+V types '@' on several layouts, so only
+        // Ctrl without Alt is a clipboard shortcut (the server applies the same rule).
+        boolean shortcut = isCtrlKeyDown() && !alt;
+        // On Windows a left-Alt chord is a menu accelerator in Tk, not text; macOS Option,
+        // which also sets Alt, does type characters.
+        if (alt && !isCtrlKeyDown() && Keyboard.isKeyDown(Keyboard.KEY_LMENU)
+                && org.lwjgl.LWJGLUtil.getPlatform() == org.lwjgl.LWJGLUtil.PLATFORM_WINDOWS) point = 0;
         TkNetwork.sendToServer(new TkPackets.InputEvent(state.target, TkPackets.InputEvent.KEY_DOWN, 0, 0, code, point, modifiers()));
-        if (isCtrlKeyDown() && code == Keyboard.KEY_V || isShiftKeyDown() && code == Keyboard.KEY_INSERT) paste();
-        else if (isCtrlKeyDown() && (code == Keyboard.KEY_C || code == Keyboard.KEY_X || code == Keyboard.KEY_INSERT)
+        if (shortcut && code == Keyboard.KEY_V || isShiftKeyDown() && code == Keyboard.KEY_INSERT) paste();
+        else if (shortcut && (code == Keyboard.KEY_C || code == Keyboard.KEY_X || code == Keyboard.KEY_INSERT)
                 || isShiftKeyDown() && code == Keyboard.KEY_DELETE)
             TkNetwork.sendToServer(new TkPackets.CopyRequest(state.target, state.requestCopy(), code == Keyboard.KEY_X || code == Keyboard.KEY_DELETE));
     }

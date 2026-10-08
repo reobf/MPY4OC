@@ -30,6 +30,47 @@ public final class TkVector {
         }
     }
     public int count() { return points.length; }
+
+    private int crossings = -1;
+    /**
+     * Pairs of non-adjacent polygon edges that properly cross (each strictly separates the
+     * other's endpoints). Clients fill a polygon with the GLU tessellator, whose work grows
+     * with these crossings: a 256-point star has about 32,000 and takes seconds. Contacts
+     * -- a vertex on another edge, collinear overlap, repeated points -- are not counted:
+     * they are what area charts resting on a baseline are made of, and tessellate cheaply.
+     * Cached: the vector is immutable.
+     */
+    public int crossings() {
+        if (crossings >= 0) return crossings;
+        int n = shape == Shape.POLYGON ? points.length / 2 : 0, count = 0;
+        for (int i = 0; i < n; i++)
+            for (int j = i + 2; j < n; j++) {
+                if (i == 0 && j == n - 1) continue; // the closing edge shares vertex 0
+                if (crosses(i, (i + 1) % n, j, (j + 1) % n)) count++;
+            }
+        return crossings = count;
+    }
+    private boolean crosses(int a, int b, int c, int d) {
+        double o1 = orient(a, b, c), o2 = orient(a, b, d), o3 = orient(c, d, a), o4 = orient(c, d, b);
+        return (o1 > 0 && o2 < 0 || o1 < 0 && o2 > 0) && (o3 > 0 && o4 < 0 || o3 < 0 && o4 > 0);
+    }
+    private double orient(int a, int b, int c) {
+        return (points[2*b] - points[2*a]) * (points[2*c+1] - points[2*a+1])
+                - (points[2*b+1] - points[2*a+1]) * (points[2*c] - points[2*a]);
+    }
+    /**
+     * Carry a computed crossing count over from {@code from} when this vector has the
+     * same shape up to translation (style changes, Canvas move), sparing the O(n^2) count.
+     */
+    TkVector sameOutlineAs(TkVector from) {
+        if (from.crossings >= 0 && from.shape == shape && from.points.length == points.length) {
+            double dx = points.length == 0 ? 0 : points[0] - from.points[0], dy = points.length == 0 ? 0 : points[1] - from.points[1];
+            for (int i = 0; i < points.length; i += 2)
+                if (points[i] - from.points[i] != dx || points[i+1] - from.points[i+1] != dy) return this;
+            crossings = from.crossings;
+        }
+        return this;
+    }
     public double at(int i) { return points[i]; }
     public double[] coords() { return points.clone(); }
     public boolean hit(double x, double y, double tolerance, TkRect textBounds) {

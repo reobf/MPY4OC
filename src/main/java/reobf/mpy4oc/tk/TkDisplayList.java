@@ -86,6 +86,27 @@ public final class TkDisplayList {
         }
     }
 
+    /**
+     * Drop the paint records that do not fit the list budgets, in paint order, so that
+     * {@link #TkDisplayList(List)} accepts the rest. Returns whether anything was dropped.
+     * The budgets are only checked when a frame is built, long after the Python call or
+     * player input that grew the tree has returned, so a frame that is too big has to
+     * degrade here: throwing would escape into the tile entity tick.
+     */
+    static boolean trimToBudget(List<Item> items) {
+        int count = 0, bytes = 0, coords = 0;
+        boolean dropped = false;
+        for (java.util.Iterator<Item> it = items.iterator(); it.hasNext();) {
+            Item item = it.next();
+            int b = item.text.getBytes(StandardCharsets.UTF_8).length, c = item.vector == null ? 0 : item.vector.count();
+            if (count + 1 > MAX_RECORDS || bytes + b > MAX_PAINT_BYTES || coords + c > TkVector.MAX_TOTAL_COORDS) {
+                it.remove(); dropped = true; continue;
+            }
+            count++; bytes += b; coords += c;
+        }
+        return dropped;
+    }
+
     public TkDisplayList(List<Item> items) {
         if (items.size() > MAX_RECORDS) throw new IllegalArgumentException("too many paint records");
         Set<Long> ids = new HashSet<>();

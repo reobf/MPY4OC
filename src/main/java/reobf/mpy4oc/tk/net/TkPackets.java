@@ -166,6 +166,14 @@ public final class TkPackets {
         public Heartbeat(TkTarget target) { super(target); }
     }
 
+    /** The title bar's close button: WM_DELETE_WINDOW for the application, or just this GUI. */
+    public static final class WindowClose extends Request {
+        public WindowClose() {}
+        public WindowClose(TkTarget target) { super(target); }
+        @Override public void toBytes(ByteBuf out) { writeTarget(out, target); }
+        @Override public void fromBytes(ByteBuf in) { target = readTarget(in); end(in); }
+    }
+
     public static final class InputEvent extends Request {
         public static final int MOUSE_DOWN = 0, MOUSE_UP = 1, KEY_DOWN = 2, MOUSE_CANCEL = 3,
                 MOTION = 4, DRAG = 5, WHEEL = 6, KEY_UP = 7;

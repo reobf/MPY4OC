@@ -39,7 +39,7 @@ public final class TkApplication {
         if (token.isEmpty() || !token.equals(expectedToken) || !owner.equals(caller))
             throw new IllegalArgumentException("Tk window is no longer attached to this display");
         TkTree tree = tile.widgets();
-        if (operation.equals("release")) { tree.clear(); token = owner = ""; tile.markDirty(); return null; }
+        if (operation.equals("release")) { tree.clear(); token = owner = ""; tile.markDirty(); tile.applicationReleased(); return null; }
         if (operation.equals("geometry")) {
             Map<String, Object> options = TkOptions.map(args[0]); TkScene s = tile.scene();
             for (String key : options.keySet()) if (!java.util.Arrays.asList("width", "height", "title", "background").contains(key))

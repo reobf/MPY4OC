@@ -29,7 +29,8 @@ class TkTextTest {
     @Test void unicodeEditsPreserveFinalNewlineAndAreAtomicAtLimits() {
         Text t=text();t.insert(0,"中😀\n文");assertEquals("2.1",t.index(t.index("end-1c")));assertEquals("😀",t.get(t.index("1.1"),t.index("1.2")));
         t.selection(1,3);t.cursor(2);String before=t.content();
-        assertThrows(IllegalArgumentException.class,()->t.paste("\uD800"));assertEquals(before,t.content());assertEquals(1,t.first);assertEquals(2,t.cursor);
+        // Player input is filtered, not rejected: nothing insertable leaves everything as it was.
+        t.paste("\uD800");assertEquals(before,t.content());assertEquals(1,t.first);assertEquals(2,t.cursor);
         assertThrows(IllegalArgumentException.class,()->t.insert(0,"x".repeat(Text.MAX_CHARS)));assertEquals(before,t.content());
         t.delete(0,t.length());assertEquals("\n",t.content());assertEquals("2.0",t.index(t.index("end")));
         t.insert(t.length(),"尾\r\n");assertEquals("尾\n\n",t.content());

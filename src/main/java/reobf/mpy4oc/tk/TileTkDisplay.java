@@ -38,7 +38,13 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
 
     @Override
     public void updateEntity() {
-        if (worldObj != null && !worldObj.isRemote && node != null) { super.updateEntity(); emitCommands(""); }
+        if (worldObj != null && !worldObj.isRemote && node != null) {
+            super.updateEntity();
+            // An exception escaping a tile entity tick crashes the server (or, with
+            // Forge's removeErroringTileEntities, deletes the block). Contain it.
+            try { emitCommands(""); }
+            catch (RuntimeException error) { reobf.mpy4oc.main.MyMod.LOG.warn("Tk display tick failed", error); }
+        }
     }
 
     @Override
@@ -160,6 +166,8 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
             player.addChatMessage(new ChatComponentTranslation("mpy4oc.tk.clientRequired"));
             return;
         }
+        // Vanilla does not throttle right-clicks; each open sends a full scene.
+        if (!TkNetwork.allowOpen(player)) return;
         updateEntity();
         if (node == null || node.address() == null) return;
         TkNetwork.beginViewing(player);
@@ -167,10 +175,28 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
         TkNetwork.watch(this);
         synchronized (this) {
             refreshWidgets();
-            viewer.lastScene = scene;
-            viewer.revision = sceneRevision;
-            TkNetwork.send(player, new TkPackets.OpenGui(target(viewer), sceneRevision, scene));
+            if (TkNetwork.trySend(player, new TkPackets.OpenGui(target(viewer), sceneRevision, scene))) {
+                viewer.sent(sceneRevision, scene);
+            } else {
+                closeFor(player, viewer.session, false);
+                player.addChatMessage(new ChatComponentTranslation("mpy4oc.tk.busy"));
+            }
         }
+    }
+
+    /**
+     * Whether {@code player} may operate this display's UI: the same permission the owning
+     * computer applies to its own OC screens and keyboards ({@code computer.addUser}).
+     * A display with no live owner on this network accepts no input.
+     */
+    public boolean canControl(EntityPlayerMP player) { return canControl(player.getCommandSenderName()); }
+    public boolean canControl(String player) {
+        String owner = application.owner();
+        if (owner.isEmpty() || node == null || node.network() == null) return false;
+        Node machine = node.network().node(owner);
+        if (machine == null) return false;
+        Object host = machine.host();
+        return !(host instanceof Context) || ((Context) host).canInteract(player);
     }
 
     private TkTarget target(TkViewers.Viewer<EntityPlayerMP> viewer) {
@@ -195,24 +221,46 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
         for (TkViewers.Viewer<EntityPlayerMP> viewer : viewers.all()) closeFor(viewer.owner, viewer.session, true);
     }
 
+    /**
+     * The GUI's close button, as on a desktop window manager: the application receives
+     * WM_DELETE_WINDOW (tkinter destroys the window unless a protocol handler says
+     * otherwise). With no application, or for a player who may not operate it, the button
+     * just closes that player's GUI.
+     */
+    public void windowClose(EntityPlayerMP player, long session) {
+        TkViewers.Viewer<EntityPlayerMP> viewer = viewers.find(player.getUniqueID(), session);
+        if (viewer == null || viewer.owner != player) return;
+        if (application.token().isEmpty() || !canControl(player)) { closeFor(player, session, true); return; }
+        playerSignal(player, "tk_close", application.token(), 0, player.getCommandSenderName());
+    }
+
+    /** The application gave up the display: its window is gone, so close every GUI on it. */
+    void applicationReleased() { closeViewers(); }
+
+    /** Close every GUI on this display after a failure: best-effort notify, never throws. */
+    public void abortViewers() {
+        for (TkViewers.Viewer<EntityPlayerMP> viewer : viewers.all()) {
+            try { if (node != null && node.address() != null) TkNetwork.send(viewer.owner, new TkPackets.CloseGui(target(viewer))); }
+            catch (RuntimeException ignored) { /* the client times out its GUI instead */ }
+        }
+        discardViewers();
+    }
+
     public void discardViewers() {
         for (TkViewers.Viewer<EntityPlayerMP> viewer : viewers.all()) widgets.release(viewer.session);
         viewers.clear();
         TkNetwork.unwatch(this);
     }
 
-    public boolean acceptInput(EntityPlayerMP player, long session, long tick, int cost) {
+    public boolean acceptInput(EntityPlayerMP player, long session, long tick, int cost, boolean edit) {
         TkViewers.Viewer<EntityPlayerMP> viewer = viewers.find(player.getUniqueID(), session);
-        return viewer != null && viewer.owner == player && viewer.allowInput(tick, cost);
+        return viewer != null && viewer.owner == player && viewer.allowInput(tick, cost, edit);
     }
 
-    public synchronized void sendFullScene(EntityPlayerMP player, long session) {
+    /** The client lost track of the scene; the next flush sends it in full (rate-limited). */
+    public synchronized void requestResync(EntityPlayerMP player, long session, long tick) {
         TkViewers.Viewer<EntityPlayerMP> viewer = viewers.find(player.getUniqueID(), session);
-        if (viewer == null || viewer.owner != player) return;
-        refreshWidgets();
-        viewer.lastScene = scene;
-        viewer.revision = sceneRevision;
-        TkNetwork.send(player, new TkPackets.SceneSync(target(viewer), -1, sceneRevision, TkPackets.ALL, scene));
+        if (viewer != null && viewer.owner == player) viewer.requestResync(tick);
     }
 
     public synchronized void flushViewers() {
@@ -222,9 +270,10 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
                 closeFor(viewer.owner, viewer.session, true);
                 continue;
             }
-            if (viewer.revision != sceneRevision) {
-                TkPackets.SceneSync update = viewer.update(target(viewer), sceneRevision, scene);
-                if (update != null) TkNetwork.send(viewer.owner, update);
+            if (viewer.stale(sceneRevision)) {
+                TkPackets.SceneSync update = viewer.prepare(target(viewer), sceneRevision, scene);
+                // Over budget: keep the old base so the next tick sends a combined delta.
+                if (update != null && TkNetwork.trySend(viewer.owner, update)) viewer.sent(sceneRevision, scene);
             }
         }
     }
@@ -253,9 +302,9 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
         else if (event.kind == TkPackets.InputEvent.MOUSE_CANCEL && event.code == 0) widgets.release(event.target.session);
         else if (event.kind == TkPackets.InputEvent.DRAG) target = widgets.pointerDrag(event.target.session, event.x, event.y);
         else if (event.kind == TkPackets.InputEvent.WHEEL) widgets.wheel(event.x, event.y, event.code);
-        changedEntry(previousFocus, previousText);
-        if (command != null) emitCommand(command, player.getCommandSenderName());
-        emitCommands(player.getCommandSenderName());
+        changedEntry(previousFocus, previousText, player);
+        if (command != null) emitCommand(command, player);
+        emitCommands(player);
         if (selectionTarget instanceof Listbox && ((Listbox) selectionTarget).selectionVersion != selectionBefore)
             boundEvent(selectionTarget, "<<ListboxSelect>>", event, player);
         if (event.kind == TkPackets.InputEvent.MOUSE_DOWN && (event.code == 0 || event.code == 1))
@@ -274,22 +323,39 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
             if (sequence != null) boundEvent(target, sequence, event, player, canvasItem);
         }
         // High-frequency pointer events are delivered only to registered bindings.
+        // (No raw per-input signal: nothing consumes one, and every unread signal is
+        // carried in the VM snapshot, outside the machine's memory accounting.)
         if (!key) widgets.updateCanvasCurrent(event.target.session, event.x, event.y);
-        if (event.kind != TkPackets.InputEvent.MOTION && event.kind != TkPackets.InputEvent.DRAG)
-            node.sendToReachable("computer.signal", "tk_input", event.kind, event.x, event.y,
-                    event.code, event.character, event.modifiers, player.getCommandSenderName());
     }
 
     private void emitCommands(String player) { for (TkTree.Command command : widgets.takeCommands()) emitCommand(command, player); }
+    private void emitCommands(EntityPlayerMP player) { for (TkTree.Command command : widgets.takeCommands()) emitCommand(command, player); }
+    /** A command no player caused (a Python change, a scroll callback): plain signal. */
     private void emitCommand(TkTree.Command command, String player) {
-        if (node == null) return;
+        if (node != null) node.sendToReachable("computer.signal", commandSignal(command, player));
+    }
+    /** A command a player caused: OC delivers it only to computers this player may use. */
+    private void emitCommand(TkTree.Command command, EntityPlayerMP player) {
+        if (node != null) playerSignal(player, commandSignal(command, player.getCommandSenderName()));
+    }
+    private Object[] commandSignal(TkTree.Command command, String player) {
         // OC Machine.onMessage inserts message.source.address before our args.
         // Including it here too shifts the token/widget/callback positions.
         Object[] signal = new Object[5 + command.args.length];
         signal[0] = "tk_command"; signal[1] = application.token();
         signal[2] = command.widget; signal[3] = command.callback; signal[4] = player;
         System.arraycopy(command.args, 0, signal, 5, command.args.length);
-        node.sendToReachable("computer.signal", signal);
+        return signal;
+    }
+    /**
+     * {@code computer.checked_signal}: like OC's own screens and keyboards, each receiving
+     * computer drops the signal unless {@code canInteract(player)} (its user list).
+     */
+    private void playerSignal(EntityPlayerMP player, Object... signal) {
+        Object[] data = new Object[signal.length + 1];
+        data[0] = player;
+        System.arraycopy(signal, 0, data, 1, signal.length);
+        node.sendToReachable("computer.checked_signal", data);
     }
 
     private String keySequence(int code) {
@@ -309,21 +375,30 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
 
     public void copy(EntityPlayerMP player, TkPackets.CopyRequest request) {
         TkWidget focus = widgets.get(widgets.focused()); String before = focus instanceof Entry ? focus.text() : null;
-        String text = widgets.copySelection(request.cut); changedEntry(focus, before);
-        TkNetwork.send(player, new TkPackets.CopyResult(request.target, request.request, text));
+        // Up to 512 KiB of Text selection: metered like every other GUI payload. Send the
+        // text first and cut only once it is on its way, so a refused reply cannot lose it.
+        String text = widgets.copySelection(false);
+        if (!TkNetwork.trySend(player, new TkPackets.CopyResult(request.target, request.request, text))) return;
+        if (request.cut) widgets.copySelection(true);
+        changedEntry(focus, before, player);
+        emitCommands(player);
         boundEvent(focus, request.cut ? "<<Cut>>" : "<<Copy>>", null, player);
     }
 
     public void clipboard(EntityPlayerMP player, String text) {
         TkWidget focus = widgets.get(widgets.focused()); String previous = focus instanceof Entry ? focus.text() : null;
-        widgets.paste(text); changedEntry(focus, previous);
+        widgets.paste(text); changedEntry(focus, previous, player);
+        emitCommands(player); // view callbacks the paste queued (e.g. a Text's yscrollcommand)
         boundEvent(focus, "<<Paste>>", null, player);
-        node.sendToReachable("computer.signal", "tk_clipboard", text, player.getCommandSenderName());
     }
 
     private void changedEntry(TkWidget widget, String previous) {
         if (previous != null && !previous.equals(widget.text())) node.sendToReachable("computer.signal", "tk_changed",
                 application.token(), widget.id, widget.text());
+    }
+    private void changedEntry(TkWidget widget, String previous, EntityPlayerMP player) {
+        if (previous != null && !previous.equals(widget.text()))
+            playerSignal(player, "tk_changed", application.token(), widget.id, widget.text());
     }
 
     private void boundEvent(TkWidget target, String sequence, TkPackets.InputEvent event, EntityPlayerMP player) {
@@ -334,13 +409,13 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
         if (!widgets.available(target)) return;
         TkRect r = target.bounds();
         if (target instanceof Canvas && event != null) for (int callback : ((Canvas) target).callbacks(item, sequence))
-            node.sendToReachable("computer.signal", "tk_event", application.token(), target.id, callback, sequence,
+            playerSignal(player, "tk_event", application.token(), target.id, callback, sequence,
                     event.x-r.x, event.y-r.y,event.code,event.character,event.modifiers,player.getCommandSenderName(),
                     event.kind == TkPackets.InputEvent.WHEEL ? event.code : 0,target.id,event.kind == TkPackets.InputEvent.DRAG,item);
         for (TkWidget widget : target == widgets.root() ? new TkWidget[] {target} : new TkWidget[] {target, widgets.root()}) {
             Integer callback = widget.bindings.get(sequence);
             if (callback == null || !widgets.available(widget)) continue;
-            node.sendToReachable("computer.signal", "tk_event", application.token(), widget.id, callback, sequence,
+            playerSignal(player, "tk_event", application.token(), widget.id, callback, sequence,
                     event == null ? 0 : event.x - r.x, event == null ? 0 : event.y - r.y,
                     event == null ? 0 : event.code, event == null ? 0 : event.character, event == null ? 0 : event.modifiers,
                     player.getCommandSenderName(), event != null && event.kind == TkPackets.InputEvent.WHEEL ? event.code : 0,
@@ -351,9 +426,13 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
     @Override
     public synchronized void readFromNBT(NBTTagCompound nbt) {
         super.readFromNBT(nbt);
+        // Normally this runs once, before anyone watches. A live reload (e.g. a world
+        // editor) replaces the tree under open GUIs: close them, and keep the revision
+        // increasing so no client mistakes the new scene for one it already has.
+        if (!viewers.isEmpty()) abortViewers();
         widgets = new TkTree(this::markDirty); application.reset();
         scene = TkScene.defaults();
-        sceneRevision = 1;
+        sceneRevision++;
         if (nbt.hasKey("mpy4oc:display", 10)) {
             NBTTagCompound state = nbt.getCompoundTag("mpy4oc:display");
             int savedWidth = state.getInteger("width");
@@ -370,8 +449,10 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
                 try {
                     TkTree restored = TkTreePersistence.load(state.getCompoundTag("tree"), width, height, this::markDirty);
                     application.load(state.getCompoundTag("application")); widgets = restored;
-                } catch (IllegalArgumentException invalid) {
-                    application.reset();
+                } catch (RuntimeException invalid) {
+                    // Also catches ReportedException from mistyped NBT: letting it escape
+                    // makes Forge drop the whole tile entity, including its OC address.
+                    widgets = new TkTree(this::markDirty); application.reset();
                     reobf.mpy4oc.main.MyMod.LOG.warn("Ignoring invalid saved Tk tree", invalid);
                 }
             }
@@ -387,8 +468,19 @@ public class TileTkDisplay extends TileEntityEnvironment implements Analyzable {
         state.setBoolean("surfaceVisible", scene.surfaceVisible);
         state.setInteger("background", scene.background);
         state.setString("title", scene.title);
-        state.setTag("tree", TkTreePersistence.save(widgets));
-        state.setTag("application", application.save());
+        try {
+            // Lay the tree out at the size saved above: the loader re-lays it out at
+            // that size and restores focus against the resulting clip rectangles.
+            // (Layout only: publishing a new scene is left to the next tick.)
+            widgets.resize(scene.width, scene.height);
+            NBTTagCompound tree = TkTreePersistence.save(widgets);
+            state.setTag("tree", tree);
+            state.setTag("application", application.save());
+        } catch (RuntimeException error) {
+            // Without this the exception drops the tile entity (and its OC address)
+            // from the chunk save. The display itself still persists, minus its UI.
+            reobf.mpy4oc.main.MyMod.LOG.warn("Could not save the Tk widget tree", error);
+        }
         nbt.setTag("mpy4oc:display", state);
     }
 }

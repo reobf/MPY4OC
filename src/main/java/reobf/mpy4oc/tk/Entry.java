@@ -139,8 +139,9 @@ public final class Entry extends Label {
         cursor(at);
     }
     void key(int code, int character, int modifiers) {
-        if ((modifiers & 4) != 0) return;
-        boolean shift = (modifiers & 1) != 0, ctrl = (modifiers & 2) != 0;
+        // Windows reports AltGr as Ctrl+Alt, and macOS Option sets Alt: both type
+        // characters (@, {, ą, € ...). Only Ctrl without Alt is a shortcut modifier.
+        boolean shift = (modifiers & 1) != 0, ctrl = (modifiers & 2) != 0 && (modifiers & 4) == 0;
         if (ctrl && code == 30) { selectionFrom(0); selectionRange(0, length()); cursor(length()); return; }
         switch (code) {
             case 203: move(ctrl ? word(cursor, false) : !shift && selectionPresent() ? selectionFirst : cursor - 1, shift); return;
@@ -166,13 +167,18 @@ public final class Entry extends Label {
         value = value.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ');
         int first = selectionPresent() ? selectionFirst : cursor, last = selectionPresent() ? selectionLast : cursor;
         String before = text().substring(0, offset(first)), after = text().substring(offset(last));
+        // Insert the longest prefix that fits both the per-widget and the tree-wide text
+        // budget. One pass: re-checking the whole candidate per code point was quadratic
+        // in the paste and re-encoded every widget's text each time.
+        int kept = (before + after).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        int room = Math.min(TkFontMetrics.MAX_TEXT_BYTES - kept, TkDisplayList.MAX_TEXT_BYTES - tree.otherTextBytes(this) - kept);
         StringBuilder accepted = new StringBuilder();
-        for (int i = 0; i < value.length();) {
+        for (int i = 0; i < value.length() && room > 0;) {
             int cp = value.codePointAt(i); i += Character.charCount(cp);
             if (cp < 32 || cp == 127 || cp >= 0xD800 && cp <= 0xDFFF) continue;
-            String candidate = before + accepted.toString() + new String(Character.toChars(cp)) + after;
-            try { TkFontMetrics.checkText(candidate); tree.checkTextBudget(this, candidate); accepted.appendCodePoint(cp); }
-            catch (IllegalArgumentException full) { break; }
+            int size = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+            if (size > room) break;
+            accepted.appendCodePoint(cp); room -= size;
         }
         if (accepted.length() > 0) {
             text(before + accepted.toString() + after); cursor(first + accepted.codePointCount(0, accepted.length()));

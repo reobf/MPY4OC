@@ -39,7 +39,7 @@ public final class TkHostApi {
                     if (!(signal instanceof PyObj.Tuple)) continue;
                     Object[] parts = ((PyObj.Tuple) signal).items;
                     if (parts.length > 0 && ("tk_command".equals(parts[0]) || "tk_event".equals(parts[0])
-                            || "tk_changed".equals(parts[0]))) return list.remove(i);
+                            || "tk_changed".equals(parts[0]) || "tk_close".equals(parts[0]))) return list.remove(i);
                 }
             }
             return PyObj.NONE;

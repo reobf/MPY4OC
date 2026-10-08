@@ -31,6 +31,7 @@ mpy4oc.config.tkSurfaceEnabled.tooltip=Show live Tk content on block faces. The 
 mpy4oc.config.tkSurfaceDistance=Tk surface viewing distance
 mpy4oc.config.tkSurfaceDistance.tooltip=Maximum distance in blocks (8–64). Both client and server limits apply.
 mpy4oc.tk.clientRequired=This client needs the matching MPY4OC Tk display protocol.
+mpy4oc.tk.busy=The display is busy sending to you; try again in a moment.
 
 # --- tooltips --------------------------------------------------------------
 # %1$s = tier number, %2$s = ops per tick

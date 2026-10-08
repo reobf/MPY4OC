@@ -42,6 +42,7 @@ ANCHOR = 'anchor'
 TclError = ValueError
 
 _roots = {}
+_next_timer = 0
 _default_root = None
 _next_variable = 0
 _aliases = {'bg': 'background', 'fg': 'foreground', 'bd': 'borderwidth', 'from_': 'from'}
@@ -393,7 +394,7 @@ class Widget:
         if not callable(func):
             raise TypeError('binding must be callable')
         old = self._bindings.get(sequence, 0)
-        if add == '+' and old:
+        if add and old:  # tkinter appends for any true add, not only '+'
             previous = self._root._callbacks[old]
             current = func
             def combined(event):
@@ -463,13 +464,18 @@ class Widget:
             return None
         if not callable(func):
             raise TypeError('after callback must be callable')
-        root = self._root
-        root._next_timer += 1
-        name = 'after#' + str(root._next_timer)
-        root._timers[name] = (deadline, self, func, args)
+        global _next_timer
+        # Ids are unique across windows: a Toplevel is a separate root here, and an id
+        # passed to another window's after_cancel must not cancel an unrelated timer.
+        _next_timer += 1
+        name = 'after#' + str(_next_timer)
+        self._root._timers[name] = (deadline, self, func, args)
         return name
 
     def after_cancel(self, name):
+        for root in list(_roots.values()):
+            if root._timers.pop(name, None) is not None:
+                return
         self._root._timers.pop(name, None)
 
     def update(self):
@@ -544,7 +550,7 @@ class Tk(Widget):
         self._next_callback = 0
         self._widgets = {0: self}
         self._timers = {}
-        self._next_timer = 0
+        self._protocols = {}
         self._quit = False
         self._token = _tk.call(self._screen, 'claim', '')
         try:
@@ -557,6 +563,11 @@ class Tk(Widget):
         _roots[self._screen] = self
         if _default_root is None:
             _default_root = self
+        try:
+            # Lets the MPYOS shell close a finished command's windows without importing us.
+            computer._tk_release = _release_all
+        except Exception:
+            pass
 
     def _register(self, callback):
         self._next_callback += 1
@@ -577,14 +588,52 @@ class Tk(Widget):
         options = {} if value is None else {'title': str(value)}
         return self._call('geometry', options)[2]
 
+    def protocol(self, name=None, func=None):
+        # Window-manager protocols. The display GUI's close button sends WM_DELETE_WINDOW;
+        # without a handler the window is destroyed, as in tkinter.
+        if name is None:
+            return tuple(self._protocols)
+        if func is None:
+            return self._protocols.get(name, '')
+        if not callable(func):
+            raise TypeError('protocol handler must be callable')
+        self._protocols[name] = func
+
+    wm_protocol = protocol
+
+    def _delete_window(self):
+        handler = self._protocols.get('WM_DELETE_WINDOW')
+        if handler is not None:
+            handler()
+        else:
+            self.destroy()
+
     def destroy(self):
         global _default_root
         if self._alive:
-            self._call('release')
+            try:
+                self._call('release')
+            except Exception:
+                # The display was broken, unloaded or taken over: the window is gone
+                # anyway. Still forget it, or mainloop() never ends and this VM keeps
+                # the display reserved until reboot.
+                pass
             self._detach()
             _roots.pop(self._screen, None)
             if _default_root is self:
                 _default_root = None
+
+
+def _release_all():
+    # Destroy every window of this VM. MPYOS calls this when a command ends, the way
+    # process exit closes CPython's windows: a program that stops without destroy()
+    # (an exception, quit() then return, no mainloop at all) would otherwise keep its
+    # display claimed, and every later Tk() would fail, until the computer reboots.
+    for root in list(_roots.values()):
+        try:
+            root.destroy()
+        except Exception:
+            _roots.pop(root._screen, None)
 
 
 class Toplevel(Tk):
@@ -747,7 +796,7 @@ class Canvas(Widget):
             raise TypeError('binding must be callable')
         key = (str(tagOrId), sequence)
         old = self._tag_bindings.get(key, 0)
-        if add == '+' and old:
+        if add and old:  # tkinter appends for any true add, not only '+'
             previous = self._root._callbacks[old]
             current = func
             def combined(event):
@@ -797,7 +846,9 @@ def _equal_value(a, b):
 class _ValueWidget(Widget):
     def _control_init(self, master, kind, cnf, kw):
         self._control_kind = kind
-        self._value_variable = IntVar()
+        # A Scale's private variable must keep fractions: configure() re-sends its
+        # value, and an IntVar truncated 0.7 to 0 on any option change.
+        self._value_variable = DoubleVar() if kind == 'scale' else IntVar()
         self._user_command = None
         self._onvalue = 1
         self._offvalue = 0
@@ -942,7 +993,17 @@ class Listbox(Widget):
     def get(self, first, last=None):
         if last is None:
             return self._list('get', first)
-        return tuple(self._list('get', first, last))
+        # The host reads at most 256 rows per call; batch like insert() does, so
+        # get(0, END) works on long lists. For get, END is the last row.
+        size = self.size()
+        a = max(0, size - 1 if first == END else self.index(first))
+        b = min(size - 1, size - 1 if last == END else self.index(last))
+        rows = []
+        while a <= b:
+            stop = min(b, a + 255)
+            rows.extend(self._list('get', a, stop))
+            a = stop + 1
+        return tuple(rows)
 
     def size(self):
         return self._list('size')
@@ -1153,6 +1214,9 @@ def _dispatch(signal):
         if widget._variable is not None:
             # Read current state: an older queued edit must not overwrite a newer one.
             widget._variable._set(widget.get(), widget)
+        return
+    if signal[0] == 'tk_close':
+        root._delete_window()
         return
     callback = root._callbacks.get(signal[4])
     if callback is None:

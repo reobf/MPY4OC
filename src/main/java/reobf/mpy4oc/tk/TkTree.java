@@ -20,7 +20,7 @@ public final class TkTree {
     private Runnable onChange;
     private final Frame root;
     int nextId, width = 320, height = 240, focused;
-    private boolean dirty = true, layoutDirty = true;
+    private boolean dirty = true, layoutDirty = true, overflowed, failed;
     private TkDisplayList display = TkDisplayList.EMPTY;
 
     public TkTree() { this(() -> {}); }
@@ -61,10 +61,15 @@ public final class TkTree {
     }
 
     void checkTextBudget(TkWidget replaced, String text) {
-        int bytes = text.getBytes(StandardCharsets.UTF_8).length;
+        int bytes = text.getBytes(StandardCharsets.UTF_8).length + otherTextBytes(replaced);
+        if (bytes > TkDisplayList.MAX_TEXT_BYTES) throw new IllegalArgumentException("widget text budget exceeded");
+    }
+    /** UTF-8 bytes of every widget text except {@code replaced}'s, towards MAX_TEXT_BYTES. */
+    int otherTextBytes(TkWidget replaced) {
+        int bytes = 0;
         for (TkWidget widget : widgets.values())
             if (widget != replaced) bytes += widget.text().getBytes(StandardCharsets.UTF_8).length;
-        if (bytes > TkDisplayList.MAX_TEXT_BYTES) throw new IllegalArgumentException("widget text budget exceeded");
+        return bytes;
     }
 
     public void resize(int width, int height) {
@@ -74,16 +79,34 @@ public final class TkTree {
         }
     }
 
+    /**
+     * Never throws. Rendering runs from the tile entity tick, the viewer flush and NBT
+     * saving, none of which can handle an exception: one escaping a tile entity tick
+     * crashes the server. A frame over the paint budgets is truncated (see
+     * {@link #overflowed()}); any other failure keeps the last good frame.
+     */
     public TkDisplayList render() {
         if (!dirty) return display;
-        if (layoutDirty) { TkPackLayout.layout(root, width, height); layoutDirty = false; }
-        cancelUnavailable();
-        List<TkDisplayList.Item> items = new ArrayList<>();
-        collect(root, items);
-        display = new TkDisplayList(items);
+        try {
+            if (layoutDirty) { TkPackLayout.layout(root, width, height); layoutDirty = false; }
+            cancelUnavailable();
+            List<TkDisplayList.Item> items = new ArrayList<>();
+            collect(root, items);
+            boolean trimmed = TkDisplayList.trimToBudget(items);
+            display = new TkDisplayList(items);
+            if (trimmed && !overflowed)
+                reobf.mpy4oc.main.MyMod.LOG.warn("Tk display exceeds its paint budget; trailing widgets are not drawn");
+            overflowed = trimmed; failed = false;
+        } catch (RuntimeException error) {
+            if (!failed) reobf.mpy4oc.main.MyMod.LOG.warn("Tk display could not be rendered; keeping the last frame", error);
+            failed = true;
+        }
         dirty = false;
         return display;
     }
+
+    /** Whether the current frame had to drop paint records to fit the display budgets. */
+    public boolean overflowed() { render(); return overflowed; }
 
     private void collect(Frame parent, List<TkDisplayList.Item> items) {
         for (TkWidget widget : parent.children) {

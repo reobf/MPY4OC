@@ -192,7 +192,9 @@ public final class Text extends TkWidget {
         return at;
     }
     void key(int code,int character,int modifiers) {
-        if((modifiers&4)!=0)return; boolean shift=(modifiers&1)!=0,ctrl=(modifiers&2)!=0;
+        // AltGr (Windows: Ctrl+Alt) and Option (macOS: Alt) type characters; only Ctrl
+        // without Alt is a shortcut modifier.
+        boolean shift=(modifiers&1)!=0,ctrl=(modifiers&2)!=0&&(modifiers&4)==0;
         if(ctrl&&code==30) {anchor=0;selection(0,length());cursor(length()-1);see(cursor);return;}
         if(code==203||code==205) {boolean right=code==205;move(ctrl?wordMove(cursor,right):!shift&&selectionPresent()?right?last:first:cursor+(right?1:-1),shift,false);return;}
         if(code==199||code==207) {int row=line(cursor);move(ctrl?code==199?0:length()-1:code==199?starts[row]:starts[row+1]-1,shift,false);return;}
@@ -216,7 +218,34 @@ public final class Text extends TkWidget {
     void paste(String value) {
         if(!enabled)return;
         int a=selectionPresent()?first:cursor,b=selectionPresent()?last:cursor;
-        replace(a,b,value); selectionClear(); anchor=cursor; see(cursor);
+        String accepted=fit(value,a,b);
+        if(accepted.isEmpty()&&!value.isEmpty())return; // Nothing insertable: keep the selection, like Entry.
+        replace(a,b,accepted); selectionClear(); anchor=cursor; see(cursor);
+    }
+    private static int utf8(int cp) { return cp<0x80?1:cp<0x800?2:cp<0x10000?3:4; }
+    /**
+     * The longest prefix of user input that keeps this Text within its budgets once it
+     * replaces [a,b), with control characters other than tab and newline dropped. Like
+     * Entry, a paste that does not fit inserts what fits instead of being rejected whole
+     * (rejecting threw out of the input handler for a stray control character).
+     */
+    private String fit(String value,int a,int b) {
+        value=value.replace("\r\n","\n").replace('\r','\n');
+        a=Math.min(clamp(a),length()-1); b=Math.max(a,Math.min(clamp(b),length()-1));
+        int removedBytes=0,removedLines=0;
+        for(int i=a;i<b;i++) { removedBytes+=utf8(chars[i]); if(chars[i]=='\n')removedLines++; }
+        int others=0; for(TkWidget w:tree.widgets.values())if(w instanceof Text&&w!=this)others+=((Text)w).bytes;
+        long keptBytes=bytes-removedBytes, roomChars=MAX_CHARS-(length()-(long)(b-a));
+        long roomBytes=Math.min(MAX_BYTES-keptBytes,2L*1024*1024-others-keptBytes), roomLines=MAX_LINES-((starts.length-1)-removedLines);
+        StringBuilder out=new StringBuilder();
+        for(int i=0;i<value.length();) {
+            int cp=value.codePointAt(i); i+=Character.charCount(cp);
+            if(cp<32&&cp!='\n'&&cp!='\t'||cp==127||cp>=0xD800&&cp<=0xDFFF)continue;
+            int size=utf8(cp);
+            if(roomChars<1||roomBytes<size||cp=='\n'&&roomLines<1)break;
+            out.appendCodePoint(cp); roomChars--; roomBytes-=size; if(cp=='\n')roomLines--;
+        }
+        return out.toString();
     }
     void paint(List<TkDisplayList.Item> out,int state) {
         viewport(); int x=bounds.x+padx+border,y=bounds.y+pady+border,w=pixels();
@@ -267,7 +296,7 @@ public final class Text extends TkWidget {
         columns=TkOptions.integer(n.getInteger("columns"),1,1024); lines=TkOptions.integer(n.getInteger("lines"),1,512);
         cursor=TkOptions.integer(n.getInteger("cursor"),0,length()-1);anchor=TkOptions.integer(n.getInteger("anchor"),0,length()-1);
         first=n.getInteger("first");last=n.getInteger("last");if(!(first==-1&&last==-1||first>=0&&last>first&&last<=length()))throw new IllegalArgumentException("invalid Text selection");
-        top=TkOptions.integer(n.getInteger("top"),0,MAX_CHARS);scrollX=TkOptions.integer(n.getInteger("scrollX"),0,MAX_CHARS*64);
+        top=Math.max(0,Math.min(MAX_CHARS,n.getInteger("top")));scrollX=Math.max(0,Math.min(MAX_CHARS*64,n.getInteger("scrollX")));
         xscrollcommand=TkOptions.integer(n.getInteger("xscrollcommand"),0,Integer.MAX_VALUE);yscrollcommand=TkOptions.integer(n.getInteger("yscrollcommand"),0,Integer.MAX_VALUE);
         modified=n.getBoolean("modified");
     }

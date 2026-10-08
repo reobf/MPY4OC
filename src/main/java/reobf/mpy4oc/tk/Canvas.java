@@ -45,7 +45,7 @@ public final class Canvas extends TkWidget {
                 tags = new ArrayList<>();
                 for (Object t : raw) { String tag = tag(t); if (!tags.contains(tag)) tags.add(tag); }
             }
-            return new Item(id, new TkVector(vector.shape, coords == null ? vector.coords() : coords, fill, outline, width),
+            return new Item(id, new TkVector(vector.shape, coords == null ? vector.coords() : coords, fill, outline, width).sameOutlineAs(vector),
                     text, state, tags, m.containsKey("anchor") ? TkOptions.anchor(TkOptions.text(m.get("anchor"))) : anchor);
         }
     }
@@ -80,14 +80,24 @@ public final class Canvas extends TkWidget {
     private void publish(LinkedHashMap<Integer, Item> next) {
         checkBudget(next); items.clear(); items.putAll(next); if (!items.containsKey(current)) current = 0; tree.changed(false);
     }
+    /** Self-intersections a filled polygon may have, and all filled polygons together. */
+    static final int MAX_POLYGON_CROSSINGS = 128, MAX_TREE_CROSSINGS = 512;
     void checkBudget(Map<Integer, Item> next) {
-        int count = 0, coords = 0, bytes = 0;
+        int count = 0, coords = 0, bytes = 0, crossings = 0;
         if (next.size() > MAX_ITEMS) throw new IllegalArgumentException("Canvas item limit reached");
         for (TkWidget w : tree.widgets.values()) if (w instanceof Canvas)
             for (Item i : (w == this ? next : ((Canvas) w).items).values()) {
                 count++; coords += i.vector.count(); bytes += i.text.getBytes(StandardCharsets.UTF_8).length;
+                // Only filled polygons are tessellated on the client; strokes are linear.
+                if (i.vector.shape == TkVector.Shape.POLYGON && i.vector.fill >= 0) {
+                    int c = i.vector.crossings();
+                    if (c > MAX_POLYGON_CROSSINGS) throw new IllegalArgumentException(
+                            "Canvas polygon has too many self-intersections (" + c + " > " + MAX_POLYGON_CROSSINGS + ")");
+                    crossings += c;
+                }
             }
-        if (count > MAX_TREE_ITEMS || coords > TkVector.MAX_TOTAL_COORDS || bytes > TkDisplayList.MAX_TEXT_BYTES)
+        if (count > MAX_TREE_ITEMS || coords > TkVector.MAX_TOTAL_COORDS || bytes > TkDisplayList.MAX_TEXT_BYTES
+                || crossings > MAX_TREE_CROSSINGS)
             throw new IllegalArgumentException("Canvas tree budget exceeded");
     }
     public Object call(String action, Map<String, Object> m) {

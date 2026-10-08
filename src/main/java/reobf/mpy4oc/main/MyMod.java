@@ -24,8 +24,11 @@ import cpw.mods.fml.common.event.FMLServerStoppedEvent;
 // required-after:OpenComputers -- everything here is built on OC's API (architecture, EEPROM,
 // floppy, OC items in recipes), so make OC a hard requirement (a clear FML message instead of
 // NoClassDefFoundError when it is missing) and have FML initialise OC before us.
-// Keep the architecture's existing remote-version policy. The optional Tk GUI
-// checks that the client registered the matching versioned packet channel.
+// acceptableRemoteVersions="*": the other side may run any mpy4oc version as far as FML's
+// mod-list check goes (both ends check, each with its own setting, so this only helps between
+// builds that both carry it). It does not cover registered blocks and items: a client built
+// before the Tk display block existed cannot join a server that has it ("Fatally missing
+// blocks and items"). The Tk GUI also needs the client's matching versioned packet channel.
 @Mod(modid = MyMod.MODID, version = Tags.VERSION, name = "mpy4oc", acceptedMinecraftVersions = "[1.7.10]",
         dependencies = "required-after:OpenComputers", acceptableRemoteVersions = "*",
         guiFactory = "reobf.mpy4oc.main.ModGuiFactory")

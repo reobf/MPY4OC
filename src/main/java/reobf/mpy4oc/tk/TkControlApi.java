@@ -61,7 +61,7 @@ final class TkControlApi {
                 if (a.length == 1) {
                     int n = b.index(a[0], true);
                     if (x) b.scrollX = (int) Math.max(0, Math.min(Integer.MAX_VALUE, (long) n * 8)); else b.top = Math.max(0, n);
-                    b.tree.changed(false); break;
+                    b.clampScroll(); b.tree.changed(false); break;
                 }
                 String op = TkOptions.text(a[0]);
                 if (op.equals("moveto")) { count(a, 2); b.moveto(x, number(a[1])); }

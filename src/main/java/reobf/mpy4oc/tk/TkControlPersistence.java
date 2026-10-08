@@ -37,8 +37,9 @@ final class TkControlPersistence {
                 for (int i = 0; i < batch.length; i++) batch[i] = rows.getStringTagAt(start + i); b.insert(b.size(), batch);
             } } finally { b.enabled = enabled; }
             for (int i : n.getIntArray("selectedRows")) { if (i < 0 || i >= b.size()) throw new IllegalArgumentException("invalid selected row"); b.selected.set(i); }
-            b.top = TkOptions.integer(n.getInteger("top"), 0, Listbox.MAX_ROWS);
-            b.scrollX = TkOptions.integer(n.getInteger("scrollX"), 0, 8192);
+            // The view is clamped against the laid-out size only when the Listbox is
+            // painted, so an unmapped or clipped one may hold any scrolled value. Clamp.
+            b.top = n.getInteger("top"); b.scrollX = n.getInteger("scrollX"); b.clampScroll();
             b.active = TkOptions.integer(n.getInteger("active"), 0, Math.max(0, b.size() - 1));
             b.anchor = TkOptions.integer(n.getInteger("selectionAnchor"), 0, Math.max(0, b.size() - 1));
         } else if (w instanceof Scrollbar) {
