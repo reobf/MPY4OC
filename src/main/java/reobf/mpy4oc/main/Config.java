@@ -8,6 +8,8 @@ public class Config {
 
     /** SFTP server port. 0 = pick a free one automatically, -1 = disable SFTP. */
     public static int port = 2222;
+    public static boolean tkSurfaceEnabled = true;
+    public static int tkSurfaceDistance = 32;
 
     /** The live Configuration, kept so the in-game GUI edits the same instance. */
     public static Configuration configuration;
@@ -27,6 +29,14 @@ public class Config {
                 "SFTP Port. 0 for auto, -1 to disable", -1, 65535);
         portProp.setLanguageKey("mpy4oc.config.sftpPort");
         port = portProp.getInt(port);
+        net.minecraftforge.common.config.Property surface = configuration.get(Configuration.CATEGORY_GENERAL,
+                "Tk_Surface_Enabled", true, "Render Tk display contents on block faces. Disabling on a server also stops surface synchronization; GUI remains available.");
+        surface.setLanguageKey("mpy4oc.config.tkSurfaceEnabled");
+        tkSurfaceEnabled = surface.getBoolean(true);
+        net.minecraftforge.common.config.Property distance = configuration.get(Configuration.CATEGORY_GENERAL,
+                "Tk_Surface_Distance", 32, "Maximum Tk surface viewing distance in blocks. Both client and server limits apply.", 8, 64);
+        distance.setLanguageKey("mpy4oc.config.tkSurfaceDistance");
+        tkSurfaceDistance = Math.max(8, Math.min(64, distance.getInt(32)));
 
         if (configuration.hasChanged()) {
             configuration.save();

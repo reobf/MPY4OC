@@ -25,8 +25,10 @@ jasyncio.run(main())          # asyncio is here too
   - Asynchronous: runs on OC's compute thread, friendlier to TPS, non-direct component calls automatically bounce back to the main thread, semantics matching OC's own Lua architecture.
 - **Threads and asyncio, both.** `threading` is stackful — an ordinary function can call `time.sleep` at any depth and the whole stack is preserved; `jasyncio` is an asyncio-style event loop where each `run()` is independent, so you can nest them or start one inside a thread.
 - **Per-tick ops budget.** Scripts are rate-limited per tick by CPU tier (500 / 2000 / 16000 instructions). Yielding while idle banks budget (up to 10×), so a script that cooperates gets a burst when it actually has work.
-- **24 standard library modules**: `json`, `re` (a superset), `struct`, `hashlib`, `collections`, `functools`, `pickle`, `traceback`, `machine`, `micropython`, and more — most of them byte-for-byte compatible with upstream.
+- **26 frozen standard library modules**: `json`, `re` (a superset), `struct`, `hashlib`, `collections`, `functools`, `pickle`, `traceback`, `machine`, `micropython`, and more — most of them byte-for-byte compatible with upstream.
 - **Networking is just `requests` / `urllib` / `socket`.** Plug in OC's internet card and `requests.get(url).json()` means exactly what you think it means; `urlopen` returns a file-like object, and `socket` gives you raw TCP. These libraries are **always present** — they import fine with no card installed — and only raise `OSError` when you actually make a request. All waiting yields on tick boundaries, so it never hogs the server.
+
+- **Tk interfaces.** A frozen `tkinter` subset provides buttons, entries, lists, Canvas and plain-text Text widgets. A Tk display can preview its live contents in the world; right-click opens its shared interactive GUI. MPYOS is optional. See the [Tk guide](docs/tkinter.md) (Chinese, with Python examples).
 
 ## Crafting recipes
 
@@ -38,6 +40,7 @@ Every recipe is **shapeless**, and a vanilla piece of **String** is the "MPY fla
 | MPY APU (tier 1/2/3) | OC's APU (tier 1/2) or the **Creative APU** (as tier 3) + String |
 | MPYOS BIOS | Any EEPROM + String (the old contents are overwritten — it *is* a flash) |
 | MPYOS LiveCD floppy | Any floppy + String (the old contents are overwritten — a flash, like the BIOS) |
+| Tk display | OC tier-1 screen + String |
 | SFTP server card | Card board + String |
 | Sync ↔ async (CPU/APU, same tier) | Drop a single processor into the crafting grid to convert, 1:1 both ways |
 
@@ -52,7 +55,31 @@ Two pre-existing paths still work: any EEPROM + an MPYOS floppy also crafts the 
 
 SFTP card: `component.sftp.start("user", "password")` starts the service, `getPort()` tells you the port, then connect any SFTP/SSH client to the server's IP. Shutting the computer down disconnects and deregisters automatically; unloading and reloading the chunk restores the service.
 
+### Interactive Python
+
+Run `python` (also `python3` or `py`) in the MPYOS shell. Compound statements show
+`... `; type the body with indentation, then submit a blank line:
+
+```text
+>>> def greet():
+...     print("Hello")
+...
+>>> greet()
+Hello
+```
+
+Open brackets, triple-quoted strings and trailing backslashes also allow continued
+input. Ctrl+C cancels the pending block. This is line-by-line input; the terminal
+still only accepts the first line of a multiline clipboard paste. Save longer
+programs with `edit` or SFTP and run `python filename.py`.
+
+On an existing MPYOS hard disk, update `/bin/python.py`, `/bin/python3.py` and
+`/bin/py.py` from the new LiveCD and leave/re-enter the REPL. Replacing the mod jar
+does not overwrite files already installed on the hard disk.
+
 ## Documentation
+
+- **[Tk guide](docs/tkinter.md)** — bare `init.py`, display selection, supported widgets, input and snapshot compatibility
 
 - **[Wiki](../../wiki)** — player manual and MicroPython programming guide (differences from standard Python, working with components, multiple return values, the ops budget, save-file caveats)
 
@@ -61,6 +88,8 @@ SFTP card: `component.sftp.start("user", "password")` starts the service, `getPo
 ```bash
 ./gradlew build        # artifacts land in build/libs/
 ```
+
+After editing `stdlib/*.py`, run `./gradlew genStdlib` followed by `./gradlew build` (`./gradlew.bat` on Windows). Generation uses the built-in Java compiler; WSL and external `mpy-cross` executables are unnecessary.
 
 Built on GTNH's [ExampleMod1.7.10](https://github.com/GTNewHorizons/ExampleMod1.7.10) buildscript. Depends on OpenComputers (the GTNH fork); other forks are not guaranteed to work.
 

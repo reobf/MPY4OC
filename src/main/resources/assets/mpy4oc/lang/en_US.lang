@@ -25,6 +25,13 @@ item.mpy4oc.apu.async3.name=MPY APU, Async (Tier 3)
 # --- items: cards ----------------------------------------------------------
 item.mpy4oc.oc.sftpcard.name=SFTP Server Card
 
+tile.mpy4oc.tk_display.name=Tk Display
+mpy4oc.config.tkSurfaceEnabled=Tk block surface display
+mpy4oc.config.tkSurfaceEnabled.tooltip=Show live Tk content on block faces. The GUI remains available when disabled.
+mpy4oc.config.tkSurfaceDistance=Tk surface viewing distance
+mpy4oc.config.tkSurfaceDistance.tooltip=Maximum distance in blocks (8–64). Both client and server limits apply.
+mpy4oc.tk.clientRequired=This client needs the matching MPY4OC Tk display protocol.
+
 # --- tooltips --------------------------------------------------------------
 # %1$s = tier number, %2$s = ops per tick
 mpy4oc.tip.tier=Tier %1$s \u2014 %2$s ops/tick

@@ -10,6 +10,8 @@
 #
 # REPL extras: up/down history, Tab completion (names from the sandbox, the system
 # globals and builtins; after a dot, attributes of the resolved object via dir()).
+# Compound statements end with a blank line. Unclosed brackets, triple-quoted
+# strings and explicit backslash continuations also show the continuation prompt.
 
 if args:
     # --- run a file ---
@@ -27,7 +29,7 @@ if args:
             tty.print("python: " + str(_e))
 else:
     # --- interactive REPL ---
-    tty.print("Python (mpyos). 'exit' to leave.")
+    tty.print("Python (mpyos). 'exit' to leave. Blank line ends a block.")
     sandbox = {}
     history = []
 
@@ -113,22 +115,95 @@ else:
             out.append((new_text, new_pos, n))
         return out
 
+    def _input_open(src):
+        # Scan only lexical continuations; the compiler still validates syntax.
+        # Ignore brackets and backslashes inside comments and quoted strings.
+        brackets = []
+        quote = ""
+        triple = False
+        i = 0
+        while i < len(src):
+            c = src[i]
+            if quote:
+                if c == "\\":
+                    if i + 1 == len(src):
+                        return True
+                    i += 2
+                    continue
+                if triple:
+                    if src[i:i + 3] == quote * 3:
+                        quote = ""
+                        i += 3
+                        continue
+                elif c == quote:
+                    quote = ""
+                elif c == "\n":
+                    return False  # an ordinary unterminated string is an error
+            elif c == "#":
+                while i < len(src) and src[i] != "\n":
+                    i += 1
+                continue
+            elif c == "'" or c == '"':
+                quote = c
+                triple = src[i:i + 3] == c * 3
+                if triple:
+                    i += 3
+                    continue
+            elif c in "([{":
+                brackets.append(c)
+            elif c in ")]}":
+                if not brackets or "([{".find(brackets[-1]) != ")]}".find(c):
+                    return False
+                brackets.pop()
+            elif c == "\\":
+                if i + 1 == len(src):
+                    return True
+                if src[i + 1] != "\n":
+                    return False
+                i += 2
+                continue
+            i += 1
+        if quote and not triple:
+            return False
+        return bool(brackets) or bool(quote)
+
+    def _is_block(src):
+        src = src.lstrip()
+        if src.startswith("@"):
+            return True
+        end = 0
+        while end < len(src) and (src[end].isalpha() or src[end].isdigit() or src[end] == "_"):
+            end += 1
+        return src[:end] in ("def", "class", "if", "for", "while", "try", "with", "async")
+
+    pending = []
     while True:
-        line = tty.read(">>> ", history, _complete)
+        line = tty.read("... " if pending else ">>> ", history, _complete)
         if line is None:
+            if pending:
+                pending = []
+                tty.print("KeyboardInterrupt")
+                continue
             break
-        line = line.strip()
-        if not line:
+        stripped = line.strip()
+        if not pending and not stripped:
             continue
-        if line == "exit" or line == "exit()":
+        if not pending and (stripped == "exit" or stripped == "exit()"):
             break
-        history.append(line)
+        if line:
+            history.append(line)
+        # Keep indentation and whitespace inside string literals intact.
+        pending.append(line)
+        source = "\n".join(pending)
+        if _input_open(source) or (stripped and _is_block(source)):
+            continue
+        pending = []
         try:
             try:
-                _r = eval_sandbox(line, sandbox)
+                _r = eval_sandbox(source, sandbox)
                 if _r is not None:
                     tty.print(repr(_r))
             except SyntaxError:
-                exec_sandbox(line, sandbox)
+                exec_sandbox(source, sandbox)
         except Exception as _e:
             tty.print("error: " + str(_e))

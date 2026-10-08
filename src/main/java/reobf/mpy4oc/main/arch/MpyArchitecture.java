@@ -609,6 +609,10 @@ public class MpyArchitecture implements Architecture {
      *  tick on the main thread). Registers the ticker on first call, then drives. */
     public void tickFromComponent() {
         hasTicker = true;
+        // OC updates inventory components even while the case is off or paused.
+        // In particular close() clears vm, so an unconditional tick would boot
+        // it again after shutdown, before OC has initialized the next run.
+        if (!machine.isRunning() || machine.isPaused()) return;
         driveOneTick();
     }
 
@@ -1510,6 +1514,10 @@ public class MpyArchitecture implements Architecture {
 
         globals.put("computer", computer);
 
+        reobf.mpy4oc.tk.TkHostApi.install(globals, hosts,
+                (address, args) -> invokeComponent(address, "tk", args), machine::components,
+                () -> vm == null ? computer : vm.globals.get("computer"));
+
         // The frozen time module is built on host-overridable primitives; wire its
         // clock to the server's, so time.time()/ticks_ms() advance with the game
         // (and stay consistent across saves and pauses), not with the JVM.
@@ -1980,6 +1988,17 @@ public class MpyArchitecture implements Architecture {
             for (Object o : ((Map<?, ?>) v).entrySet()) {
                 Map.Entry<?, ?> e = (Map.Entry<?, ?>) o;
                 d.map.put(toPy(e.getKey()), toPy(e.getValue()));
+            }
+            return d;
+        }
+        // OC Registry.convert turns callback maps into Scala mutable maps.
+        // They implement neither java.util.Map nor java.lang.Iterable.
+        if (v instanceof scala.collection.Map) {
+            PyObj.PyDict d = new PyObj.PyDict();
+            scala.collection.Iterator<?> entries = ((scala.collection.Map<?, ?>) v).iterator();
+            while (entries.hasNext()) {
+                scala.Tuple2<?, ?> e = (scala.Tuple2<?, ?>) entries.next();
+                d.map.put(toPy(e._1()), toPy(e._2()));
             }
             return d;
         }

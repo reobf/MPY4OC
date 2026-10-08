@@ -18,15 +18,14 @@ import cpw.mods.fml.common.event.FMLInitializationEvent;
 import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.event.FMLServerStartingEvent;
+import cpw.mods.fml.common.event.FMLServerStoppedEvent;
 
 
 // required-after:OpenComputers -- everything here is built on OC's API (architecture, EEPROM,
 // floppy, OC items in recipes), so make OC a hard requirement (a clear FML message instead of
 // NoClassDefFoundError when it is missing) and have FML initialise OC before us.
-// acceptableRemoteVersions="*" -- the mod has no packets of its own, so any mpy4oc version on
-// the other side is fine. FML checks the mod list on BOTH ends, each against its own setting,
-// so this only helps between builds that both carry it (v0.0.1p6-beta and later): a p1-p5
-// client still refuses a newer server with its own exact-version check.
+// Keep the architecture's existing remote-version policy. The optional Tk GUI
+// checks that the client registered the matching versioned packet channel.
 @Mod(modid = MyMod.MODID, version = Tags.VERSION, name = "mpy4oc", acceptedMinecraftVersions = "[1.7.10]",
         dependencies = "required-after:OpenComputers", acceptableRemoteVersions = "*",
         guiFactory = "reobf.mpy4oc.main.ModGuiFactory")
@@ -35,6 +34,9 @@ public class MyMod {
 	
     public static final String MODID = "mpy4oc";
     public static final Logger LOG = LogManager.getLogger(MODID);
+
+    @SidedProxy(clientSide = "reobf.mpy4oc.tk.client.TkClientProxy", serverSide = "reobf.mpy4oc.tk.TkProxy")
+    public static reobf.mpy4oc.tk.TkProxy tkProxy;
 
     /** Label of the loot EEPROM we register; the architecture uses it to recognise our bios. */
     public static final String BIOS_LABEL = "MPYOS BIOS";
@@ -50,6 +52,14 @@ public class MyMod {
     public void preInit(FMLPreInitializationEvent event) {
         // SFTP port etc.
         Config.synchronizeConfiguration(event.getSuggestedConfigurationFile());
+
+        tkDisplay = new reobf.mpy4oc.tk.BlockTkDisplay();
+        cpw.mods.fml.common.registry.GameRegistry.registerBlock(tkDisplay, "tk_display");
+        cpw.mods.fml.common.registry.GameRegistry.registerTileEntity(
+                reobf.mpy4oc.tk.TileTkDisplay.class, "mpy4oc:tk_display");
+        LOG.info("Registered block + tile entity: mpy4oc:tk_display");
+        reobf.mpy4oc.tk.net.TkNetwork.init();
+        tkProxy.init();
 
         // The MPY CPU item. Items must be registered during preInit.
         mpyCpu = new reobf.mpy4oc.main.item.ItemMpyCPU();
@@ -100,6 +110,9 @@ public class MyMod {
 
     /** The SFTP card item. */
     public static reobf.mpy4oc.main.item.ItemSFTPCard sftpCard;
+
+    /** The pixel display component used by the Tk API. */
+    public static reobf.mpy4oc.tk.BlockTkDisplay tkDisplay;
 
     @Mod.EventHandler
    public void init(FMLInitializationEvent event) {
@@ -218,6 +231,14 @@ public class MyMod {
      */
     private void registerStringRecipes(net.minecraft.item.ItemStack biosStack,
                                        net.minecraft.item.ItemStack mpyosDisk) {
+        net.minecraft.item.ItemStack screen = ocItemStack("screen1");
+        if (screen != null) {
+            cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                    new net.minecraft.item.ItemStack(tkDisplay), screen,
+                    new net.minecraft.item.ItemStack(net.minecraft.init.Items.string));
+        } else {
+            LOG.warn("mpy4oc: OC screen1 is missing; Tk display recipe was not registered");
+        }
         // sync CPUs: oc cpu1/cpu2/cpu3 -> MPY CPU tier 1/2/3 (damage 0/1/2)
         for (int tier = 0; tier < 3; tier++) {
             net.minecraft.item.ItemStack ocCpu = ocItemStack("cpu" + (tier + 1));
@@ -345,5 +366,10 @@ public class MyMod {
     // register server commands in this event handler (Remove if not needed)
     public void serverStarting(FMLServerStartingEvent event) {
 
+    }
+
+    @Mod.EventHandler
+    public void serverStopped(FMLServerStoppedEvent event) {
+        reobf.mpy4oc.tk.net.TkNetwork.serverStopped();
     }
 }
