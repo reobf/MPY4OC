@@ -20,12 +20,35 @@ import java.util.Locale;
  * with the same constant names, 100-column base64 folding and module map as
  * the original shell generator. Further modules use this compiler too.
  *
+ * <p>A module in a subdirectory is frozen under its path: {@code stdlib/tkinter/ttk.py}
+ * becomes {@code "tkinter/ttk"}, which {@code import tkinter.ttk} resolves to. A module whose
+ * base64 would exceed a class-file string constant (65,535 bytes) is split into several
+ * constants joined when the class loads.
+ *
  * <p>Usage: {@code GenStdlib <stdlibDir> <outputJavaFile>} -- or just
  * {@code ./gradlew genStdlib}. Rebuild afterwards.
  */
 public final class GenStdlib {
 
     private GenStdlib() {}
+
+    /** Characters of base64 per string constant (a class-file constant holds at most 65,535 bytes). */
+    public static final int CONSTANT_LIMIT = 60000;
+
+    /** The frozen module name of a source under {@code dir}: its path without ".py", '/'-separated. */
+    static String moduleName(File dir, File py) {
+        String rel = dir.toPath().relativize(py.toPath()).toString().replace(File.separatorChar, '/');
+        return rel.substring(0, rel.length() - 3);
+    }
+
+    private static void collect(File dir, List<File> out) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            if (f.isDirectory()) collect(f, out);
+            else if (f.getName().endsWith(".py")) out.add(f);
+        }
+    }
 
     public static void main(String[] args) throws Exception {
         if (args.length != 2) {
@@ -35,12 +58,14 @@ public final class GenStdlib {
         File dir = new File(args[0]);
         File out = new File(args[1]);
 
-        File[] sources = dir.listFiles((d, name) -> name.endsWith(".py"));
-        if (sources == null || sources.length == 0) {
+        List<File> found = new ArrayList<>();
+        collect(dir, found);
+        if (found.isEmpty()) {
             throw new IOException("no .py files in " + dir);
         }
-        // Plain code-point order: '_' sorts before letters, as the shell glob did.
-        Arrays.sort(sources, (a, b) -> a.getName().compareTo(b.getName()));
+        File[] sources = found.toArray(new File[0]);
+        // Plain code-point order of the module names: '_' sorts before letters, as the shell glob did.
+        Arrays.sort(sources, (a, b) -> moduleName(dir, a).compareTo(moduleName(dir, b)));
 
         StringBuilder sb = new StringBuilder();
         sb.append("package net.mpy.vm;\n\n");
@@ -53,25 +78,33 @@ public final class GenStdlib {
 
         List<String> entries = new ArrayList<>();
         for (File py : sources) {
-            String name = py.getName().substring(0, py.getName().length() - 3);
-            String constant = name.toUpperCase(Locale.ROOT) + "_B64";
+            String name = moduleName(dir, py);
+            String constant = name.replace('/', '_').toUpperCase(Locale.ROOT) + "_B64";
             // The source name is embedded in the .mpy; keep the path the shell
             // script used so the output stays byte-identical.
             String src = new String(Files.readAllBytes(py.toPath()), StandardCharsets.UTF_8);
             byte[] mpy = net.mpy.compiler.MpyCross.compile(src, "stdlib/" + name + ".py");
             String b64 = Base64.getEncoder().encodeToString(mpy);
 
-            sb.append("    private static final String ").append(constant).append(" =\n");
-            for (int i = 0; i < b64.length(); i += 100) {
-                String chunk = b64.substring(i, Math.min(b64.length(), i + 100));
-                boolean last = i + 100 >= b64.length();
-                sb.append("            \"").append(chunk).append(last ? "\";\n" : "\" +\n");
+            // javac folds "a" + "b" into one constant, so a long module gets several
+            // constants (NAME_B64, NAME_B64_1, ...) and dec() joins them at load time.
+            List<String> constants = new ArrayList<>();
+            for (int start = 0; start < b64.length(); start += CONSTANT_LIMIT) {
+                String piece = b64.substring(start, Math.min(b64.length(), start + CONSTANT_LIMIT));
+                String pieceName = start == 0 ? constant : constant + "_" + (start / CONSTANT_LIMIT);
+                constants.add(pieceName);
+                sb.append("    private static final String ").append(pieceName).append(" =\n");
+                for (int i = 0; i < piece.length(); i += 100) {
+                    String chunk = piece.substring(i, Math.min(piece.length(), i + 100));
+                    boolean last = i + 100 >= piece.length();
+                    sb.append("            \"").append(chunk).append(last ? "\";\n" : "\" +\n");
+                }
             }
-            entries.add("Map.entry(\"" + name + "\", dec(" + constant + "))");
+            entries.add("Map.entry(\"" + name + "\", dec(" + String.join(", ", constants) + "))");
         }
 
         sb.append("\n");
-        sb.append("    private static byte[] dec(String s) { return Base64.getDecoder().decode(s); }\n\n");
+        sb.append("    private static byte[] dec(String... parts) { return Base64.getDecoder().decode(String.join(\"\", parts)); }\n\n");
         sb.append("    static final Map<String, byte[]> MODULES = Map.ofEntries(\n");
         sb.append("             ").append(String.join(", ", entries)).append("\n");
         sb.append("    );\n");

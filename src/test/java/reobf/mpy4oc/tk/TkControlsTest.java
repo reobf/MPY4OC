@@ -96,5 +96,5 @@ class TkControlsTest {
         TkClientState empty = new TkClientState(new TkPackets.OpenGui(target, 1, TkScene.defaults())); assertFalse(empty.accept(decoded));
         assertThrows(IllegalArgumentException.class, () -> new TkDisplayPatch(new long[] {1L<<32,1L<<32}, TkDisplayList.EMPTY));
     }
-    private TkScene scene(TkDisplayList display) { return new TkScene(320, 240, 0, "test", true, display); }
+    private TkScene scene(TkDisplayList display) { return new TkScene(320, 240, 0, true, display); }
 }

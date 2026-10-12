@@ -27,6 +27,7 @@ class TileTkDisplayTest {
     private Visibility componentVisibility;
     private final AtomicInteger removals = new AtomicInteger();
     private final AtomicInteger nodeCount = new AtomicInteger();
+    private final AtomicInteger visibilityChanges = new AtomicInteger();
 
     @BeforeAll
     static void registerTile() {
@@ -53,11 +54,10 @@ class TileTkDisplayTest {
         TileTkDisplay original = new TileTkDisplay();
         assertEquals("tk_display", registeredComponent);
         assertEquals(Visibility.Network, componentVisibility);
-        assertArrayEquals(new Object[] {320, 240}, original.getResolution(null, null));
-        original.setResolution(null, arguments(640, 480));
+        assertArrayEquals(new Object[] {320, 320}, original.getResolution(null, null), "a new display: its group's largest canvas");
+        original.setResolution(null, arguments(300, 200));
         original.setSurfaceVisible(null, arguments(false));
         original.setBackground(null, arguments(0x123456));
-        original.setTitle(null, arguments("共享画布"));
         NBTTagCompound saved = new NBTTagCompound();
         original.writeToNBT(saved);
 
@@ -65,10 +65,9 @@ class TileTkDisplayTest {
         assertInstanceOf(TileTkDisplay.class, loaded);
         TileTkDisplay restored = (TileTkDisplay) loaded;
         assertEquals(original.node().address(), restored.node().address());
-        assertArrayEquals(new Object[] {640, 480}, restored.getResolution(null, null));
+        assertArrayEquals(new Object[] {300, 200}, restored.getResolution(null, null));
         assertArrayEquals(new Object[] {false}, restored.isSurfaceVisible(null, null));
         assertArrayEquals(new Object[] {0x123456}, restored.getBackground(null, null));
-        assertArrayEquals(new Object[] {"共享画布"}, restored.getTitle(null, null));
         assertArrayEquals(new Node[] {restored.node()}, restored.onAnalyze(null, 0, 0, 0, 0));
     }
 
@@ -89,11 +88,46 @@ class TileTkDisplayTest {
     }
 
     @Test
+    void groupsRaiseTheResolutionCapHideSlavesAndSurviveNbt() {
+        TileTkDisplay master = new TileTkDisplay(), slave = new TileTkDisplay();
+        assertArrayEquals(new Object[] {320, 320}, master.getMaxResolution(null, null));
+        TkGroup group = new TkGroup(0, 0, 2, 1);
+        master.joinGroup(master.position(), group, false);
+        slave.joinGroup(master.position(), group, true);
+        assertEquals(1, visibilityChanges.get(), "only the slave's component is hidden");
+        assertEquals(Visibility.None, ((Component) slave.node()).visibility());
+        assertArrayEquals(new Object[] {640, 320}, master.getMaxResolution(null, null));
+        assertArrayEquals(new Object[] {640, 320}, master.getResolution(null, null), "the canvas grows with its group");
+        master.setResolution(null, arguments(640, 300));
+        assertThrows(IllegalArgumentException.class, () -> master.setResolution(null, arguments(641, 300)));
+
+        NBTTagCompound saved = new NBTTagCompound();
+        master.writeToNBT(saved);
+        TileTkDisplay restored = new TileTkDisplay();
+        restored.readFromNBT(saved);
+        assertEquals(group, restored.group());
+        assertFalse(restored.isSlave());
+        assertArrayEquals(new Object[] {640, 300}, restored.getResolution(null, null));
+        NBTTagCompound savedSlave = new NBTTagCompound();
+        slave.writeToNBT(savedSlave);
+        TileTkDisplay restoredSlave = new TileTkDisplay();
+        restoredSlave.readFromNBT(savedSlave);
+        assertTrue(restoredSlave.isSlave());
+        assertArrayEquals(master.position(), restoredSlave.masterPosition());
+
+        // Splitting brings the canvas back to one block's largest and shows the component again.
+        master.leaveGroup();
+        assertArrayEquals(new Object[] {320, 320}, master.getResolution(null, null));
+        slave.leaveGroup();
+        assertEquals(Visibility.Network, ((Component) slave.node()).visibility());
+    }
+
+    @Test
     void invalidResolutionDoesNotPartiallyChangeState() {
         TileTkDisplay tile = new TileTkDisplay();
         assertThrows(IllegalArgumentException.class, () -> tile.setResolution(null, arguments(640, 0)));
-        assertThrows(IllegalArgumentException.class, () -> tile.setResolution(null, arguments(1025, 480)));
-        assertArrayEquals(new Object[] {320, 240}, tile.getResolution(null, null));
+        assertThrows(IllegalArgumentException.class, () -> tile.setResolution(null, arguments(321, 240)));
+        assertArrayEquals(new Object[] {320, 320}, tile.getResolution(null, null));
     }
 
     @Test
@@ -105,7 +139,7 @@ class TileTkDisplayTest {
         NBTTagCompound saved = new NBTTagCompound();
         saved.setTag("mpy4oc:display", state);
         tile.readFromNBT(saved);
-        assertArrayEquals(new Object[] {320, 240}, tile.getResolution(null, null));
+        assertArrayEquals(new Object[] {320, 320}, tile.getResolution(null, null), "the group's largest");
         assertArrayEquals(new Object[] {true}, tile.isSurfaceVisible(null, null));
         tile.onChunkUnload();
         assertEquals(1, removals.get());
@@ -145,6 +179,7 @@ class TileTkDisplayTest {
 
     private Component testNode(Environment host) {
         String[] address = {"test-node-" + nodeCount.incrementAndGet()};
+        Visibility[] visibility = {Visibility.Network};
         return (Component) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {Component.class},
                 (proxy, method, args) -> {
                     switch (method.getName()) {
@@ -156,6 +191,8 @@ class TileTkDisplayTest {
                             if (nbt.hasKey("address")) address[0] = nbt.getString("address");
                             return null;
                         case "remove": removals.incrementAndGet(); return null;
+                        case "visibility": return visibility[0];
+                        case "setVisibility": visibility[0] = (Visibility) args[0]; visibilityChanges.incrementAndGet(); return null;
                         case "equals": return proxy == args[0];
                         case "hashCode": return System.identityHashCode(proxy);
                         case "toString": return address[0];

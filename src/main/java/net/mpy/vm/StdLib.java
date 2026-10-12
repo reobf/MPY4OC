@@ -451,6 +451,8 @@ public final class StdLib {
         if (o instanceof PyObj.PyDict) return "dict";
         if (o instanceof PyObj.PySet) return "set";
         if (o instanceof PyObj.Bytes) return "bytes";
+        if (o instanceof PyObj.ByteArray) return "bytearray";
+        if (o instanceof PyObj.Complex) return "complex";
         if (o instanceof PyObj.Range) return "range";
         if (o instanceof PyGen) return "generator";
         if (o instanceof PyClass) return "type";

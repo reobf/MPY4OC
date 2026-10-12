@@ -35,7 +35,7 @@ mpy4oc.tk.busy=The display is busy sending to you; try again in a moment.
 
 # --- tooltips --------------------------------------------------------------
 # %1$s = tier number, %2$s = ops per tick
-mpy4oc.tip.tier=Tier %1$s \u2014 %2$s ops/tick
+mpy4oc.tip.tier=Tier %1$s — %2$s ops/tick
 
 mpy4oc.tip.cpu.arch=Architecture: mpy
 mpy4oc.tip.cpu.desc=Runs MicroPython bytecode.
@@ -54,3 +54,17 @@ mpy4oc.config.title=mpy4oc Settings
 
 mpy4oc.config.sftpPort=SFTP Port
 mpy4oc.config.sftpPort.tooltip=Port for the SFTP/SSH server.\n0 = pick a free port automatically, -1 = disable.
+
+# --- Tk display groups (wrench) and resolution dialog ---
+mpy4oc.tk.notPermitted=You may not reconfigure this display: the computer running it does not list you as a user.
+mpy4oc.tk.merged=Displays joined: %s×%s blocks, resolution up to %s×%s.
+mpy4oc.tk.split=The display group was split into single displays.
+mpy4oc.tk.merge.no_neighbour=There is no Tk display on that side.
+mpy4oc.tk.merge.facing=That display faces another way.
+mpy4oc.tk.merge.unloaded=Part of these displays is not loaded.
+mpy4oc.tk.merge.same_group=That display already belongs to this group.
+mpy4oc.tk.merge.shape=Joined displays must form a rectangle: the touching sides must have the same length and line up.
+mpy4oc.tk.merge.too_large=A display group can be at most 8×8 blocks.
+mpy4oc.tk.resolution.title=Display resolution
+mpy4oc.tk.resolution.limit=%s×%s blocks, up to %s×%s
+mpy4oc.tk.resolution.max=Maximum

@@ -34,7 +34,7 @@ class TkTextTest {
         assertThrows(IllegalArgumentException.class,()->t.insert(0,"x".repeat(Text.MAX_CHARS)));assertEquals(before,t.content());
         t.delete(0,t.length());assertEquals("\n",t.content());assertEquals("2.0",t.index(t.index("end")));
         t.insert(t.length(),"尾\r\n");assertEquals("尾\n\n",t.content());
-        assertThrows(IllegalArgumentException.class,()->t.index("end + 2 lines"));assertThrows(IllegalArgumentException.class,()->t.index("bad"));
+        assertEquals(t.length(),t.index("end + 2 lines"));assertThrows(IllegalArgumentException.class,()->t.index("bad"));
     }
     @Test void keyboardSelectionAndDisabledCopyKeepDataSafe() {
         Text t=text();t.insert(0,"abc\n中文\n1234");t.tree.focus(t.id);t.cursor(2);
@@ -63,7 +63,7 @@ class TkTextTest {
         t.tree.pointerDown(1,b.x+4,b.y+4);t.tree.pointerDrag(1,b.x+20,b.y+36);assertEquals("abcd\nefgh\nij",t.selectedText());
         t.tree.pointerDown(2,b.x+12,b.y+4);t.tree.pointerDrag(1,b.x+100,b.y+60);assertFalse(t.selectionPresent());
         t.tree.pointerDrag(2,b.x+28,b.y+20);assertEquals("bcd\nefg",t.selectedText());
-        assertTrue(t.tree.render().items.stream().filter(i->i.selectionWidth>0).count()>=2);
+        assertTrue(t.tree.render().items.stream().filter(i->i.kind==TkWidget.Kind.LABEL && i.background==0xC3C3C3).count()>=2);
     }
     @Test void tenThousandLinesSendOnlyViewportAndPatchOnlyChangedRow() {
         Text t=text();StringBuilder lines=new StringBuilder();for(int i=0;i<10000;i++)lines.append("日志 ").append(i).append('\n');t.insert(0,lines.toString());
@@ -86,7 +86,7 @@ class TkTextTest {
         TkTarget target=new TkTarget(0,1,2,3,"text",1);ByteBuf buf=Unpooled.buffer();
         try {
             new TkPackets.CopyResult(target,1,t.selectedText()).toBytes(buf);TkPackets.CopyResult copy=new TkPackets.CopyResult();copy.fromBytes(buf);assertEquals(t.content(),copy.text);
-            buf.clear();TkScene scene=new TkScene(320,240,0,"Text",true,t.tree.render());new TkPackets.SceneSync(target,-1,1,TkPackets.ALL,scene).toBytes(buf);
+            buf.clear();TkScene scene=new TkScene(320,240,0,true,t.tree.render());new TkPackets.SceneSync(target,-1,1,TkPackets.ALL,scene).toBytes(buf);
             TkPackets.SceneSync read=new TkPackets.SceneSync();read.fromBytes(buf);assertEquals(scene,read.scene);
             buf.clear();
             assertThrows(IllegalArgumentException.class,()->new TkPackets.CopyResult(target,1,"x".repeat(Text.MAX_BYTES+1)).toBytes(buf));

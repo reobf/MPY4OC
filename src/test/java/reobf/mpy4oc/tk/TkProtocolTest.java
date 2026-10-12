@@ -14,7 +14,7 @@ class TkProtocolTest {
 
     @Test
     void fullScenesAndUnicodeClipboardSurviveWireEncoding() throws Exception {
-        TkScene scene = new TkScene(800, 600, 0x123456, "共享画布 🌍", false);
+        TkScene scene = new TkScene(800, 600, 0x123456, false);
         TkPackets.OpenGui open = roundTrip(new TkPackets.OpenGui(target(1), 5, scene));
         assertEquals(target(1), open.target);
         assertEquals(scene, open.scene);
@@ -35,7 +35,7 @@ class TkProtocolTest {
         assertEquals("选中", roundTrip(new TkPackets.CopyResult(target(1), 17, "选中")).text);
         assertTrue(roundTrip(new TkPackets.CopyRequest(target(1), 17, true)).cut);
         Entry entry = new Entry(new TkTree().root()); entry.text("中文 selected"); entry.pack(); entry.selectionRange(1, 5);
-        TkScene selected = new TkScene(320, 240, 0, "Selection", true, entry.tree.render());
+        TkScene selected = new TkScene(320, 240, 0, true, entry.tree.render());
         assertTrue(selected.display.items.get(0).selectionWidth > 0);
         assertEquals(selected, roundTrip(new TkPackets.OpenGui(target(1), 2, selected)).scene);
     }
@@ -44,13 +44,13 @@ class TkProtocolTest {
     void negativeAndOversizedGeometrySurvivesFullAndDeltaEncoding() throws Exception {
         TkTree tree = new TkTree(); Label label = new Label(tree.root(), "裁剪测试");
         label.place(new TkPlace(-30, -12, 700, 280, 0, 0, null, null, TkPack.Anchor.NW, "inside"));
-        TkScene scene = new TkScene(320, 240, 0, "Place", true, tree.render());
+        TkScene scene = new TkScene(320, 240, 0, true, tree.render());
         assertEquals(scene, roundTrip(new TkPackets.OpenGui(target(1), 1, scene)).scene);
         TkViewers.Viewer<String> viewer = new TkViewers<String>().open(UUID.randomUUID(), "one");
         viewer.lastScene = scene; viewer.revision = 1;
         TkClientState client = new TkClientState(new TkPackets.OpenGui(target(viewer.session), 1, scene));
         label.place(new TkPlace(-100, -20, 1000, 300, 0, 0, null, null, TkPack.Anchor.NW, "inside"));
-        TkScene moved = new TkScene(320, 240, 0, "Place", true, tree.render());
+        TkScene moved = new TkScene(320, 240, 0, true, tree.render());
         assertTrue(client.accept(roundTrip(viewer.update(target(viewer.session), 2, moved))));
         assertEquals(moved, client.scene());
         assertThrows(IllegalArgumentException.class, () -> new TkDisplayList.Item(1, TkWidget.Kind.FRAME,
@@ -60,7 +60,7 @@ class TkProtocolTest {
     @Test
     void twoViewersReceiveTheSameDeltaAndLateJoinGetsCurrentState() throws Exception {
         TkScene initial = TkScene.defaults();
-        TkScene updated = new TkScene(640, 480, 0xCAFE00, "Live", false);
+        TkScene updated = new TkScene(640, 480, 0xCAFE00, false);
         TkViewers<String> viewers = new TkViewers<>();
         for (String owner : new String[] {"one", "two"}) {
             TkViewers.Viewer<String> viewer = viewers.open(UUID.randomUUID(), owner);
@@ -69,7 +69,7 @@ class TkProtocolTest {
             TkClientState client = new TkClientState(new TkPackets.OpenGui(target(viewer.session), 1, initial));
             TkPackets.SceneSync delta = roundTrip(viewer.update(target(viewer.session), 4, updated));
             assertFalse(delta.isFull());
-            assertEquals(TkPackets.SIZE | TkPackets.BACKGROUND | TkPackets.TITLE | TkPackets.SURFACE, delta.mask);
+            assertEquals(TkPackets.SIZE | TkPackets.BACKGROUND | TkPackets.SURFACE, delta.mask);
             assertTrue(client.accept(delta));
             assertEquals(updated, client.scene());
             assertEquals(4, client.revision());
@@ -83,7 +83,7 @@ class TkProtocolTest {
         viewer.lastScene = TkScene.defaults();
         viewer.revision = 1;
         assertNull(viewer.update(target(viewer.session), 3, TkScene.defaults()));
-        TkScene updated = new TkScene(320, 240, 0xFFFFFF, TkScene.DEFAULT_TITLE, true);
+        TkScene updated = new TkScene(320, 320, 0xFFFFFF, true);
         TkPackets.SceneSync delta = viewer.update(target(viewer.session), 4, updated);
         assertEquals(1, delta.baseRevision);
         assertEquals(TkPackets.BACKGROUND, delta.mask);
@@ -95,7 +95,7 @@ class TkProtocolTest {
     @Test
     void missingDeltaRequestsResyncWhileStalePacketsAndOtherSessionsAreIgnored() {
         TkClientState client = new TkClientState(new TkPackets.OpenGui(target(1), 1, TkScene.defaults()));
-        TkScene changed = new TkScene(320, 240, 0xABCDEF, "Updated", true);
+        TkScene changed = new TkScene(320, 240, 0xABCDEF, true);
         assertFalse(client.accept(new TkPackets.SceneSync(target(1), 2, 3, TkPackets.BACKGROUND, changed)));
         assertEquals(TkScene.defaults(), client.scene());
         assertTrue(client.accept(new TkPackets.SceneSync(target(1), -1, 3, TkPackets.ALL, changed)));
@@ -130,13 +130,13 @@ class TkProtocolTest {
     @Test
     void malformedOrOversizedPacketsAreRejectedBeforeStateChanges() {
         assertThrows(IllegalArgumentException.class, () -> new TkTarget(0, 0, 256, 0, "address", 1));
-        assertThrows(IllegalArgumentException.class, () -> new TkScene(63, 240, 0, "title", true));
-        assertThrows(IllegalArgumentException.class, () -> new TkScene(320, 240, -1, "title", true));
-        assertThrows(IllegalArgumentException.class, () -> new TkScene(320, 240, 0, "line\nbreak", true));
-        assertThrows(IllegalArgumentException.class, () -> new TkScene(320, 240, 0, "中".repeat(171), true));
+        assertThrows(IllegalArgumentException.class, () -> new TkScene(63, 240, 0, true));
+        assertThrows(IllegalArgumentException.class, () -> new TkScene(320, 240, -1, true));
         assertThrows(IllegalArgumentException.class, () -> new TkPackets.SceneSync(target(1), -1, 1, 16, TkScene.defaults()));
-        assertThrows(IllegalArgumentException.class, () -> new TkPackets.InputEvent(target(1), 0, 1024, 0, 0, 0, 0));
-        assertThrows(IllegalArgumentException.class, () -> new TkPackets.InputEvent(target(1), TkPackets.InputEvent.DRAG, -1025, 0, 0, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new TkPackets.InputEvent(target(1), 0, TileTkDisplay.MAX_SIZE, 0, 0, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new TkPackets.InputEvent(target(1), TkPackets.InputEvent.DRAG, -TileTkDisplay.MAX_SIZE - 1, 0, 0, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new TkPackets.Wrench(0, 64, 0, TkPackets.Wrench.SPLIT + 1));
+        assertThrows(IllegalArgumentException.class, () -> new TkPackets.Wrench(0, 256, 0, 0));
         assertThrows(IllegalArgumentException.class, () -> new TkPackets.InputEvent(target(1), TkPackets.InputEvent.KEY_DOWN, 0, 0, 0, 0xD800, 0));
         assertThrows(IllegalArgumentException.class, () -> new TkPackets.InputEvent(target(1), TkPackets.InputEvent.WHEEL, 0, 0, 1201, 0, 0));
         ByteBuf buffer = Unpooled.buffer();

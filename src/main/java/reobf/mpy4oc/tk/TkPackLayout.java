@@ -15,7 +15,17 @@ final class TkPackLayout {
 
     private static void measure(TkWidget widget) {
         int w, h;
-        if (widget instanceof Frame) {
+        if (widget instanceof Notebook) {
+            Notebook book = (Notebook) widget;
+            for (TkWidget child : book.children) measure(child);
+            int[] size = book.natural(); w = size[0]; h = size[1];
+        } else if (widget instanceof Panedwindow) {
+            Panedwindow paned = (Panedwindow) widget;
+            for (TkWidget child : paned.children) measure(child);
+            // A pane may be a sibling, measured by the parent only after this.
+            for (Panedwindow.Pane pane : paned.panes) if (pane.widget.parent != paned) measure(pane.widget);
+            int[] size = paned.natural(); w = size[0]; h = size[1];
+        } else if (widget instanceof Frame) {
             Frame frame = (Frame) widget;
             for (TkWidget child : frame.children) measure(child);
             w = h = 1;
@@ -29,12 +39,17 @@ final class TkPackLayout {
                     usedX += outerWidth(child);
                 }
             }
-            w = Math.max(w, usedX) + 2 * (widget.padx + widget.border);
-            h = Math.max(h, usedY) + 2 * (widget.pady + widget.border);
+            w = Math.max(w, usedX) + widget.insetWidth();
+            h = Math.max(h, usedY) + widget.insetHeight();
             if (!frame.gridded.isEmpty()) {
                 int[] cols = TkGridLayout.resolve(frame, true), rows = TkGridLayout.resolve(frame, false);
-                w = TkGridLayout.total(cols) + 2 * (widget.padx + widget.border);
-                h = TkGridLayout.total(rows) + 2 * (widget.pady + widget.border);
+                w = TkGridLayout.total(cols) + widget.insetWidth();
+                h = TkGridLayout.total(rows) + widget.insetHeight();
+            }
+            if (frame instanceof Labelframe && (!frame.packed.isEmpty() || !frame.gridded.isEmpty())) {
+                // Wide (or tall) enough for the label between the corners.
+                Labelframe labelframe = (Labelframe) frame; int least = labelframe.minAlong();
+                if (labelframe.vertical()) w = Math.max(w, least); else h = Math.max(h, least);
             }
             if (frame.gridded.isEmpty() ? !frame.propagate || frame.packed.isEmpty() : !frame.gridPropagate) {
                 w = widget.width > 0 ? widget.width : w;
@@ -42,14 +57,14 @@ final class TkPackLayout {
             }
         } else if (widget instanceof Text) {
             Text text = (Text) widget;
-            w = text.columns * 8 + 2 * (text.padx + text.border);
-            h = text.lines * 16 + 2 * (text.pady + text.border);
+            w = text.columns * 8 + text.insetWidth();
+            h = text.lines * 16 + text.insetHeight();
         } else if (widget instanceof Canvas) {
             w = widget.width + 2 * widget.border; h = widget.height + 2 * widget.border;
         } else if (widget instanceof Listbox) {
             Listbox list = (Listbox) widget;
-            w = (list.columns == 0 ? list.maxWidth() : list.columns * 8) + 2 * (list.padx + list.border);
-            h = (list.lines == 0 ? list.size() : list.lines) * 16 + 2 * (list.pady + list.border);
+            w = (list.columns == 0 ? list.maxWidth() : list.columns * 8) + list.insetWidth();
+            h = (list.lines == 0 ? list.size() : list.lines) * 16 + list.insetHeight();
         } else if (widget instanceof Scrollbar) {
             boolean horizontal = ((Scrollbar) widget).horizontal;
             w = horizontal ? 100 : widget.width; h = horizontal ? widget.width : 100;
@@ -57,12 +72,32 @@ final class TkPackLayout {
             Scale scale = (Scale) widget;
             w = scale.horizontal ? scale.length : scale.showvalue ? 64 : 24;
             h = scale.horizontal ? scale.showvalue ? 44 : 24 : scale.length;
+        } else if (widget instanceof Treeview) {
+            Treeview tree = (Treeview) widget;   // the columns side by side, -height rows under the headings
+            w = tree.treeWidth() + tree.insetWidth();
+            h = tree.natural() + tree.insetHeight();
+        } else if (widget instanceof Separator) {
+            w = h = 2; // Tk's separator element; pack or grid it with fill to stretch the line
+        } else if (widget instanceof Menu) {
+            w = h = 1;   // never laid out: shown as a menubar or posted
+        } else if (widget instanceof Sizegrip) {
+            w = h = Sizegrip.SIZE;
+        } else if (widget instanceof Progressbar) {
+            Progressbar bar = (Progressbar) widget;
+            w = bar.horizontal ? bar.length : 18;
+            h = bar.horizontal ? 18 : bar.length;
+        } else if (widget instanceof Label && widget.tree.images.get(((Label) widget).image) != null) {
+            // A PhotoImage label sizes to its image (Tk measures image labels in pixels).
+            TkImage image = widget.tree.images.get(((Label) widget).image);
+            w = image.width + widget.insetWidth();
+            h = image.height + widget.insetHeight();
         } else {
             Label label = (Label) widget;
             w = widget.width > 0 ? widget.width : (label.columns > 0 ? label.columns * TkFontMetrics.CELL_WIDTH
-                    : TkFontMetrics.width(label.paintText())) + 2 * (widget.padx + widget.border) + (widget instanceof Checkbutton ? 20 : 0);
+                    : TkFontMetrics.width(label.paintText())) + widget.insetWidth() + (widget instanceof Checkbutton ? 20 : 0);
+            if (widget.width == 0 && label.minColumns > 0) w = Math.max(w, label.minColumns * TkFontMetrics.CELL_WIDTH + widget.insetWidth());
             h = widget.height > 0 ? widget.height : (label.lines > 0 ? label.lines * TkFontMetrics.LINE_HEIGHT
-                    : TkFontMetrics.height(label.paintText())) + 2 * (widget.pady + widget.border);
+                    : TkFontMetrics.height(label.paintText())) + widget.insetHeight();
         }
         widget.requestedWidth = Math.max(1, Math.min(8192, w));
         widget.requestedHeight = Math.max(1, Math.min(8192, h));
@@ -82,12 +117,24 @@ final class TkPackLayout {
         if (!(widget instanceof Frame)) return;
         Frame frame = (Frame) widget;
         for (TkWidget child : frame.children) hide(child);
-        int insetX = frame.padx + frame.border, insetY = frame.pady + frame.border;
-        TkRect cavity = new TkRect(bounds.x + insetX, bounds.y + insetY,
-                Math.max(0, bounds.width - 2 * insetX), Math.max(0, bounds.height - 2 * insetY));
+        TkRect cavity = frame.inner();
         TkRect clip = cavity.intersect(widget.clip);
         TkGridLayout.layout(frame, cavity, clip);
         TkPlace.layout(frame);
+        if (frame instanceof Panedwindow) ((Panedwindow) frame).layoutPanes(frame.bounds, widget.clip);
+        if (frame instanceof Notebook) {
+            // Only the selected tab's page is mapped, inside the page border.
+            Notebook book = (Notebook) frame; book.layoutTabs();
+            if (book.current >= 0) {
+                Notebook.Tab tab = book.tabs.get(book.current);
+                place(tab.page, book.pageBox(tab), book.clientInner().intersect(widget.clip));
+            }
+        }
+        if (frame instanceof Labelframe && ((Labelframe) frame).labelWidget != null) {
+            // The label widget sits in the label's box across the border: clipped to the frame, not its inside.
+            Labelframe labelframe = (Labelframe) frame;
+            place(labelframe.labelWidget, labelframe.labelBox(), widget.clip);
+        }
         List<TkWidget> packed = frame.packed;
         for (int i = 0; i < packed.size(); i++) {
             TkWidget child = packed.get(i);

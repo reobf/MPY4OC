@@ -15,8 +15,10 @@ final class TkSurfaceTexture {
     long revision=-1;
     int generation=-1;
     int size;
+    /** The image cache generation this picture was painted with. */
+    int imageGeneration=-1;
 
-    void update(TkScene scene,long revision,int size,int generation) {
+    void update(TkScene scene,long revision,int size,int generation,TkImageCache images) {
         int width=scene.width>=scene.height?size:Math.max(1,size*scene.width/scene.height);
         int height=scene.height>=scene.width?size:Math.max(1,size*scene.height/scene.width);
         int previousBuffer=GL11.glGetInteger(0x8CA6); // FRAMEBUFFER_BINDING (core/ARB/EXT share the value).
@@ -35,8 +37,8 @@ final class TkSurfaceTexture {
             GL11.glDisable(GL11.GL_ALPHA_TEST);GL11.glColorMask(true,true,true,true);GL11.glColor4f(1,1,1,1);
             GL11.glMatrixMode(GL11.GL_PROJECTION);GL11.glLoadIdentity();GL11.glOrtho(0,width,height,0,-100,100);
             GL11.glMatrixMode(GL11.GL_MODELVIEW);GL11.glLoadIdentity();
-            renderer.prepare(scene,revision);renderer.drawTexture(scene,width,height);
-            this.revision=revision;this.size=size;this.generation=generation;
+            renderer.prepare(scene,revision);renderer.drawTexture(scene,images,width,height);
+            this.revision=revision;this.size=size;this.generation=generation;this.imageGeneration=images.generation;
         } finally {
             GL11.glMatrixMode(GL11.GL_MODELVIEW);GL11.glPopMatrix();
             GL11.glMatrixMode(GL11.GL_PROJECTION);GL11.glPopMatrix();GL11.glMatrixMode(matrixMode);

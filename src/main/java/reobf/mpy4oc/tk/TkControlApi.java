@@ -7,8 +7,36 @@ final class TkControlApi {
         if (!(value instanceof Number) || !Double.isFinite(((Number) value).doubleValue())) throw new IllegalArgumentException("finite number required");
         return ((Number) value).doubleValue();
     }
+    static int pixel(Object value) { return (int) Math.max(-32768, Math.min(32768, Math.round(number(value)))); }
     static Object call(TkWidget w, String action, Object[] a) {
         if (w instanceof Listbox) return list((Listbox) w, action, a);
+        if (w instanceof Spinbox) {
+            Spinbox s = (Spinbox) w;
+            switch (action) {
+                // A step up (1) or down (-1): {before, after}, or null when disabled (nothing happens).
+                case "step": {
+                    count(a, 1);
+                    int dir = TkOptions.integer(a[0], -1, 1);
+                    if (dir == 0) throw new IllegalArgumentException("step must be 1 or -1");
+                    String before = s.step(dir);
+                    return before == null ? null : new Object[] {before, s.text()};
+                }
+                case "identify": count(a, 2); return s.identify(pixel(a[0]), pixel(a[1]));
+            }
+        }
+        if (w instanceof Combobox) {
+            Combobox c = (Combobox) w;
+            switch (action) {
+                case "current":
+                    if (a.length == 0) return c.current();
+                    count(a, 1); c.current(TkOptions.integer(a[0], Integer.MIN_VALUE, Integer.MAX_VALUE)); return null;
+                case "identify": count(a, 2); return c.identify(pixel(a[0]), pixel(a[1]));
+                // The program ran -postcommand for a player's request (or opens the list itself).
+                case "post": count(a, 0); c.tree.open(c); return null;
+                case "unpost": count(a, 0); if (c.tree.popup != null && c.tree.popup.owner == c) c.tree.unpost(); return null;
+                case "posted": count(a, 0); c.tree.render(); return c.tree.popup != null && c.tree.popup.owner == c;
+            }
+        }
         if (w instanceof Checkbutton) {
             Checkbutton c = (Checkbutton) w; count(a, 0);
             switch (action) {
@@ -24,11 +52,21 @@ final class TkControlApi {
             Scale s = (Scale) w;
             if (action.equals("get")) { count(a, 0); return s.value; }
             if (action.equals("set")) { count(a, 1); if (s.enabled) s.set(number(a[0]), true); return s.value; }
+            if (action.equals("valueat")) { count(a, 2); return s.valueAt(pixel(a[0]), pixel(a[1])); }
+            if (action.equals("coords")) { count(a, 1); int[] c = s.coords(number(a[0])); return new Object[] {c[0], c[1]}; }
+        }
+        if (w instanceof Progressbar) {
+            Progressbar p = (Progressbar) w;
+            if (action.equals("step")) { count(a, 1); return p.step(number(a[0])); }
+            if (action.equals("get")) { count(a, 0); return p.value; }
         }
         if (w instanceof Scrollbar) {
             Scrollbar b = (Scrollbar) w;
             if (action.equals("get")) { count(a, 0); return new Object[] {b.first, b.last}; }
             if (action.equals("set")) { count(a, 2); b.set(number(a[0]), number(a[1])); return null; }
+            if (action.equals("identify")) { count(a, 2); return b.identify(pixel(a[0]), pixel(a[1])); }
+            if (action.equals("delta")) { count(a, 2); return b.delta(pixel(a[0]), pixel(a[1])); }
+            if (action.equals("fraction")) { count(a, 2); return b.fraction(pixel(a[0]), pixel(a[1])); }
         }
         throw new IllegalArgumentException("unsupported control action: " + action);
     }
@@ -54,7 +92,7 @@ final class TkControlApi {
             case "bbox":
                 count(a, 1); int row = b.index(a[0], false);
                 if (row < b.top || row >= b.size() || row >= b.top + b.page()) return null;
-                return new Object[] {b.padx + b.border - b.scrollX, b.pady + b.border + (row - b.top) * 16, TkFontMetrics.width(b.get(row)), 16};
+                return new Object[] {b.insetLeft() - b.scrollX, b.insetTop() + (row - b.top) * 16, TkFontMetrics.width(b.get(row)), 16};
             case "xview": case "yview":
                 boolean x = action.equals("xview");
                 if (a.length == 0) return b.view(x);

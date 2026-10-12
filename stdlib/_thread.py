@@ -39,7 +39,9 @@ def start_new_thread(target, args, kwargs=None):
             print("Unhandled exception in thread started by", target)
             __thread_print_exc(e)
 
-    th = _t.Thread(target=_runner)
+    # Daemon, as in CPython and MicroPython: nothing waits for a _thread thread when its
+    # program ends (an MPYOS command's end stops it at its next poll point).
+    th = _t.Thread(target=_runner, daemon=True)
     th.start()
     return th.ident
 

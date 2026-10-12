@@ -212,8 +212,8 @@ public final class Methods {
             return new PyObj.Bytes(((String) s).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         });
         BYTES.put("decode", (s, a) -> {
-            arity(a, 0, 1, "decode");
-            return new String(((PyObj.Bytes) s).data, java.nio.charset.StandardCharsets.UTF_8);
+            arity(a, 0, 2, "decode");
+            return decode(((PyObj.Bytes) s).data, a.length > 0 ? a[0] : "utf-8", a.length > 1 ? a[1] : "strict");
         });
         BYTES.put("hex", (s, a) -> {
             arity(a, 0, 0, "hex");
@@ -247,8 +247,8 @@ public final class Methods {
             else if (x instanceof PyObj.ByteArray) { byte[] o = ((PyObj.ByteArray) x).toBytes(); for (byte b : o) ba.append(b & 0xFF); }
             else { for (Object o : listOfIterable(x)) { long v = asInt(o); if (v < 0 || v > 255) throw PyException.valueError("byte must be in range(0, 256)"); ba.append((int) v); } }
             return PyObj.NONE; });
-        BYTEARRAY.put("decode", (s, a) -> { arity(a, 0, 1, "decode");
-            return new String(((PyObj.ByteArray) s).toBytes(), java.nio.charset.StandardCharsets.UTF_8); });
+        BYTEARRAY.put("decode", (s, a) -> { arity(a, 0, 2, "decode");
+            return decode(((PyObj.ByteArray) s).toBytes(), a.length > 0 ? a[0] : "utf-8", a.length > 1 ? a[1] : "strict"); });
         BYTEARRAY.put("hex", (s, a) -> { arity(a, 0, 0, "hex");
             byte[] d = ((PyObj.ByteArray) s).toBytes();
             StringBuilder sb = new StringBuilder(d.length * 2);
@@ -266,8 +266,9 @@ public final class Methods {
             System.arraycopy(ba.data, idx + 1, ba.data, idx, ba.size - idx - 1);
             ba.size--;
             return (long) val; });
-        STR.put("upper", (s, a) -> { arity(a, 0, 0, "upper"); return ((String) s).toUpperCase(); });
-        STR.put("lower", (s, a) -> { arity(a, 0, 0, "lower"); return ((String) s).toLowerCase(); });
+        // Locale.ROOT: the server's locale must not change the result (Turkish lower-cases I to dotless ı).
+        STR.put("upper", (s, a) -> { arity(a, 0, 0, "upper"); return ((String) s).toUpperCase(java.util.Locale.ROOT); });
+        STR.put("lower", (s, a) -> { arity(a, 0, 0, "lower"); return ((String) s).toLowerCase(java.util.Locale.ROOT); });
         STR.put("strip", (s, a) -> { arity(a, 0, 1, "strip");
             String cs = a.length == 1 ? (String) a[0] : WS;
             return strip((String) s, cs, true, true); });
@@ -291,25 +292,48 @@ public final class Methods {
                 sb.append((String) x);
             }
             return sb.toString(); });
-        STR.put("replace", (s, a) -> { arity(a, 2, 2, "replace");
-            return ((String) s).replace((String) a[0], (String) a[1]); });
-        STR.put("find", (s, a) -> { arity(a, 1, 2, "find"); String str = (String) s;
-            int from = a.length > 1 ? asInt(a[1]) : 0;
-            if (from < 0) from = Math.max(0, str.length() + from);
-            return (long) str.indexOf((String) a[0], from); });
-        STR.put("rfind", (s, a) -> { arity(a, 1, 1, "rfind"); return (long) ((String) s).lastIndexOf((String) a[0]); });
-        STR.put("index", (s, a) -> { arity(a, 1, 1, "index");
-            int i = ((String) s).indexOf((String) a[0]);
+        STR.put("replace", (s, a) -> { arity(a, 2, 3, "replace");
+            String str = (String) s, old = text(a[0], "replace"), with = text(a[1], "replace");
+            long max = a.length > 2 ? asLong(a[2]) : -1;
+            if (max < 0) return str.replace(old, with);
+            StringBuilder out = new StringBuilder();
+            int at = 0;
+            for (long done = 0; done < max; done++) {
+                if (old.isEmpty()) {             // '' matches before each character and at the end
+                    out.append(with);
+                    if (at >= str.length()) { at = str.length() + 1; break; }
+                    out.append(str.charAt(at++));
+                    continue;
+                }
+                int hit = str.indexOf(old, at);
+                if (hit < 0) break;
+                out.append(str, at, hit).append(with);
+                at = hit + old.length();
+            }
+            if (at <= str.length()) out.append(str, at, str.length());
+            return out.toString(); });
+        // find/rfind/index/rindex/count/startswith/endswith take CPython's optional start and
+        // end, which work as slice bounds; startswith/endswith also take a tuple of strings.
+        STR.put("find", (s, a) -> { arity(a, 1, 3, "find"); return (long) find((String) s, text(a[0], "find"), a, false); });
+        STR.put("rfind", (s, a) -> { arity(a, 1, 3, "rfind"); return (long) find((String) s, text(a[0], "rfind"), a, true); });
+        STR.put("index", (s, a) -> { arity(a, 1, 3, "index");
+            int i = find((String) s, text(a[0], "index"), a, false);
             if (i < 0) throw PyException.valueError("substring not found");
             return (long) i; });
-        STR.put("count", (s, a) -> { arity(a, 1, 1, "count");
-            String str = (String) s, sub = (String) a[0];
-            if (sub.isEmpty()) return (long) (str.length() + 1);
-            long c = 0; int i = 0;
-            while ((i = str.indexOf(sub, i)) >= 0) { c++; i += sub.length(); }
+        STR.put("rindex", (s, a) -> { arity(a, 1, 3, "rindex");
+            int i = find((String) s, text(a[0], "rindex"), a, true);
+            if (i < 0) throw PyException.valueError("substring not found");
+            return (long) i; });
+        STR.put("count", (s, a) -> { arity(a, 1, 3, "count");
+            String str = (String) s, sub = text(a[0], "count");
+            int start = bound(a, 1, str.length(), 0), end = bound(a, 2, str.length(), str.length());
+            if (start > end) return 0L;
+            if (sub.isEmpty()) return (long) (end - start + 1);
+            long c = 0; int i = start;
+            while ((i = str.indexOf(sub, i)) >= 0 && i + sub.length() <= end) { c++; i += sub.length(); }
             return c; });
-        STR.put("startswith", (s, a) -> { arity(a, 1, 1, "startswith"); return ((String) s).startsWith((String) a[0]); });
-        STR.put("endswith", (s, a) -> { arity(a, 1, 1, "endswith"); return ((String) s).endsWith((String) a[0]); });
+        STR.put("startswith", (s, a) -> { arity(a, 1, 3, "startswith"); return affix((String) s, a, false); });
+        STR.put("endswith", (s, a) -> { arity(a, 1, 3, "endswith"); return affix((String) s, a, true); });
         STR.put("isdigit", (s, a) -> { arity(a, 0, 0, "isdigit");
             String str = (String) s;
             if (str.isEmpty()) return false;
@@ -320,6 +344,123 @@ public final class Methods {
             if (str.isEmpty()) return false;
             for (int i = 0; i < str.length(); i++) if (!Character.isLetter(str.charAt(i))) return false;
             return true; });
+    }
+
+    /**
+     * bytes -> str for bytes.decode, bytearray.decode and str(bytes, ...), as CPython does
+     * for UTF-8 (the default), Latin-1 and ASCII. Malformed input goes to the error handler,
+     * looked up only when it is needed: 'strict' (UnicodeDecodeError, the default),
+     * 'replace' (one U+FFFD per malformed sequence), 'ignore', 'backslashreplace' or
+     * 'surrogateescape'.
+     */
+    public static String decode(byte[] data, Object encoding, Object errors) {
+        if (!(encoding instanceof String)) throw PyException.typeError("decode() argument 'encoding' must be str, not " + (encoding == PyObj.NONE ? "None" : typeName(encoding)));
+        if (!(errors instanceof String)) throw PyException.typeError("decode() argument 'errors' must be str, not " + (errors == PyObj.NONE ? "None" : typeName(errors)));
+        String name = ((String) encoding).toLowerCase(java.util.Locale.ROOT).replace('-', '_').replace(' ', '_');
+        if (UTF8_NAMES.contains(name)) return decodeUtf8(data, (String) errors);
+        if (LATIN1_NAMES.contains(name)) return new String(data, java.nio.charset.StandardCharsets.ISO_8859_1);
+        if (ASCII_NAMES.contains(name)) {
+            StringBuilder out = new StringBuilder(data.length);
+            for (int i = 0; i < data.length; i++) {
+                if (data[i] >= 0) out.append((char) data[i]);
+                else decodeError("ascii", data, i, i + 1, "ordinal not in range(128)", (String) errors, out);
+            }
+            return out.toString();
+        }
+        throw new PyException("LookupError", "unknown encoding: " + encoding);
+    }
+    private static final java.util.Set<String> UTF8_NAMES = new java.util.HashSet<>(java.util.Arrays.asList(
+            "utf_8", "utf8", "u8", "utf", "cp65001", "utf8_ucs2", "utf8_ucs4"));
+    private static final java.util.Set<String> LATIN1_NAMES = new java.util.HashSet<>(java.util.Arrays.asList(
+            "latin_1", "latin1", "latin", "l1", "iso_8859_1", "iso8859_1", "iso8859", "8859", "cp819", "ibm819",
+            "iso_ir_100", "csisolatin1", "iso_8859_1:1987"));
+    private static final java.util.Set<String> ASCII_NAMES = new java.util.HashSet<>(java.util.Arrays.asList(
+            "ascii", "us_ascii", "us", "646", "cp367", "ibm367", "csascii", "iso646_us", "iso_ir_6",
+            "ansi_x3.4_1968", "ansi_x3_4_1968", "ansi_x3.4_1986", "iso_646.irv:1991"));
+
+    /** CPython's UTF-8 decoder: the same malformed ranges, so the same messages and U+FFFD counts. */
+    public static String decodeUtf8(byte[] data, String errors) {
+        StringBuilder out = new StringBuilder(data.length);
+        int n = data.length, i = 0;
+        while (i < n) {
+            int b = data[i] & 0xFF;
+            if (b < 0x80) { out.append((char) b); i++; continue; }
+            int need = b < 0xC2 ? 0 : b < 0xE0 ? 1 : b < 0xF0 ? 2 : b < 0xF5 ? 3 : 0;
+            if (need == 0) { decodeError("utf-8", data, i, i + 1, "invalid start byte", errors, out); i++; continue; }
+            // The second byte's range rules out overlong forms, surrogates and code points past U+10FFFF.
+            int low = b == 0xE0 ? 0xA0 : b == 0xF0 ? 0x90 : 0x80, high = b == 0xED ? 0x9F : b == 0xF4 ? 0x8F : 0xBF;
+            int code = b & (need == 1 ? 0x1F : need == 2 ? 0x0F : 0x07), j = 1;
+            String reason = null;
+            for (; j <= need; j++) {
+                if (i + j >= n) { reason = "unexpected end of data"; break; }
+                int c = data[i + j] & 0xFF;
+                if (j == 1 ? c < low || c > high : (c & 0xC0) != 0x80) { reason = "invalid continuation byte"; break; }
+                code = code << 6 | c & 0x3F;
+            }
+            if (reason == null) { out.appendCodePoint(code); i += need + 1; continue; }
+            int end = reason.startsWith("unexpected") ? n : i + j;
+            decodeError("utf-8", data, i, end, reason, errors, out);
+            i = end;
+        }
+        return out.toString();
+    }
+
+    /** Apply the error handler to data[start:end), or raise. */
+    private static void decodeError(String encoding, byte[] data, int start, int end, String reason, String errors, StringBuilder out) {
+        switch (errors) {
+            case "strict": break;
+            case "replace": out.append('\ufffd'); return;
+            case "ignore": return;
+            case "backslashreplace":
+                for (int k = start; k < end; k++) out.append(String.format("\\x%02x", data[k] & 0xFF));
+                return;
+            case "surrogateescape":   // every byte of a malformed range is >= 0x80
+                for (int k = start; k < end; k++) out.append((char) (0xDC00 + (data[k] & 0xFF)));
+                return;
+            default: throw new PyException("LookupError", "unknown error handler name '" + errors + "'");
+        }
+        Object[] args = {encoding, new PyObj.Bytes(data), (long) start, (long) end, reason};
+        throw new PyException("UnicodeDecodeError", PyExc.unicodeDecodeMessage(args), args);
+    }
+
+    private static String text(Object o, String name) {
+        if (!(o instanceof String)) throw PyException.typeError(name + "() argument must be str, not " + typeName(o));
+        return (String) o;
+    }
+    private static long asLong(Object o) {
+        if (o instanceof Long) return (Long) o;
+        if (o instanceof Boolean) return (Boolean) o ? 1 : 0;
+        // An int past the long range only matters by its sign (sys.maxsize and beyond as a bound or count).
+        if (o instanceof java.math.BigInteger) return ((java.math.BigInteger) o).signum() < 0 ? Long.MIN_VALUE / 2 : Long.MAX_VALUE / 2;
+        throw PyException.typeError("an integer is required");
+    }
+    /** a[index] as a slice bound of a string of length n (None or absent: dflt). Start may exceed n. */
+    private static int bound(Object[] a, int index, int n, int dflt) {
+        if (index >= a.length || a[index] == PyObj.NONE) return dflt;
+        long v = asLong(a[index]);
+        if (v < 0) v = Math.max(0, v + n);
+        return (int) Math.min(v, index == 1 ? (long) n + 1 : n);
+    }
+    private static int find(String str, String sub, Object[] a, boolean last) {
+        int n = str.length(), start = bound(a, 1, n, 0), end = bound(a, 2, n, n);
+        if (start > end || end - start < sub.length()) return -1;
+        int i = last ? str.lastIndexOf(sub, end - sub.length()) : str.indexOf(sub, start);
+        return i < start || i + sub.length() > end ? -1 : i;
+    }
+    private static boolean affix(String str, Object[] a, boolean suffix) {
+        String name = suffix ? "endswith" : "startswith";
+        java.util.List<Object> options = a[0] instanceof PyObj.Tuple
+                ? java.util.Arrays.asList(((PyObj.Tuple) a[0]).items) : java.util.Collections.singletonList(a[0]);
+        int n = str.length(), start = bound(a, 1, n, 0), end = bound(a, 2, n, n);
+        for (Object option : options) {
+            if (!(option instanceof String)) throw PyException.typeError(a[0] instanceof PyObj.Tuple
+                    ? "tuple for " + name + " must only contain str, not " + typeName(option)
+                    : name + " first arg must be str or a tuple of str, not " + typeName(option));
+            String part = (String) option;
+            if (start > n || end - start < part.length()) continue;
+            if (str.startsWith(part, suffix ? end - part.length() : start)) return true;
+        }
+        return false;
     }
 
     private static String strip(String s, String chars, boolean left, boolean right) {

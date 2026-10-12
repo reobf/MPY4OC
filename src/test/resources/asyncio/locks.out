@@ -1,0 +1,27 @@
+has lock a True
+released a
+has lock b True
+released b
+has lock c True
+released c
+locked after False
+release unlocked: Lock is not acquired.
+took t2
+t1 True
+waiting e1 False
+waiting e2 False
+woke e1
+woke e2
+set True True
+cleared False
+consumer c1 item1
+consumer c2 item2
+wait without the lock: cannot wait on un-acquired lock
+notify without the lock: cannot notify on un-acquired lock
+inside ['s1'] False
+inside ['s1', 's2'] True
+inside ['s3'] True
+inside ['s3', 's4'] True
+semaphore free False
+bounded: BoundedSemaphore released too many times
+negative: Semaphore initial value must be >= 0

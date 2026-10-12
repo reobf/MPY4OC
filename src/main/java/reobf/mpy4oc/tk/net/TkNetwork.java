@@ -27,8 +27,8 @@ import reobf.mpy4oc.tk.TkTarget;
 
 /** Packet handlers only enqueue work; block access and broadcasts happen on server ticks. */
 public final class TkNetwork {
-    public static final String CHANNEL = "mpy4oc_tk10";
-    private static final AttributeKey<Boolean> SUPPORTED = new AttributeKey<>("mpy4oc:tk10");
+    public static final String CHANNEL = "mpy4oc_tk15";
+    private static final AttributeKey<Boolean> SUPPORTED = new AttributeKey<>("mpy4oc:tk15");
     private static final AttributeKey<Connection> CONNECTION = new AttributeKey<>("mpy4oc:tk-connection");
     private static final ArrayBlockingQueue<Runnable> REQUESTS = new ArrayBlockingQueue<>(2048);
     /**
@@ -52,7 +52,7 @@ public final class TkNetwork {
         final TkSurfaceBudget gui = new TkSurfaceBudget(tick);
         /** Size of the last GUI packet the budget refused; skip re-encoding until it fits. */
         int refused;
-        long lastOpen = Long.MIN_VALUE / 2;
+        long lastOpen = Long.MIN_VALUE / 2, lastWrench = Long.MIN_VALUE / 2;
     }
 
     private static Connection connection(io.netty.channel.Channel channel) {
@@ -86,7 +86,10 @@ public final class TkNetwork {
         channel.registerMessage(new SurfaceRequestHandler(), TkPackets.SurfaceRequest.class, 10, Side.SERVER);
         channel.registerMessage(new SurfaceSyncHandler(), TkPackets.SurfaceSync.class, 11, Side.CLIENT);
         channel.registerMessage(new SurfaceEndHandler(), TkPackets.SurfaceEnd.class, 12, Side.CLIENT);
-        channel.registerMessage(new WindowCloseHandler(), TkPackets.WindowClose.class, 13, Side.SERVER);
+        // 13 was WindowClose: the GUI's close button now just closes the GUI.
+        channel.registerMessage(new WrenchHandler(), TkPackets.Wrench.class, 14, Side.SERVER);
+        channel.registerMessage(new ImageDataHandler(), TkPackets.ImageData.class, 15, Side.CLIENT);
+        channel.registerMessage(new SurfaceImageDataHandler(), TkPackets.SurfaceImageData.class, 16, Side.CLIENT);
         FMLCommonHandler.instance().bus().register(new TkNetwork());
     }
 
@@ -137,6 +140,22 @@ public final class TkNetwork {
     }
 
     public static void sendToServer(IMessage message) { if (channel != null) channel.sendToServer(message); }
+
+    /** A wrench click on a display (see TkWrenchClient); server tick. */
+    private static void wrench(TkPackets.Wrench message, NetHandlerPlayServer connection) {
+        EntityPlayerMP player = connection.playerEntity;
+        if (player.playerNetServerHandler != connection || !connection.netManager.isChannelOpen() || player.isDead) return;
+        Connection state = connection(connection.netManager.channel());
+        if (tick - state.lastWrench < WRENCH_INTERVAL) return;
+        state.lastWrench = tick;
+        if (!player.worldObj.blockExists(message.x, message.y, message.z)
+                || player.getDistanceSq(message.x + .5, message.y + .5, message.z + .5) > 64
+                || !reobf.mpy4oc.tk.TkWrench.isWrench(player.getHeldItem())) return;
+        TileEntity entity = player.worldObj.getTileEntity(message.x, message.y, message.z);
+        if (entity instanceof TileTkDisplay) reobf.mpy4oc.tk.TkGroups.wrench(player, (TileTkDisplay) entity, message.action);
+    }
+    /** Ticks between two wrench actions of one player. */
+    static final int WRENCH_INTERVAL = 4;
     public static void watch(TileTkDisplay tile) { WATCHED.add(tile); }
     public static void unwatch(TileTkDisplay tile) { WATCHED.remove(tile); }
     public static long currentTick() { return tick; }
@@ -146,8 +165,8 @@ public final class TkNetwork {
     }
 
     public static boolean canUse(EntityPlayerMP player, TileTkDisplay tile) {
-        return !player.isDead && !tile.isInvalid() && player.worldObj == tile.getWorldObj()
-                && player.getDistanceSq(tile.xCoord + 0.5, tile.yCoord + 0.5, tile.zCoord + 0.5) <= 64
+        return !player.isDead && !tile.isInvalid() && !tile.isSlave() && player.worldObj == tile.getWorldObj()
+                && tile.distanceSq(player) <= 64
                 && player.worldObj.blockExists(tile.xCoord, tile.yCoord, tile.zCoord)
                 && player.worldObj.getTileEntity(tile.xCoord, tile.yCoord, tile.zCoord) == tile
                 && player.playerNetServerHandler != null && player.playerNetServerHandler.netManager.isChannelOpen();
@@ -180,6 +199,8 @@ public final class TkNetwork {
         }
         try { TkSurfaceServer.tick(tick); }
         catch (RuntimeException e) { MyMod.LOG.warn("Tk surface update failed", e); }
+        try { reobf.mpy4oc.tk.TkImageStores.tick(tick); }
+        catch (RuntimeException e) { MyMod.LOG.warn("Tk image cleanup failed", e); }
     }
 
     public static void serverStopped() {
@@ -187,6 +208,7 @@ public final class TkNetwork {
         for (TileTkDisplay tile : new HashSet<>(WATCHED)) tile.discardViewers();
         WATCHED.clear();
         TkSurfaceServer.clear();
+        reobf.mpy4oc.tk.TkImageStores.clear();
     }
 
     private static void handle(TkPackets.Request request, NetHandlerPlayServer connection) {
@@ -213,7 +235,6 @@ public final class TkNetwork {
         if (request instanceof TkPackets.Resync) { tile.requestResync(player, target.session, tick); return; }
         // Anyone may press the close button: it closes the application only for players
         // allowed to operate it, and otherwise just their own GUI.
-        if (request instanceof TkPackets.WindowClose) { tile.windowClose(player, target.session); return; }
         // Viewing is open to anyone in range, like an OC screen; operating the UI is not:
         // it needs the same permission the owning computer applies to its own screens.
         if (!(request instanceof TkPackets.Heartbeat) && !tile.canControl(player)) return;
@@ -267,9 +288,17 @@ public final class TkNetwork {
     private static final class ResyncHandler extends ServerHandler<TkPackets.Resync> {}
     private static final class HeartbeatHandler extends ServerHandler<TkPackets.Heartbeat> {}
     private static final class CopyRequestHandler extends ServerHandler<TkPackets.CopyRequest> {}
-    private static final class WindowCloseHandler extends ServerHandler<TkPackets.WindowClose> {}
+    private static final class WrenchHandler implements IMessageHandler<TkPackets.Wrench, IMessage> {
+        @Override public IMessage onMessage(TkPackets.Wrench message, MessageContext context) {
+            NetHandlerPlayServer connection = context.getServerHandler();
+            enqueue(connection, false, () -> wrench(message, connection));
+            return null;
+        }
+    }
     private static final class CopyResultHandler extends ClientHandler<TkPackets.CopyResult> {}
     private static final class SurfaceSyncHandler extends ClientHandler<TkPackets.SurfaceSync> {}
+    private static final class ImageDataHandler extends ClientHandler<TkPackets.ImageData> {}
+    private static final class SurfaceImageDataHandler extends ClientHandler<TkPackets.SurfaceImageData> {}
     private static final class SurfaceEndHandler extends ClientHandler<TkPackets.SurfaceEnd> {}
     private static final class SurfaceRequestHandler implements IMessageHandler<TkPackets.SurfaceRequest,IMessage> {
         @Override public IMessage onMessage(TkPackets.SurfaceRequest message,MessageContext context) {

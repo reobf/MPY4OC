@@ -3,8 +3,12 @@ if not args:
     tty.print("usage: which <name>")
 else:
     name = args[0]
-    path = "/bin/" + name + ".py"
-    if sh.fs.exists(path):
-        tty.print(path)
+    import shell
+    if name in shell._BUILTINS:
+        tty.print(name + ": shell builtin")
     else:
-        tty.print(name + ": not found")
+        path = sh.command_path(name)
+        if path is not None:
+            tty.print(path)
+        else:
+            tty.print(name + ": not found")

@@ -226,50 +226,59 @@ def request(method, url, params=None, data=None, json=None, headers=None,
     if isinstance(r, tuple):       # (None, "http requests are unavailable")
         raise ConnectionError(r[1] if len(r) > 1 and r[1] else "request failed")
     h = r
-
-    # Wait for the response headers. finishConnect() is False while in flight;
-    # it RAISES both for genuine failures (DNS, refused) and -- OC quirk -- for
-    # any non-2xx status. In the latter case the status line and headers are
-    # still available via response(), so we recover a real Response from it.
-    deadline = None if timeout is None else computer.uptime() + timeout
-    failure = None
-    while True:
-        try:
-            if h.finishConnect():
+    # Until the Response owns it, the handle is ours to close: a timeout, an error, or
+    # SystemExit when the MPYOS program is stopped mid-request must not leak the card's
+    # connection (OC allows only a few open at a time).
+    try:
+        # Wait for the response headers. finishConnect() is False while in flight;
+        # it RAISES both for genuine failures (DNS, refused) and -- OC quirk -- for
+        # any non-2xx status. In the latter case the status line and headers are
+        # still available via response(), so we recover a real Response from it.
+        deadline = None if timeout is None else computer.uptime() + timeout
+        failure = None
+        while True:
+            try:
+                if h.finishConnect():
+                    break
+            except Exception as e:
+                failure = e
                 break
-        except Exception as e:
-            failure = e
-            break
-        if deadline is not None and computer.uptime() >= deadline:
+            if deadline is not None and computer.uptime() >= deadline:
+                try:
+                    h.close()
+                except Exception:
+                    pass
+                raise Timeout("connect timed out: " + url)
+            time.sleep(_POLL)
+
+        resp = h.response()
+        if resp is None or not isinstance(resp, tuple):
+            # failed before any HTTP response: a real connection error
             try:
                 h.close()
             except Exception:
                 pass
-            raise Timeout("connect timed out: " + url)
-        time.sleep(_POLL)
+            raise ConnectionError(str(failure) if failure else ("no response: " + url))
 
-    resp = h.response()
-    if resp is None or not isinstance(resp, tuple):
-        # failed before any HTTP response: a real connection error
+        code, reason, raw_headers = resp[0], resp[1], resp[2] if len(resp) > 2 else {}
+        out = Response(url, h if failure is None else None,
+                       int(code), reason, _clean_headers(raw_headers), timeout)
+        if failure is not None:
+            # OC discarded the body of this non-2xx response; close the handle.
+            try:
+                h.close()
+            except Exception:
+                pass
+        if not stream:
+            out.content            # drain now so the handle is freed
+            out.close()
+        return out
+    except BaseException as error:
         try:
             h.close()
         except Exception:
             pass
-        raise ConnectionError(str(failure) if failure else ("no response: " + url))
-
-    code, reason, raw_headers = resp[0], resp[1], resp[2] if len(resp) > 2 else {}
-    out = Response(url, h if failure is None else None,
-                   int(code), reason, _clean_headers(raw_headers), timeout)
-    if failure is not None:
-        # OC discarded the body of this non-2xx response; close the handle.
-        try:
-            h.close()
-        except Exception:
-            pass
-    if not stream:
-        out.content            # drain now so the handle is freed
-        out.close()
-    return out
+        raise error
 
 
 def get(url, **kw):

@@ -82,9 +82,9 @@ class TkCanvasTest {
             c.call("move",Map.of("selector",line,"dx",.5,"dy",2));TkScene next=scene(c);TkDisplayPatch patch=TkDisplayPatch.between(initial.display,next.display);assertEquals(1,patch.changed.items.size());
             TkPackets.SceneSync delta=new TkPackets.SceneSync(target,1,2,TkPackets.DISPLAY,next);delta.displayPatch=patch;wire.clear();delta.toBytes(wire);
             TkPackets.SceneSync result=new TkPackets.SceneSync();result.fromBytes(wire);assertEquals(next,result.apply(initial));
-            wire.clear();delta.toBytes(wire);wire.setDouble(wire.writerIndex()-8,Double.NaN);assertThrows(IllegalArgumentException.class,()->new TkPackets.SceneSync().fromBytes(wire));
-            wire.clear();delta.toBytes(wire);wire.setShort(wire.writerIndex()-34,65535);assertThrows(IllegalArgumentException.class,()->new TkPackets.SceneSync().fromBytes(wire));
+            wire.clear();delta.toBytes(wire);wire.setDouble(wire.writerIndex()-13,Double.NaN);assertThrows(IllegalArgumentException.class,()->new TkPackets.SceneSync().fromBytes(wire));
+            wire.clear();delta.toBytes(wire);wire.setShort(wire.writerIndex()-39,65535);assertThrows(IllegalArgumentException.class,()->new TkPackets.SceneSync().fromBytes(wire));
         }finally{wire.release();}
     }
-    private TkScene scene(Canvas c){return new TkScene(320,240,0,"Canvas",true,c.tree.render());}
+    private TkScene scene(Canvas c){return new TkScene(320,240,0,true,c.tree.render());}
 }

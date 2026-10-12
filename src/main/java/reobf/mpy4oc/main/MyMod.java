@@ -30,7 +30,7 @@ import cpw.mods.fml.common.event.FMLServerStoppedEvent;
 // before the Tk display block existed cannot join a server that has it ("Fatally missing
 // blocks and items"). The Tk GUI also needs the client's matching versioned packet channel.
 @Mod(modid = MyMod.MODID, version = Tags.VERSION, name = "mpy4oc", acceptedMinecraftVersions = "[1.7.10]",
-        dependencies = "required-after:OpenComputers", acceptableRemoteVersions = "*",
+        dependencies = "required-after:OpenComputers;required-after:modularui2", acceptableRemoteVersions = "*",
         guiFactory = "reobf.mpy4oc.main.ModGuiFactory")
 public class MyMod {
 
@@ -62,6 +62,7 @@ public class MyMod {
                 reobf.mpy4oc.tk.TileTkDisplay.class, "mpy4oc:tk_display");
         LOG.info("Registered block + tile entity: mpy4oc:tk_display");
         reobf.mpy4oc.tk.net.TkNetwork.init();
+        net.minecraftforge.common.MinecraftForge.EVENT_BUS.register(new reobf.mpy4oc.tk.TkWrenchEvents());
         tkProxy.init();
 
         // The MPY CPU item. Items must be registered during preInit.

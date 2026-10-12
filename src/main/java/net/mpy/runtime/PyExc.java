@@ -98,14 +98,42 @@ public final class PyExc {
     public static final Type STOP_ITERATION = def("StopIteration", EXCEPTION);
     public static final Type ASSERTION_ERROR = def("AssertionError", EXCEPTION);
     public static final Type OS_ERROR = def("OSError", EXCEPTION);
+    public static final Type TIMEOUT_ERROR = def("TimeoutError", OS_ERROR);
     public static final Type IMPORT_ERROR = def("ImportError", EXCEPTION);
     public static final Type MEMORY_ERROR = def("MemoryError", EXCEPTION);
     public static final Type SYNTAX_ERROR = def("SyntaxError", EXCEPTION);
     public static final Type INDENTATION_ERROR = def("IndentationError", SYNTAX_ERROR);
     public static final Type UNICODE_ERROR = def("UnicodeError", VALUE_ERROR);
+    public static final Type UNICODE_DECODE_ERROR = def("UnicodeDecodeError", UNICODE_ERROR);
     public static final Type KEYBOARD_INTERRUPT = def("KeyboardInterrupt", BASE_EXCEPTION);
     public static final Type SYSTEM_EXIT = def("SystemExit", BASE_EXCEPTION);
     public static final Type STOP_ASYNC_ITERATION = def("StopAsyncIteration", EXCEPTION);
+
+    /** UnicodeDecodeError(encoding, object, start, end, reason), CPython's argument layout. */
+    public static boolean unicodeDecodeArgs(Object[] args) {
+        return args.length == 5 && args[0] instanceof String && (args[1] instanceof PyObj.Bytes || args[1] instanceof PyObj.ByteArray)
+                && args[2] instanceof Long && args[3] instanceof Long && args[4] instanceof String;
+    }
+    /** CPython's text for UnicodeDecodeError: one byte, or a range of bytes. */
+    public static String unicodeDecodeMessage(Object[] args) {
+        byte[] data = args[1] instanceof PyObj.Bytes ? ((PyObj.Bytes) args[1]).data : ((PyObj.ByteArray) args[1]).toBytes();
+        long start = (Long) args[2], end = (Long) args[3];
+        if (start >= 0 && start < data.length && end == start + 1)
+            return String.format("'%s' codec can't decode byte 0x%02x in position %d: %s", args[0], data[(int) start] & 0xFF, start, args[4]);
+        return String.format("'%s' codec can't decode bytes in position %d-%d: %s", args[0], start, end - 1, args[4]);
+    }
+    /** UnicodeDecodeError's attributes: encoding, object, start, end, reason (null for other names). */
+    public static Object unicodeDecodeAttr(Instance e, String name) {
+        if (!isSub(e.type, UNICODE_DECODE_ERROR) || !unicodeDecodeArgs(e.args)) return null;
+        switch (name) {
+            case "encoding": return e.args[0];
+            case "object": return e.args[1];
+            case "start": return e.args[2];
+            case "end": return e.args[3];
+            case "reason": return e.args[4];
+            default: return null;
+        }
+    }
 
     /** All registered exception types (for exposing them as builtins). */
     public static java.util.Collection<Type> ALL_TYPES() { return TYPES.values(); }
@@ -137,19 +165,23 @@ public final class PyExc {
         return new Instance(t, e.args);
     }
 
-    /** MicroPython str(): "" for 0 args, str(arg) for 1, the args tuple for more. */
+    /** str() as CPython: "" for 0 args, str(arg) for 1 (a KeyError shows repr(key)), the args tuple for more. */
     public static String str(Instance e) {
+        if (isSub(e.type, UNICODE_DECODE_ERROR) && unicodeDecodeArgs(e.args)) return unicodeDecodeMessage(e.args);
         if (e.args.length == 0) return "";
         if (e.args.length == 1) {
             Object a = e.args[0];
+            // CPython shows a missing key as its repr: str(KeyError('k')) is "'k'".
+            if (isSub(e.type, KEY_ERROR)) return PyObj.repr(a);
             return a instanceof String ? (String) a : PyObj.repr(a);
         }
         return PyObj.repr(new PyObj.Tuple(e.args));
     }
 
-    /** MicroPython repr(): the type name followed by the args tuple (with its
-     *  single-element trailing comma). */
+    /** CPython's repr(): the type name and its args, ValueError('x') for one (MicroPython
+     *  keeps the tuple's trailing comma, ValueError('x',)). */
     public static String repr(Instance e) {
+        if (e.args.length == 1) return e.type.name + "(" + PyObj.repr(e.args[0]) + ")";
         return e.type.name + PyObj.repr(new PyObj.Tuple(e.args));
     }
 }

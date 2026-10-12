@@ -19,6 +19,8 @@ public final class TkViewers<P> {
         public final long session;
         public TkScene lastScene;
         public long revision;
+        /** Image pixels this GUI still needs. */
+        public final TkImageTransfer images = new TkImageTransfer();
         private long budgetTick = Long.MIN_VALUE, lastResync = Long.MIN_VALUE / 2;
         private int inputs, bytes;
         private long lastSeen;
@@ -76,6 +78,7 @@ public final class TkViewers<P> {
             if (tick - lastResync < RESYNC_INTERVAL) return false;
             lastResync = tick;
             lastScene = null;
+            images.reset();
             return true;
         }
 

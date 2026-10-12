@@ -5,7 +5,7 @@ import java.util.Objects;
 
 /** Immutable, bounded Canvas geometry shared by the model and the wire protocol. */
 public final class TkVector {
-    public enum Shape { LINE, RECTANGLE, OVAL, POLYGON, TEXT }
+    public enum Shape { LINE, RECTANGLE, OVAL, POLYGON, TEXT, IMAGE }
     public static final int MAX_COORDS = 512, MAX_TOTAL_COORDS = 32768;
     public final Shape shape;
     public final int fill, outline;
@@ -15,7 +15,7 @@ public final class TkVector {
     public TkVector(Shape shape, double[] points, int fill, int outline, double width) {
         this.shape = Objects.requireNonNull(shape);
         int n = points.length;
-        if (n > MAX_COORDS || (n & 1) != 0 || (shape == Shape.TEXT ? n != 2
+        if (n > MAX_COORDS || (n & 1) != 0 || (shape == Shape.TEXT || shape == Shape.IMAGE ? n != 2
                 : shape == Shape.LINE ? n < 4 : shape == Shape.POLYGON ? n < 6 : n != 4))
             throw new IllegalArgumentException("invalid Canvas coordinates");
         for (double p : points) if (!Double.isFinite(p) || Math.abs(p) > 32768)
@@ -74,7 +74,7 @@ public final class TkVector {
     public double at(int i) { return points[i]; }
     public double[] coords() { return points.clone(); }
     public boolean hit(double x, double y, double tolerance, TkRect textBounds) {
-        if (shape == Shape.TEXT) return !textBounds.empty() && x >= textBounds.x - tolerance
+        if (shape == Shape.TEXT || shape == Shape.IMAGE) return !textBounds.empty() && x >= textBounds.x - tolerance
                 && y >= textBounds.y - tolerance && x <= textBounds.x + textBounds.width + tolerance
                 && y <= textBounds.y + textBounds.height + tolerance;
         double stroke = Math.max(1, width) / 2 + tolerance;

@@ -36,6 +36,20 @@ def _bind_screen(gpu_addr):
     return term.Terminal(gpu)
 
 
+def _tip(boot_fs):
+    """A random tip from /usr/misc/greetings.txt (see lib/motd.py), or None."""
+    try:
+        import motd
+        tips = motd.tips(fs.Filesystem(boot_fs).read_bytes(motd.PATH))
+        try:
+            t = computer.worldTime()   # goes on across reboots, unlike uptime
+        except Exception:
+            t = int(computer.uptime() * 1000)
+        return motd.pick(tips, t)
+    except Exception:
+        return None                    # an older disk without the file: no tip
+
+
 def main():
     boot_fs = None
     try:
@@ -69,6 +83,11 @@ def main():
     tty.write("boot device: ")
     tty.print_color(str(boot_fs), term.YELLOW)
     tty.print("")
+    tip = _tip(boot_fs)
+    if tip:
+        tty.write_color("Tip: ", term.GREEN)
+        tty.print(tip)
+        tty.print("")
 
     # If we booted from a read-only medium (the LiveCD floppy), the system isn't
     # installed to a disk yet -- offer install. Once installed, boot is from a

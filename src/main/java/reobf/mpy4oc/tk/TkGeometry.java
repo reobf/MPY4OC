@@ -64,6 +64,14 @@ final class TkGeometry {
             case "place_info": keys(m); return placeInfo(w.place);
             case "manager": keys(m); return w.manager();
             case "request": keys(m); w.tree.render(); return new Object[] {w.requestedWidth, w.requestedHeight};
+            case "lift": case "lower": {
+                keys(m, "other");
+                TkWidget other = null;
+                if (m.containsKey("other")) {
+                    other = w.tree.owned(TkOptions.integer(m.get("other"), 0, Integer.MAX_VALUE));
+                }
+                w.tree.restack(w, action.equals("lift"), other); return null;
+            }
         }
         if (!(w instanceof Frame)) throw new IllegalArgumentException("geometry container must be a Frame");
         Frame f = (Frame) w;
@@ -95,7 +103,8 @@ final class TkGeometry {
             case "grid_slaves": case "place_slaves": case "pack_slaves":
                 keys(m); java.util.List<Object> ids = new java.util.ArrayList<>();
                 java.util.List<TkWidget> children = action.equals("grid_slaves") ? f.gridded : action.equals("pack_slaves") ? f.packed : f.children;
-                for (TkWidget child : children) if (!action.equals("place_slaves") || child.place != null) ids.add(child.id);
+                // Toplevels are positioned by the window manager, not as place() slaves.
+                for (TkWidget child : children) if (!action.equals("place_slaves") || child.place != null && !TkWindow.is(child)) ids.add(child.id);
                 if (!action.equals("pack_slaves")) java.util.Collections.reverse(ids); return ids.toArray();
             default: throw new IllegalArgumentException("unsupported geometry command: " + action);
         }

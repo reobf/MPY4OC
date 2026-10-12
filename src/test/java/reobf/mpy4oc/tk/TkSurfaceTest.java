@@ -72,6 +72,6 @@ class TkSurfaceTest {
         java.lang.reflect.Field viewers=TileTkDisplay.class.getDeclaredField("viewers");viewers.setAccessible(true);
         assertTrue(((TkViewers<?>)viewers.get(tile)).isEmpty(),"surface access must not create GUI viewer authority");
     }
-    private TkScene scene(TkDisplayList display,boolean visible){return new TkScene(320,240,0,"surface",visible,display);}
+    private TkScene scene(TkDisplayList display,boolean visible){return new TkScene(320,240,0,visible,display);}
     private TkPackets.SurfaceSync roundtrip(TkPackets.SurfaceSync packet){ByteBuf b=Unpooled.buffer();try{packet.toBytes(b);TkPackets.SurfaceSync result=new TkPackets.SurfaceSync();result.fromBytes(b);return result;}finally{b.release();}}
 }

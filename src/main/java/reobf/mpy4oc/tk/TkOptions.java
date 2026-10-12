@@ -54,35 +54,87 @@ final class TkOptions {
 
     static void configure(TkWidget w, Map<String, Object> m) {
         for (String key : m.keySet()) {
-            if (!java.util.Arrays.asList("text", "background", "foreground", "width", "height", "padx", "pady",
-                    "borderwidth", "anchor", "state", "command", "propagate").contains(key) && !TkControlOptions.supports(w, key))
+            if (!java.util.Arrays.asList("text", "background", "foreground", "width", "height", "padx", "pady", "padding", "relief",
+                    "borderwidth", "anchor", "state", "command", "propagate", "takefocus", "labelanchor", "labelwidget", "look", "held", "minwidth").contains(key) && !TkControlOptions.supports(w, key))
                 throw new IllegalArgumentException("unsupported widget option: " + key);
-            if (key.equals("text") && !(w instanceof Label) || key.equals("command") && !(w instanceof Button || w instanceof Scale || w instanceof Scrollbar)
+            if (key.equals("text") && !(w instanceof Label || w instanceof Labelframe)
+                    || (key.equals("labelanchor") || key.equals("labelwidget")) && !(w instanceof Labelframe) || key.equals("command") && !(w instanceof Button || w instanceof Scale || w instanceof Scrollbar || w instanceof Notebook)
                     || key.equals("propagate") && !(w instanceof Frame)) throw new IllegalArgumentException("option does not apply: " + key);
         }
         String text = string(m, "text", w.text());
         TkFontMetrics.checkText(text); w.tree.checkTextBudget(w, text);
         if (w instanceof Entry && text.indexOf('\n') >= 0) throw new IllegalArgumentException("Entry accepts one line");
         int bg = number(m, "background", w.background, 0xFFFFFF), fg = number(m, "foreground", w.foreground, 0xFFFFFF);
-        int padx = number(m, "padx", w.padx, 1024), pady = number(m, "pady", w.pady, 1024), border = number(m, "borderwidth", w.border, 16);
+        int border = number(m, "borderwidth", w.border, 16);
+        // -padx/-pady set both sides; ttk's -padding gives the four (left, top, right, bottom).
+        int[] pad = {w.padLeft, w.padTop, w.padRight, w.padBottom};
+        if (m.containsKey("padx")) pad[0] = pad[2] = number(m, "padx", 0, 1024);
+        if (m.containsKey("pady")) pad[1] = pad[3] = number(m, "pady", 0, 1024);
+        if (m.containsKey("padding")) {
+            Object[] sides = sequence(m.get("padding"), 4);
+            if (sides.length != 4) throw new IllegalArgumentException("padding takes left, top, right and bottom");
+            for (int i = 0; i < 4; i++) pad[i] = integer(sides[i], 0, 1024);
+        }
+        TkWidget.Relief relief = m.containsKey("relief") ? relief(text(m.get("relief"))) : w.relief;
         int width = number(m, "width", w instanceof Label ? ((Label) w).columns : w.width, w instanceof Label && !(w instanceof Message) ? 1024 : 8192);
-        int height = number(m, "height", w instanceof Label ? ((Label) w).lines : w.height, w instanceof Label ? 512 : 8192);
+        // A Combobox's -height is the rows of its list (TkControlOptions), not lines of text.
+        boolean listRows = w instanceof Combobox || w instanceof Treeview;
+        int height = listRows ? (w instanceof Label ? ((Label) w).lines : w.height) : number(m, "height", w instanceof Label ? ((Label) w).lines : w.height, w instanceof Label ? 512 : 8192);
         TkPack.Anchor anchor = anchor(string(m, "anchor", w.textAnchor.name()));
         String state = string(m, "state", w instanceof Entry && ((Entry) w).readonly ? "readonly" : w.enabled ? "normal" : "disabled");
         if (!state.equals("normal") && !state.equals("disabled") && !(w instanceof Entry && state.equals("readonly")))
             throw new IllegalArgumentException("invalid state: " + state);
-        int command = number(m, "command", w instanceof Button ? ((Button) w).command() : 0, Integer.MAX_VALUE);
+        int command = number(m, "command", w instanceof Button ? ((Button) w).command() : w instanceof Notebook ? ((Notebook) w).command : 0, Integer.MAX_VALUE);
         boolean propagate = m.containsKey("propagate") ? bool(m.get("propagate")) : w instanceof Frame && ((Frame) w).propagate;
+        int takefocus = m.containsKey("takefocus") ? takefocus(m.get("takefocus")) : w.takefocus;
+        // ttk: the style's look (TkLook rules), the states the program holds, a minimum width in characters (TButton's -width -9).
+        TkLook look = m.containsKey("look") ? TkLook.parse(m.get("look")) : w.look;
+        int held = m.containsKey("held") ? integer(m.get("held"), 0, 0xFFFF) : w.held;
+        int minColumns = m.containsKey("minwidth") && w instanceof Label ? integer(m.get("minwidth"), 0, 1024) : w instanceof Label ? ((Label) w).minColumns : 0;
+        if (m.containsKey("minwidth") && !(w instanceof Label)) throw new IllegalArgumentException("option does not apply: minwidth");
+        Labelframe labelframe = w instanceof Labelframe ? (Labelframe) w : null;
+        Labelframe.Anchor labelAnchor = labelframe == null ? null
+                : m.containsKey("labelanchor") ? Labelframe.anchor(text(m.get("labelanchor")), labelframe.ttk) : labelframe.labelAnchor;
+        TkWidget labelWidget = labelframe == null ? null : labelframe.labelWidget;
+        if (labelframe != null && m.containsKey("labelwidget")) {
+            int id = integer(m.get("labelwidget"), 0, Integer.MAX_VALUE);
+            labelWidget = id == 0 ? null : w.tree.owned(id);
+            if (id != 0 && (labelWidget == null || labelWidget.parent != w || TkWindow.is(labelWidget)))
+                throw new IllegalArgumentException("a labelwidget must be a child of its labelframe");
+        }
         Runnable controls = TkControlOptions.prepare(w, m);
-        w.colors(bg, fg); w.padding(padx, pady, border); w.textAnchor(anchor); w.enabled(!state.equals("disabled"));
+        w.colors(bg, fg); w.padding(pad[0], pad[1], pad[2], pad[3], border); w.relief(relief); w.textAnchor(anchor); w.enabled(!state.equals("disabled"));
         if (w instanceof Label) {
             ((Label) w).text(text);
-            if (!(w instanceof Message) && (m.containsKey("width") || m.containsKey("height"))) ((Label) w).textSize(width, height);
+            if (!(w instanceof Message) && (m.containsKey("width") || !listRows && m.containsKey("height"))) ((Label) w).textSize(width, height);
         } else w.size(width, height);
         if (w instanceof Entry) ((Entry) w).readonly = state.equals("readonly");
         if (w instanceof Button) ((Button) w).command(command);
+        if (w instanceof Notebook) ((Notebook) w).command = command;
         if (w instanceof Frame) ((Frame) w).propagate(propagate);
+        if (labelframe != null) { labelframe.text(text); labelframe.labelAnchor(labelAnchor); labelframe.labelWidget(labelWidget); }
+        if (takefocus != w.takefocus) { w.takefocus = takefocus; w.tree.changed(false); }
+        if (m.containsKey("look")) { w.look = look != null && look.isEmpty() ? null : look; w.tree.changed(false); }
+        if (held != w.held) { w.held = held; w.tree.changed(false); }
+        if (w instanceof Label && minColumns != ((Label) w).minColumns) { ((Label) w).minColumns = minColumns; w.tree.changed(true); }
         controls.run();
+    }
+
+    /** Tk's -relief values, with its error message. */
+    static TkWidget.Relief relief(String value) {
+        for (TkWidget.Relief relief : TkWidget.Relief.values()) if (relief.option().equals(value)) return relief;
+        throw new IllegalArgumentException("bad relief \"" + value + "\": must be flat, groove, raised, ridge, solid, or sunken");
+    }
+
+    /** -takefocus: '' (the widget's default) is -1; 0/1, a boolean, or "0"/"1". Tk's script form is not supported. */
+    static int takefocus(Object value) {
+        if (value instanceof String || value instanceof byte[]) {
+            String s = text(value).trim();
+            if (s.isEmpty()) return -1;
+            if (s.equals("0") || s.equals("1")) return s.charAt(0) - '0';
+            throw new IllegalArgumentException("takefocus must be '', 0 or 1");
+        }
+        return bool(value) ? 1 : 0;
     }
 
     static TkPack pack(Map<String, Object> m, TkPack old) {

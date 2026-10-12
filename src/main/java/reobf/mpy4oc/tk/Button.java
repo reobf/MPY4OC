@@ -7,7 +7,7 @@ public class Button extends Label {
     }
     Button(Frame parent, String text, Kind kind) {
         super(parent, text, kind);
-        padx = 4; pady = 3; border = 2;
+        padLeft = padRight = 4; padTop = padBottom = 3; border = 2; relief = Relief.RAISED;
     }
     public int command() { return command; }
     /** Zero means no Python command; positive IDs identify Python's callback table. */

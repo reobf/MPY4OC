@@ -1,0 +1,22 @@
+first completed ['a'] ['b']
+all completed ['a', 'b'] []
+first exception ['c'] ['d'] ValueError
+timed out [] ['d']
+empty ValueError: Set of Tasks/Futures is empty.
+bad return_when ValueError: Invalid return_when value: SOMETIMES
+coroutines TypeError: Passing coroutines is forbidden, use tasks explicitly.
+wait_for quick
+wait_for timeout TimeoutError True
+wait_for 0 ready
+wait_for done at once
+wait_for 0 times out
+timeout expired True
+cancelled inside the block
+rescheduled timeout expired True
+in time
+as_completed ['fastest', 'middle', 'slowest']
+gather ['one', 'two']
+gather exceptions ['ok', 'ValueError']
+gather raises broken
+same coroutine twice ['same', 'same']
+nothing []

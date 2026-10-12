@@ -35,15 +35,17 @@ public final class TkPlace {
     static void layout(Frame frame) {
         for (TkWidget child : frame.children) if (child.place != null) {
             TkPlace p = child.place;
-            int bx = p.bordermode.equals("inside") ? frame.border + frame.padx : 0;
-            int by = p.bordermode.equals("inside") ? frame.border + frame.pady : 0;
-            int fw = frame.bounds.width - 2 * bx, fh = frame.bounds.height - 2 * by;
+            boolean inside = p.bordermode.equals("inside");
+            int bx = inside ? frame.insetLeft() : 0, by = inside ? frame.insetTop() : 0;
+            int fw = frame.bounds.width - (inside ? frame.insetWidth() : 0), fh = frame.bounds.height - (inside ? frame.insetHeight() : 0);
             double x1 = p.x + bx + p.relx * fw, y1 = p.y + by + p.rely * fh;
             int x = round(x1), y = round(y1);
             int w = p.width == null && p.relwidth == null ? child.requestedWidth :
                     (p.width == null ? 0 : p.width) + (p.relwidth == null ? 0 : round(x1 + p.relwidth * fw) - x);
             int h = p.height == null && p.relheight == null ? child.requestedHeight :
                     (p.height == null ? 0 : p.height) + (p.relheight == null ? 0 : round(y1 + p.relheight * fh) - y);
+            // A window keeps to its wm minsize/maxsize, whatever its geometry or natural size.
+            if (TkWindow.is(child)) { TkWindow window = ((Frame) child).window; w = window.limitWidth(w); h = window.limitHeight(h); }
             x -= w * p.anchor.x / 2; y -= h * p.anchor.y / 2;
             // Bound recursive relative growth on the server, independently of the viewport.
             w = Math.max(1, Math.min(w, 32768)); h = Math.max(1, Math.min(h, 32768));

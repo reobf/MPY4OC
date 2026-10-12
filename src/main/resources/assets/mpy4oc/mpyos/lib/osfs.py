@@ -9,13 +9,23 @@ experience; urandom/uname from the frozen module stay untouched.
 
 Working directory: os keeps its own cwd (getcwd/chdir). The shell's `cd` syncs
 it (shell -> os), so scripts see the shell's directory; a script's own os.chdir
-affects os.* relative paths for that script without moving the shell.
+affects os.* relative paths for that script without moving the shell. Each
+program (see the stdlib's _program: a shell command, a background job) has a cwd
+of its own, as a process does: the shell gives a command the shell's directory
+when it starts, a job keeps the one it started in, and a program's os.chdir
+moves only its own.
 """
 
 import fs
 
+try:
+    import _program
+except ImportError:
+    _program = None
+
 _vfs = None
-_cwd = "/"
+_cwd = "/"          # the main program's (the shell's)
+_cwds = {}          # program -> its own cwd (set_cwd)
 
 sep = "/"
 
@@ -51,27 +61,47 @@ def _v():
     return _vfs
 
 
+def _program_now():
+    return _program.current() if _program is not None and _cwds else None
+
+
 def _abs(path):
     """Absolute, normalized path; relative resolves against os's cwd."""
+    cwd = getcwd()
     if not path or path == ".":
-        return _cwd
+        return cwd
     if path.startswith("/"):
         return fs.normalize(path)
-    return fs.normalize(_cwd + "/" + path)
+    return fs.normalize(cwd + "/" + path)
 
 
 # -- directory state ---------------------------------------------------------
 
 def getcwd():
-    return _cwd
+    program = _program_now()
+    return _cwd if program is None else _cwds.get(program, _cwd)
 
 
 def chdir(path):
-    global _cwd
     t = _abs(path)
     if not _v().is_directory(t):
         raise OSError("chdir: not a directory: " + t)
-    _cwd = t
+    program = _program_now()
+    set_cwd(program if program in _cwds else None, t)
+
+
+def set_cwd(program, path):
+    """The shell: program's cwd (None: the shell's own) is now path."""
+    global _cwd
+    if program is None:
+        _cwd = path
+    else:
+        _cwds[program] = path
+
+
+def drop_cwd(program):
+    """The shell: program has ended."""
+    _cwds.pop(program, None)
 
 
 # -- queries -----------------------------------------------------------------

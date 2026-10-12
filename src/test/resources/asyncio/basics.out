@@ -1,0 +1,27 @@
+main Task-1
+created Task-2 named False
+start a Task-2
+start b named
+start c Task-4
+end c
+end b
+end a
+gather ['a', 'b', 'c']
+ping 0
+pong 0
+ping 1
+pong 1
+ping 2
+pong 2
+sleep result value
+tasks 1 True
+loop True False True
+future 42 True 42
+start d Task-7
+end d
+ensure_future d True True
+iscoroutine False True
+run done
+ping 0
+run again None
+raised ValueError boom

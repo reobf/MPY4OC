@@ -71,11 +71,12 @@ public final class BuiltinType {
      * class); {@code object} builds a bare instance.
      */
     Object construct(Vm vm, Object[] a, String[] kwNames, Object[] kwValues) {
+        a = placeArgs(a, kwNames, kwValues);
         switch (kind) {
-            case INT:   return constructInt(a);
-            case FLOAT: return constructFloat(a);
+            case INT:   return constructInt(vm, a);
+            case FLOAT: return constructFloat(vm, a);
             case COMPLEX: return constructComplex(a);
-            case STR:   return a.length == 0 ? "" : vm.stringify(a[0], false);
+            case STR:   return constructStr(vm, a);
             case BOOL:  return a.length == 0 ? Boolean.FALSE : (Boolean) vm.truthy(a[0]);
             case LIST: {
                 PyObj.PyList out = new PyObj.PyList();
@@ -90,7 +91,7 @@ public final class BuiltinType {
                 PyObj.PyDict d = new PyObj.PyDict();
                 if (a.length >= 1 && a[0] != PyObj.NONE) {
                     if (a[0] instanceof PyObj.PyDict) d.map.putAll(((PyObj.PyDict) a[0]).map);
-                    else for (Object v : vm.materialize(a[0])) {
+                    else if (!vm.copyMappingTo(d, a[0])) for (Object v : vm.materialize(a[0])) {
                         if (!(v instanceof PyObj.Tuple) || ((PyObj.Tuple) v).items.length != 2)
                             throw PyException.typeError("dict update sequence element is not a pair");
                         Object[] kv = ((PyObj.Tuple) v).items;
@@ -112,8 +113,16 @@ public final class BuiltinType {
                 return s;
             }
             case BYTES: {
-                if (a.length == 0) return new PyObj.Bytes(new byte[0]);
-                Object o = a[0];
+                Object o = a.length == 0 ? MISSING : a[0];
+                if (o instanceof String || a.length > 1) {   // bytes(str, encoding[, errors]): UTF-8, as str.encode
+                    if (!(o instanceof String))
+                        throw PyException.typeError((a.length > 1 && a[1] != MISSING ? "encoding" : "errors") + " without a string argument");
+                    if (a.length < 2 || a[1] == MISSING) throw PyException.typeError("string argument without an encoding");
+                    textArg(a, 1, "bytes", "encoding");
+                    textArg(a, 2, "bytes", "errors");
+                    return new PyObj.Bytes(((String) o).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+                if (o == MISSING) return new PyObj.Bytes(new byte[0]);
                 if (o instanceof PyObj.Bytes) return o;
                 if (o instanceof Long || o instanceof BigInteger) {   // bytes(n) -> n zero bytes
                     int n = (int) Builtins.toBig(o).longValueExact();
@@ -142,6 +151,76 @@ public final class BuiltinType {
             default:
                 throw PyException.typeError("cannot create '" + name + "' instances");
         }
+    }
+
+    /** A parameter given neither by position nor by name, before one that was
+     *  (str(errors='strict')); only {@link #placeArgs} produces it. */
+    private static final Object MISSING = new Object();
+
+    /** CPython's argument rules for the constructors: how many positional
+     *  arguments each takes and which parameters may be named (int's base,
+     *  str's and bytes' encoding/errors, complex's real/imag; dict's keywords
+     *  are its items). Named arguments are moved to their positional slot, so
+     *  int('10', base=16) is int('10', 16) instead of a silent int('10'). */
+    private Object[] placeArgs(Object[] a, String[] kwNames, Object[] kwValues) {
+        String[] params;           // null entries are positional-only
+        switch (kind) {
+            case INT:     params = new String[]{null, "base"}; break;
+            case STR:     params = new String[]{"object", "encoding", "errors"}; break;
+            case BYTES:   params = new String[]{"source", "encoding", "errors"}; break;
+            case COMPLEX: params = new String[]{"real", "imag"}; break;
+            case RANGE:   params = new String[3]; break;
+            case OBJECT:  params = new String[0]; break;
+            case FLOAT: case BOOL: case LIST: case TUPLE: case SET: case DICT: params = new String[1]; break;
+            default: return a;     // type(): 1 or 3 arguments, checked where it is built
+        }
+        int named = kind == Kind.DICT ? 0 : kwNames.length;
+        if (kind == Kind.OBJECT && a.length + named > 0) throw PyException.typeError("object() takes no arguments");
+        if (kind == Kind.RANGE && a.length == 0 && named == 0) throw PyException.typeError("range expected at least 1 argument, got 0");
+        if (a.length > params.length) {
+            if (kind == Kind.INT || kind == Kind.STR || kind == Kind.BYTES || kind == Kind.COMPLEX)
+                throw PyException.typeError(name + "() takes at most " + params.length + " arguments (" + a.length + " given)");
+            throw PyException.typeError(name + " expected at most " + params.length + " argument" + (params.length == 1 ? "" : "s") + ", got " + a.length);
+        }
+        if (named == 0) return a;
+        boolean any = false;
+        for (String p : params) any |= p != null;
+        if (!any) throw PyException.typeError(name + "() takes no keyword arguments");
+        Object[] placed = a;
+        for (int i = 0; i < named; i++) {
+            int slot = java.util.Arrays.asList(params).indexOf(kwNames[i]);
+            if (slot < 0) throw PyException.typeError("'" + kwNames[i] + "' is an invalid keyword argument for " + name + "()");
+            if (slot < a.length)
+                throw PyException.typeError("argument for " + name + "() given by name ('" + kwNames[i] + "') and position (" + (slot + 1) + ")");
+            if (slot >= placed.length) {
+                Object[] grown = java.util.Arrays.copyOf(placed, slot + 1);
+                java.util.Arrays.fill(grown, placed.length, slot + 1, MISSING);
+                placed = grown;
+            }
+            placed[slot] = kwValues[i];
+        }
+        return placed;
+    }
+
+    /** str(), str(object), or str(bytes, encoding[, errors]) -- decoded as bytes.decode does. */
+    private Object constructStr(Vm vm, Object[] a) {
+        Object o = a.length == 0 ? MISSING : a[0];
+        if (a.length < 2) return o == MISSING ? "" : vm.stringify(o, false);
+        textArg(a, 1, "str", "encoding");
+        textArg(a, 2, "str", "errors");
+        Object v = o == MISSING ? new PyObj.Bytes(new byte[0]) : Ops.unwrapNative(o);
+        Object encoding = a[1] != MISSING ? Ops.unwrapNative(a[1]) : "utf-8";
+        Object errors = a.length > 2 && a[2] != MISSING ? Ops.unwrapNative(a[2]) : "strict";
+        if (v instanceof PyObj.Bytes) return net.mpy.runtime.Methods.decode(((PyObj.Bytes) v).data, encoding, errors);
+        if (v instanceof PyObj.ByteArray) return net.mpy.runtime.Methods.decode(((PyObj.ByteArray) v).toBytes(), encoding, errors);
+        if (v instanceof String) throw PyException.typeError("decoding str is not supported");
+        throw PyException.typeError("decoding to str: need a bytes-like object, " + StdLib.typeName(o) + " found");
+    }
+
+    /** An encoding/errors argument, when given, must be a str. */
+    private static void textArg(Object[] a, int i, String fn, String param) {
+        if (i < a.length && a[i] != MISSING && !(Ops.unwrapNative(a[i]) instanceof String))
+            throw PyException.typeError(fn + "() argument '" + param + "' must be str, not " + StdLib.typeName(a[i]));
     }
 
     /** type(name, bases, dict) -> a new class. */
@@ -175,44 +254,113 @@ public final class BuiltinType {
         throw PyException.typeError("expected int, got " + StdLib.typeName(o));
     }
 
-    private static Object constructInt(Object[] a) {
+    /** int(x) asks a user instance for __int__, then __index__, then __trunc__. */
+    private static final String[] INT_DUNDERS = {"__int__", "__index__", "__trunc__"};
+
+    private static Object constructInt(Vm vm, Object[] a) {
         if (a.length == 0) return 0L;
         Object o = a[0];
-        if (o instanceof Long || o instanceof BigInteger) return o;
-        if (o instanceof Boolean) return (Boolean) o ? 1L : 0L;
-        if (o instanceof Double) return PyObj.normInt(java.math.BigDecimal.valueOf((Double) o).toBigInteger());
-        if (o instanceof String) {
-            int base = a.length >= 2 ? (int) asLong(a[1]) : 10;
-            String s = ((String) o).trim();
-            try { return PyObj.normInt(new BigInteger(s, base)); }
-            catch (NumberFormatException e) {
-                throw PyException.valueError("invalid syntax for integer with base " + base + ": " + PyObj.repr(s));
+        if (o == MISSING) throw PyException.typeError("int() missing string argument");   // int(base=16)
+        if (a.length == 1 && vm != null) {
+            for (String d : INT_DUNDERS) {
+                Object r = vm.hooks.callDunder(o, d);
+                if (r == null) continue;
+                Object ri = Ops.unwrapNative(r);
+                if (ri instanceof Boolean) return (Boolean) ri ? 1L : 0L;
+                if (ri instanceof Long || ri instanceof BigInteger) return ri;
+                throw PyException.typeError(d + " returned non-int (type " + StdLib.typeName(r) + ")");
             }
         }
-        throw PyException.typeError("can't convert to int");
+        o = bytesAsText(Ops.unwrapNative(o));
+        if (a.length >= 2) {
+            if (!(o instanceof String)) throw PyException.typeError("int() can't convert non-string with explicit base");
+            return parseInt((String) o, asLong(a[1]));
+        }
+        if (o instanceof Long || o instanceof BigInteger) return o;
+        if (o instanceof Boolean) return (Boolean) o ? 1L : 0L;
+        if (o instanceof Double) return PyObj.normInt(Ops.floatToBig((Double) o));
+        if (o instanceof String) return parseInt((String) o, 10);
+        throw PyException.typeError("can't convert " + StdLib.typeName(a[0]) + " to int");
     }
 
-    private static Object constructFloat(Object[] a) {
+    /** int(text, base): optional sign, the 0x/0o/0b prefix matching the base
+     *  (base 0 picks it from the prefix and rejects leading zeros). */
+    private static Object parseInt(String text, long base) {
+        if (base != 0 && (base < 2 || base > 36)) throw PyException.valueError("int() base must be >= 2 and <= 36");
+        String s = text.trim();
+        int i = 0, b = (int) base;
+        boolean neg = false;
+        if (!s.isEmpty() && (s.charAt(0) == '+' || s.charAt(0) == '-')) { neg = s.charAt(0) == '-'; i = 1; }
+        if (s.length() - i >= 2 && s.charAt(i) == '0') {
+            char p = Character.toLowerCase(s.charAt(i + 1));
+            int pb = p == 'x' ? 16 : p == 'o' ? 8 : p == 'b' ? 2 : 0;
+            if (pb != 0 && (b == 0 || b == pb)) { b = pb; i += 2; }
+        }
+        String digits = s.substring(i);
+        if (b == 0) {
+            b = 10;
+            for (int k = 1; k < digits.length() && digits.charAt(0) == '0'; k++)
+                if (digits.charAt(k) != '0') throw invalidInt(text, base);
+        }
+        if (digits.isEmpty() || digits.charAt(0) == '+' || digits.charAt(0) == '-') throw invalidInt(text, base);
+        try {
+            BigInteger v = new BigInteger(digits, b);
+            return PyObj.normInt(neg ? v.negate() : v);
+        } catch (NumberFormatException e) {
+            throw invalidInt(text, base);
+        }
+    }
+
+    private static PyException invalidInt(String text, long base) {
+        return PyException.valueError("invalid syntax for integer with base " + base + ": " + PyObj.repr(text.trim()));
+    }
+
+    /** int()/float() also parse bytes and bytearray (as ASCII text). */
+    private static Object bytesAsText(Object o) {
+        if (o instanceof PyObj.Bytes) return new String(((PyObj.Bytes) o).data, java.nio.charset.StandardCharsets.ISO_8859_1);
+        if (o instanceof PyObj.ByteArray)
+            return new String(((PyObj.ByteArray) o).data, 0, ((PyObj.ByteArray) o).size, java.nio.charset.StandardCharsets.ISO_8859_1);
+        return o;
+    }
+
+    private static Object constructFloat(Vm vm, Object[] a) {
         if (a.length == 0) return 0.0;
         Object o = a[0];
-        if (o instanceof Double) return o;
-        if (o instanceof Long) return (double) (Long) o;
-        if (o instanceof BigInteger) return ((BigInteger) o).doubleValue();
-        if (o instanceof Boolean) return (Boolean) o ? 1.0 : 0.0;
-        if (o instanceof String) {
-            String s = ((String) o).trim();
-            String l = s.toLowerCase();
-            if (l.equals("inf") || l.equals("+inf") || l.equals("infinity")) return Double.POSITIVE_INFINITY;
-            if (l.equals("-inf") || l.equals("-infinity")) return Double.NEGATIVE_INFINITY;
-            if (l.equals("nan") || l.equals("-nan")) return Double.NaN;
-            try { return Double.parseDouble(s); }
-            catch (NumberFormatException e) { throw PyException.valueError("invalid syntax for number"); }
+        if (vm != null) {
+            Object r = vm.hooks.callDunder(o, "__float__");
+            if (r != null) {
+                Object rf = Ops.unwrapNative(r);
+                if (rf instanceof Double) return rf;
+                throw PyException.typeError("__float__ returned non-float (type " + StdLib.typeName(r) + ")");
+            }
+            r = vm.hooks.callDunder(o, "__index__");
+            if (r != null) o = r;
         }
-        throw PyException.typeError("can't convert to float");
+        o = bytesAsText(Ops.unwrapNative(o));
+        if (o instanceof Double) return o;
+        if (o instanceof Long || o instanceof BigInteger || o instanceof Boolean) return Ops.intToDouble(o);
+        if (o instanceof String) return parseFloat((String) o);
+        throw PyException.typeError("can't convert " + StdLib.typeName(a[0]) + " to float");
+    }
+
+    /** A Python float literal: Java's parseDouble alone would also take hex
+     *  floats and 'd'/'f' suffixes. */
+    private static final java.util.regex.Pattern FLOAT_LITERAL =
+            java.util.regex.Pattern.compile("[+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][+-]?[0-9]+)?");
+
+    private static double parseFloat(String text) {
+        String s = text.trim();
+        boolean signed = s.startsWith("+") || s.startsWith("-");
+        String word = (signed ? s.substring(1) : s).toLowerCase(java.util.Locale.ROOT);
+        if (word.equals("inf") || word.equals("infinity")) return s.startsWith("-") ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;
+        if (word.equals("nan")) return Double.NaN;
+        if (!FLOAT_LITERAL.matcher(s).matches()) throw PyException.valueError("invalid syntax for number");
+        return Double.parseDouble(s);
     }
 
     private static Object constructComplex(Object[] a) {
         if (a.length == 0) return new PyObj.Complex(0, 0);
+        if (a[0] == MISSING) a = new Object[]{0L, a[1]};   // complex(imag=2)
         if (a.length == 1) {
             Object o = a[0];
             if (o instanceof PyObj.Complex) return o;

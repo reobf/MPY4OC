@@ -8,10 +8,10 @@ public final class TkPointerInput {
     private final TkTarget target;
     private final Consumer<TkPackets.InputEvent> send;
     private int x, y, modifiers, sentX, sentY, sentModifiers;
-    private boolean seen, inside, down, sent;
+    private boolean seen, inside, down, sent, left;
     public TkPointerInput(TkTarget target, Consumer<TkPackets.InputEvent> send) { this.target = target; this.send = send; }
     public void sample(int x, int y, boolean inside, int modifiers) {
-        this.x = Math.max(-1024, Math.min(2047, x)); this.y = Math.max(-1024, Math.min(2047, y));
+        this.x = Math.max(-TileTkDisplay.MAX_SIZE, Math.min(2 * TileTkDisplay.MAX_SIZE - 1, x)); this.y = Math.max(-TileTkDisplay.MAX_SIZE, Math.min(2 * TileTkDisplay.MAX_SIZE - 1, y));
         this.inside = inside; this.modifiers = modifiers; seen = true;
     }
     private void emit(int kind, int button) { send.accept(new TkPackets.InputEvent(target, kind, x, y, button, 0, modifiers)); }
@@ -31,7 +31,10 @@ public final class TkPointerInput {
     }
     public void tick() {
         if (seen && (inside || down) && (moved() || down)) {
-            emit(down ? TkPackets.InputEvent.DRAG : TkPackets.InputEvent.MOTION, 0); remember();
+            emit(down ? TkPackets.InputEvent.DRAG : TkPackets.InputEvent.MOTION, 0); remember(); left = false;
+        } else if (seen && !inside && !down && sent && !left) {
+            // One motion outside as the pointer leaves: the server stops showing what it was over.
+            emit(TkPackets.InputEvent.MOTION, 0); remember(); left = true;
         }
     }
     public void wheel(int delta) { if (seen && inside && delta != 0) emit(TkPackets.InputEvent.WHEEL, Math.max(-1200, Math.min(1200, delta))); }

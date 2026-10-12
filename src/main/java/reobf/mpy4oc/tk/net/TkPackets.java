@@ -18,9 +18,10 @@ import reobf.mpy4oc.tk.TkRect;
 import reobf.mpy4oc.tk.TkWidget;
 import reobf.mpy4oc.tk.TkDisplayPatch;
 
-/** Protocol 9. Strings, paint records and coordinates are bounded before reaching game state. */
+/** Protocol 14. Strings, paint records, coordinates and image data are bounded before reaching game state. */
 public final class TkPackets {
-    public static final int SIZE = 1, BACKGROUND = 2, TITLE = 4, SURFACE = 8, DISPLAY = 16, ALL = 31;
+    /** Scene parts in a delta (4 was the display title, which the desktop no longer has). */
+    public static final int SIZE = 1, BACKGROUND = 2, SURFACE = 8, DISPLAY = 16, IMAGES = 32, ALL = SIZE | BACKGROUND | SURFACE | DISPLAY | IMAGES;
     public static final int MAX_CLIPBOARD_BYTES = 4096;
 
     private TkPackets() {}
@@ -48,9 +49,9 @@ public final class TkPackets {
             return new TkScene((mask & SIZE) != 0 ? scene.width : previous.width,
                     (mask & SIZE) != 0 ? scene.height : previous.height,
                     (mask & BACKGROUND) != 0 ? scene.background : previous.background,
-                    (mask & TITLE) != 0 ? scene.title : previous.title,
                     (mask & SURFACE) != 0 ? scene.surfaceVisible : previous.surfaceVisible,
-                    (mask & DISPLAY) != 0 ? displayPatch == null ? scene.display : displayPatch.apply(previous.display) : previous.display);
+                    (mask & DISPLAY) != 0 ? displayPatch == null ? scene.display : displayPatch.apply(previous.display) : previous.display,
+                    (mask & IMAGES) != 0 ? scene.images : previous.images);
         }
 
         private void validate() {
@@ -66,13 +67,17 @@ public final class TkPackets {
             out.writeLong(baseRevision).writeLong(revision).writeByte(mask);
             if ((mask & SIZE) != 0) out.writeShort(scene.width).writeShort(scene.height);
             if ((mask & BACKGROUND) != 0) out.writeInt(scene.background);
-            if ((mask & TITLE) != 0) writeString(out, scene.title, TkScene.MAX_TITLE_BYTES);
             if ((mask & SURFACE) != 0) out.writeBoolean(scene.surfaceVisible);
             if ((mask & DISPLAY) != 0) {
                 if (isFull() && displayPatch != null) throw new IllegalArgumentException("full scene cannot be a patch");
                 out.writeBoolean(displayPatch != null);
                 if (displayPatch == null) writeDisplay(out, scene.display);
                 else { out.writeShort(displayPatch.order.length); for (long key : displayPatch.order) out.writeLong(key); writeDisplay(out, displayPatch.changed); }
+            }
+            if ((mask & IMAGES) != 0) {
+                out.writeShort(scene.images.size());
+                for (java.util.Map.Entry<Integer, TkScene.ImageRef> e : scene.images.entrySet())
+                    out.writeInt(e.getKey()).writeLong(e.getValue().version).writeShort(e.getValue().width).writeShort(e.getValue().height);
             }
         }
 
@@ -86,7 +91,6 @@ public final class TkPackets {
             int width = (mask & SIZE) != 0 ? in.readUnsignedShort() : 320;
             int height = (mask & SIZE) != 0 ? in.readUnsignedShort() : 240;
             int background = (mask & BACKGROUND) != 0 ? in.readInt() : TkScene.DEFAULT_BACKGROUND;
-            String title = (mask & TITLE) != 0 ? readString(in, TkScene.MAX_TITLE_BYTES) : TkScene.DEFAULT_TITLE;
             boolean surface = (mask & SURFACE) == 0 || in.readBoolean();
             TkDisplayList display = TkDisplayList.EMPTY;
             if ((mask & DISPLAY) != 0) {
@@ -98,7 +102,18 @@ public final class TkPackets {
                     displayPatch = new TkDisplayPatch(order, readDisplay(in));
                 }
             }
-            scene = new TkScene(width, height, background, title, surface, display);
+            java.util.Map<Integer, TkScene.ImageRef> images = java.util.Collections.emptyMap();
+            if ((mask & IMAGES) != 0) {
+                int count = in.readUnsignedShort();
+                if (count > reobf.mpy4oc.tk.TkImage.MAX_IMAGES) throw new IllegalArgumentException("too many images");
+                images = new java.util.LinkedHashMap<>();
+                for (int i = 0; i < count; i++) {
+                    int id = in.readInt(); long version = in.readLong();
+                    if (images.put(id, new TkScene.ImageRef(version, in.readUnsignedShort(), in.readUnsignedShort())) != null)
+                        throw new IllegalArgumentException("duplicate image id");
+                }
+            }
+            scene = new TkScene(width, height, background, surface, display, images);
             end(in);
         }
     }
@@ -138,6 +153,55 @@ public final class TkPackets {
         @Override public void fromBytes(ByteBuf in) {dimension=in.readInt();x=in.readInt();y=in.readInt();z=in.readInt();nonce=in.readLong();action=in.readUnsignedByte();validate();end(in);}
     }
 
+    /** Server to client: a piece of one image's packed pixels (see TkImageTransfer), for a GUI session. */
+    public static class ImageData implements IMessage {
+        public TkTarget target;
+        public int image, width, height, total, offset;
+        public long version;
+        public byte[] bytes;
+        public ImageData() {}
+        public ImageData(TkTarget target, reobf.mpy4oc.tk.TkImageTransfer.Chunk c) {
+            this.target = target; image = c.image; version = c.version; width = c.width; height = c.height;
+            total = c.total; offset = c.offset; bytes = c.bytes; validate();
+        }
+        private void validate() {
+            if (image < 1 || version < 1 || width < 1 || height < 1 || width > reobf.mpy4oc.tk.TkImage.MAX_SIDE || height > reobf.mpy4oc.tk.TkImage.MAX_SIDE
+                    || total < 8 || total > reobf.mpy4oc.tk.TkImageCodec.maxPacked(width, height) || offset < 0 || bytes == null
+                    || bytes.length < 1 || bytes.length > reobf.mpy4oc.tk.TkImageTransfer.CHUNK || (long) offset + bytes.length > total)
+                throw new IllegalArgumentException("invalid image data");
+        }
+        @Override public void toBytes(ByteBuf out) {
+            validate(); writeTarget(out, target);
+            out.writeInt(image).writeLong(version).writeShort(width).writeShort(height).writeInt(total).writeInt(offset).writeInt(bytes.length).writeBytes(bytes);
+        }
+        @Override public void fromBytes(ByteBuf in) {
+            target = readTarget(in); image = in.readInt(); version = in.readLong(); width = in.readUnsignedShort(); height = in.readUnsignedShort();
+            total = in.readInt(); offset = in.readInt(); int length = in.readInt();
+            if (length < 1 || length > reobf.mpy4oc.tk.TkImageTransfer.CHUNK || length > in.readableBytes()) throw new IllegalArgumentException("invalid image data");
+            bytes = new byte[length]; in.readBytes(bytes); validate(); end(in);
+        }
+    }
+
+    /** The same for a world-surface lease. */
+    public static final class SurfaceImageData extends ImageData {
+        public SurfaceImageData() {}
+        public SurfaceImageData(TkTarget target, reobf.mpy4oc.tk.TkImageTransfer.Chunk c) { super(target, c); }
+    }
+
+    /** Client to server: a wrench click on a display. {@link #action} is an edge ordinal, or SPLIT. */
+    public static final class Wrench implements IMessage {
+        public static final int SPLIT = 4;
+        public int x, y, z, action;
+        public Wrench() {}
+        public Wrench(int x, int y, int z, int action) { this.x = x; this.y = y; this.z = z; this.action = action; validate(); }
+        private void validate() {
+            if (x < -30000000 || x >= 30000000 || z < -30000000 || z >= 30000000 || y < 0 || y > 255 || action < 0 || action > SPLIT)
+                throw new IllegalArgumentException("invalid wrench action");
+        }
+        @Override public void toBytes(ByteBuf out) { validate(); out.writeInt(x).writeInt(y).writeInt(z).writeByte(action); }
+        @Override public void fromBytes(ByteBuf in) { x = in.readInt(); y = in.readInt(); z = in.readInt(); action = in.readUnsignedByte(); validate(); end(in); }
+    }
+
     public abstract static class Request implements IMessage {
         public TkTarget target;
         public Request() {}
@@ -166,13 +230,6 @@ public final class TkPackets {
         public Heartbeat(TkTarget target) { super(target); }
     }
 
-    /** The title bar's close button: WM_DELETE_WINDOW for the application, or just this GUI. */
-    public static final class WindowClose extends Request {
-        public WindowClose() {}
-        public WindowClose(TkTarget target) { super(target); }
-        @Override public void toBytes(ByteBuf out) { writeTarget(out, target); }
-        @Override public void fromBytes(ByteBuf in) { target = readTarget(in); end(in); }
-    }
 
     public static final class InputEvent extends Request {
         public static final int MOUSE_DOWN = 0, MOUSE_UP = 1, KEY_DOWN = 2, MOUSE_CANCEL = 3,
@@ -186,10 +243,11 @@ public final class TkPackets {
             validate();
         }
         private void validate() {
-            boolean outside = kind == DRAG || kind == MOUSE_UP;
+            // A drag and its release may end off the display; one motion off it says the pointer left.
+            boolean outside = kind == DRAG || kind == MOUSE_UP || kind == MOTION;
             boolean key = kind == KEY_DOWN || kind == KEY_UP;
-            if (kind < MOUSE_DOWN || kind > KEY_UP || x < (outside ? -1024 : 0) || x >= (outside ? 2048 : 1024)
-                    || y < (outside ? -1024 : 0) || y >= (outside ? 2048 : 1024)
+            if (kind < MOUSE_DOWN || kind > KEY_UP || x < (outside ? -reobf.mpy4oc.tk.TileTkDisplay.MAX_SIZE : 0) || x >= (outside ? 2 * reobf.mpy4oc.tk.TileTkDisplay.MAX_SIZE : reobf.mpy4oc.tk.TileTkDisplay.MAX_SIZE)
+                    || y < (outside ? -reobf.mpy4oc.tk.TileTkDisplay.MAX_SIZE : 0) || y >= (outside ? 2 * reobf.mpy4oc.tk.TileTkDisplay.MAX_SIZE : reobf.mpy4oc.tk.TileTkDisplay.MAX_SIZE)
                     || (kind == WHEEL ? code == 0 || code < -1200 || code > 1200 : code < 0 || code > (key ? 255 : 15))
                     || character < 0 || character > 0x10FFFF || character >= 0xD800 && character <= 0xDFFF
                     || !key && character != 0 || modifiers < 0 || modifiers > 7)
@@ -243,9 +301,9 @@ public final class TkPackets {
         int mask = 0;
         if (before.width != after.width || before.height != after.height) mask |= SIZE;
         if (before.background != after.background) mask |= BACKGROUND;
-        if (!before.title.equals(after.title)) mask |= TITLE;
         if (before.surfaceVisible != after.surfaceVisible) mask |= SURFACE;
         if (!before.display.equals(after.display)) mask |= DISPLAY;
+        if (!before.images.equals(after.images)) mask |= IMAGES;
         return mask;
     }
 
@@ -265,6 +323,8 @@ public final class TkPackets {
                 out.writeByte(v.shape.ordinal()).writeInt(v.fill).writeInt(v.outline).writeDouble(v.width).writeShort(v.count());
                 for (int j = 0; j < v.count(); j++) out.writeDouble(v.at(j));
             }
+            out.writeInt(item.image);
+            out.writeByte(item.relief);
         }
     }
 
@@ -290,8 +350,9 @@ public final class TkPackets {
                 double[] points = new double[length]; for (int j = 0; j < length; j++) points[j] = in.readDouble();
                 vector = new TkVector(TkVector.Shape.values()[shape], points, fill, outline, stroke);
             }
+            int image = in.readInt(), relief = in.readUnsignedByte();
             items.add(new TkDisplayList.Item(id, part, TkWidget.Kind.values()[kind], bounds, clip,
-                    background, foreground, border, state, textX, textY, text, caretX, selectionX, selectionWidth, vector));
+                    background, foreground, border, state, textX, textY, text, caretX, selectionX, selectionWidth, vector, image, relief));
         }
         return new TkDisplayList(items);
     }

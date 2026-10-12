@@ -36,15 +36,20 @@ public final class TkHostApi {
                 java.util.List<Object> list = ((PyObj.PyList) signals).items;
                 for (int i = 0; i < list.size(); i++) {
                     Object signal = list.get(i);
-                    if (!(signal instanceof PyObj.Tuple)) continue;
-                    Object[] parts = ((PyObj.Tuple) signal).items;
-                    if (parts.length > 0 && ("tk_command".equals(parts[0]) || "tk_event".equals(parts[0])
-                            || "tk_changed".equals(parts[0]) || "tk_close".equals(parts[0]))) return list.remove(i);
+                    if (isTkSignal(signal)) return list.remove(i);
                 }
             }
             return PyObj.NONE;
         });
         globals.put("_tk", module);
+    }
+
+    /** A signal a Tk display sends its program (queued with the computer's other signals). */
+    public static boolean isTkSignal(Object signal) {
+        if (!(signal instanceof PyObj.Tuple)) return false;
+        Object[] parts = ((PyObj.Tuple) signal).items;
+        return parts.length > 0 && ("tk_command".equals(parts[0]) || "tk_event".equals(parts[0])
+                || "tk_changed".equals(parts[0]) || "tk_close".equals(parts[0]));
     }
 
     private static void register(PyModule module, HostRegistry hosts, String name, HostFunction function) {

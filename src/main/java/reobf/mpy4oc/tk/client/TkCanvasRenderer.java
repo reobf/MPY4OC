@@ -5,8 +5,11 @@ import cpw.mods.fml.relauncher.SideOnly;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.ScaledResolution;
+import net.minecraft.client.renderer.OpenGlHelper;
+import net.minecraft.client.renderer.Tessellator;
 import org.lwjgl.opengl.GL11;
 import reobf.mpy4oc.tk.TkDisplayList;
+import reobf.mpy4oc.tk.TkRelief;
 import reobf.mpy4oc.tk.TkFontMetrics;
 import reobf.mpy4oc.tk.TkRect;
 import reobf.mpy4oc.tk.TkScene;
@@ -23,35 +26,22 @@ final class TkCanvasRenderer {
     void prepare(TkScene scene, long revision) {
         if (font == null) font = new TkFontRenderer();
         if (preparedScene == scene && preparedRevision == revision && preparedGeneration == font.generation()) return;
-        font.generateChars(scene.title.codePoints().toArray());
         for (TkDisplayList.Item item : scene.display.items) font.generateChars(item.text.codePoints().toArray());
         preparedRevision = revision; preparedGeneration = font.generation();
         preparedScene = scene;
     }
 
-    void title(String text, int x, int y, int available) { font.drawString(fit(text, available), x, y, 0xFFFFFF); }
-
-    private String fit(String text, int available) {
-        int end = 0, width = 0;
-        while (end < text.length()) {
-            int cp = text.codePointAt(end), nextWidth = width + TkFontMetrics.advance(cp);
-            if (nextWidth > available) break;
-            width = nextWidth; end += Character.charCount(cp);
-        }
-        return text.substring(0, end);
-    }
-
-    void draw(Minecraft mc, TkScene scene, int left, int top, int width, int height) {
+    void draw(Minecraft mc, TkScene scene, TkImageCache images, int left, int top, int width, int height) {
         int guiScale = new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
-        draw(scene, left, top, width, height, mc.displayHeight, guiScale);
+        draw(scene, images, left, top, width, height, mc.displayHeight, guiScale);
     }
 
-    void drawTexture(TkScene scene, int width, int height) {
+    void drawTexture(TkScene scene, TkImageCache images, int width, int height) {
         Gui.drawRect(0, 0, width, height, 0xFF000000 | scene.background);
-        draw(scene, 0, 0, width, height, height, 1);
+        draw(scene, images, 0, 0, width, height, height, 1);
     }
 
-    private void draw(TkScene scene, int left, int top, int width, int height, int viewportHeight, int guiScale) {
+    private void draw(TkScene scene, TkImageCache images, int left, int top, int width, int height, int viewportHeight, int guiScale) {
         float sx = width / (float) scene.width, sy = height / (float) scene.height;
         GL11.glPushAttrib(GL11.GL_ALL_ATTRIB_BITS);
         GL11.glPushMatrix();
@@ -62,10 +52,14 @@ final class TkCanvasRenderer {
             GL11.glEnable(GL11.GL_SCISSOR_TEST);
             for (TkDisplayList.Item item : scene.display.items) {
                 scissor(viewportHeight, item.clip, left, top, sx, sy, guiScale);
+                if (item.vector != null && item.vector.shape == reobf.mpy4oc.tk.TkVector.Shape.IMAGE) {
+                    paintImage(scene, images, item, item.textX, item.textY);
+                    continue;
+                }
                 if (item.vector != null) {
                     if (item.vector.shape == reobf.mpy4oc.tk.TkVector.Shape.TEXT) {
                         if (item.vector.fill >= 0) paintText(item, false);
-                    } else TkVectorRenderer.draw(item.vector, item.bounds.x, item.bounds.y);
+                    } else TkVectorRenderer.draw(item.vector, item.textX, item.textY); // the canvas origin, scrolled
                     continue;
                 }
                 paintFrame(item);
@@ -76,6 +70,11 @@ final class TkCanvasRenderer {
                             item.bounds.width - 2 * inset, item.bounds.height - 2 * inset));
                 }
                 scissor(viewportHeight, content, left, top, sx, sy, guiScale);
+                if (item.image != 0) {
+                    int offset = (item.state & TkDisplayList.PRESSED) != 0 ? 1 : 0;
+                    paintImage(scene, images, item, item.textX + offset, item.textY + offset);
+                    continue;
+                }
                 if (item.selectionWidth > 0) Gui.drawRect(item.selectionX, item.textY,
                         item.selectionX + item.selectionWidth, item.textY + TkFontMetrics.LINE_HEIGHT, 0xFF2456A6);
                 paintText(item, false);
@@ -87,6 +86,28 @@ final class TkCanvasRenderer {
         } finally { GL11.glPopMatrix(); GL11.glPopAttrib(); }
     }
 
+    /** A PhotoImage at (x, y), once its pixels have arrived (the newest there are); until then nothing. */
+    private void paintImage(TkScene scene, TkImageCache images, TkDisplayList.Item item, int x, int y) {
+        TkImageCache.Texture texture = images == null || !scene.images.containsKey(item.image) ? null : images.get(item.image);
+        if (texture == null) return;
+        GL11.glEnable(GL11.GL_TEXTURE_2D);
+        GL11.glEnable(GL11.GL_BLEND);
+        // Alpha accumulates as "over" too: transparent pixels must not make the surface's
+        // framebuffer transparent there (the world renderer alpha-tests it into holes).
+        OpenGlHelper.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA);
+        GL11.glColor4f(1, 1, 1, (item.state & TkDisplayList.DISABLED) != 0 ? .5F : 1);
+        GL11.glBindTexture(GL11.GL_TEXTURE_2D, texture.texture);
+        Tessellator t = Tessellator.instance;
+        t.startDrawingQuads();
+        t.addVertexWithUV(x, y + texture.height, 0, 0, 1);
+        t.addVertexWithUV(x + texture.width, y + texture.height, 0, 1, 1);
+        t.addVertexWithUV(x + texture.width, y, 0, 1, 0);
+        t.addVertexWithUV(x, y, 0, 0, 0);
+        t.draw();
+        GL11.glDisable(GL11.GL_BLEND);
+        GL11.glColor4f(1, 1, 1, 1);
+    }
+
     private void scissor(int viewportHeight, TkRect r, int left, int top, float sx, float sy, int scale) {
         int x0 = (int) Math.ceil((left + r.x * sx) * scale), x1 = (int) Math.floor((left + (r.x + r.width) * sx) * scale);
         int y0 = (int) Math.ceil((top + r.y * sy) * scale), y1 = (int) Math.floor((top + (r.y + r.height) * sy) * scale);
@@ -96,15 +117,33 @@ final class TkCanvasRenderer {
     private void paintFrame(TkDisplayList.Item item) {
         TkRect r = item.bounds;
         boolean pressed = (item.state & TkDisplayList.PRESSED) != 0;
-        boolean insetBorder = pressed || item.kind == TkWidget.Kind.ENTRY || item.kind == TkWidget.Kind.TEXT;
         Gui.drawRect(r.x, r.y, r.x + r.width, r.y + r.height, 0xFF000000 | item.background);
         int edge = Math.min(item.border, Math.min(r.width, r.height) / 2);
-        for (int i = 0; i < edge; i++) {
-            int light = insetBorder ? 0xFF555555 : 0xFFF0F0F0, dark = insetBorder ? 0xFFF0F0F0 : 0xFF555555;
-            Gui.drawRect(r.x + i, r.y + i, r.x + r.width - i, r.y + i + 1, light);
-            Gui.drawRect(r.x + i, r.y + i, r.x + i + 1, r.y + r.height - i, light);
-            Gui.drawRect(r.x + i, r.y + r.height - i - 1, r.x + r.width - i, r.y + r.height - i, dark);
-            Gui.drawRect(r.x + r.width - i - 1, r.y + i, r.x + r.width - i, r.y + r.height - i, dark);
+        if (item.relief != TkRelief.LEGACY) {
+            // Tk's 3D border, shaded from the background; a pressed part (a button held down) is
+            // sunken whatever its relief, as Tk's button bindings make it. Each ring draws its
+            // bottom and right sides first, so the top/left colour takes the top-right and
+            // bottom-left corners, as Tk's bevels do. A tab has no bottom side.
+            int relief = pressed ? TkRelief.SUNKEN : item.relief;
+            int[][] rings = TkRelief.rings(relief, edge, item.background);
+            boolean tab = relief == TkRelief.TAB;
+            for (int i = 0; i < rings.length; i++) {
+                int topLeft = 0xFF000000 | rings[i][0], bottomRight = 0xFF000000 | rings[i][1];
+                int bottom = tab ? r.y + r.height : r.y + r.height - i;
+                if (!tab) Gui.drawRect(r.x + i, r.y + r.height - i - 1, r.x + r.width - i, r.y + r.height - i, bottomRight);
+                Gui.drawRect(r.x + r.width - i - 1, r.y + i, r.x + r.width - i, bottom, bottomRight);
+                Gui.drawRect(r.x + i, r.y + i, r.x + r.width - i, r.y + i + 1, topLeft);
+                Gui.drawRect(r.x + i, r.y + i, r.x + i + 1, bottom, topLeft);
+            }
+        } else {
+            boolean insetBorder = pressed || item.kind == TkWidget.Kind.ENTRY || item.kind == TkWidget.Kind.TEXT;
+            for (int i = 0; i < edge; i++) {
+                int light = insetBorder ? 0xFF555555 : 0xFFF0F0F0, dark = insetBorder ? 0xFFF0F0F0 : 0xFF555555;
+                Gui.drawRect(r.x + i, r.y + i, r.x + r.width - i, r.y + i + 1, light);
+                Gui.drawRect(r.x + i, r.y + i, r.x + i + 1, r.y + r.height - i, light);
+                Gui.drawRect(r.x + i, r.y + r.height - i - 1, r.x + r.width - i, r.y + r.height - i, dark);
+                Gui.drawRect(r.x + r.width - i - 1, r.y + i, r.x + r.width - i, r.y + r.height - i, dark);
+            }
         }
         if ((item.state & TkDisplayList.FOCUSED) != 0 && item.kind == TkWidget.Kind.BUTTON
                 && r.width > 2 * (edge + 1) && r.height > 2 * (edge + 1)) {

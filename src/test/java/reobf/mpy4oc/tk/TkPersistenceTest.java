@@ -40,17 +40,18 @@ class TkPersistenceTest {
 
     @Test void applicationIdentityAndTreeSurviveNbtAndRejectReplacedOwner() {
         TileTkDisplay tile = new TileTkDisplay();
-        String token = (String) tile.application().call("computer-one", "claim", "");
-        int id = (Integer) tile.application().call("computer-one", "create", token, "label", 0, Map.of("text", "saved"));
+        Object[] opened = (Object[]) tile.application().call("computer-one", "claim", "");
+        String token = (String) opened[0];
+        int id = (Integer) tile.application().call("computer-one", "create", token, "label", opened[1], Map.of("text", "saved"));
         NBTTagCompound saved = new NBTTagCompound(); tile.writeToNBT(saved);
         TileTkDisplay restored = new TileTkDisplay(); restored.readFromNBT(saved);
-        assertEquals(token, restored.application().token());
+        assertEquals(java.util.List.of(token), restored.application().tokens());
         assertEquals("saved", restored.application().call("computer-one", "cget", token, id, "text"));
         assertThrows(IllegalArgumentException.class, () -> restored.application().call("other", "destroy", token, id));
-        String next = (String) restored.application().call("computer-two", "claim", "");
+        String next = (String) ((Object[]) restored.application().call("computer-two", "claim", ""))[0];
         assertNotEquals(token, next);
         assertThrows(IllegalArgumentException.class, () -> restored.application().call("computer-one", "release", token));
-        assertEquals(next, restored.application().token());
+        assertEquals(java.util.List.of(next), restored.application().tokens());
     }
 
     @Test void optionsAreValidatedBeforeMutationAndEntryEditsUseCodePoints() {

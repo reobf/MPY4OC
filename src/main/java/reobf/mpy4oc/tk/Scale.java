@@ -14,6 +14,17 @@ public final class Scale extends TkWidget {
     }
     int trackLength() { return Math.max(1, (horizontal ? bounds.width : bounds.height) - 16); }
     int position() { return 8 + (int) Math.round((from == to ? 0 : (value - from) / (to - from)) * trackLength()); }
+    /** The value under a point relative to the widget (ttk.Scale.get(x, y)). */
+    double valueAt(int x, int y) {
+        double t = Math.max(0, Math.min(1, ((horizontal ? x : y) - 8) / (double) trackLength()));
+        return from + (to - from) * t;
+    }
+    /** The slider centre for {@code n}, relative to the widget (Tk's coords). */
+    int[] coords(double n) {
+        double t = from == to ? 0 : Math.max(0, Math.min(1, (n - from) / (to - from)));
+        int along = 8 + (int) Math.round(t * trackLength());
+        return horizontal ? new int[] {along, bounds.height - 10} : new int[] {bounds.width - 10, along};
+    }
     void drag(int x, int y) { set(from + (to - from) * Math.max(0, Math.min(1, ((horizontal ? x - bounds.x : y - bounds.y) - 8) / (double) trackLength())), true); }
     void key(int code) {
         double step = resolution > 0 ? resolution : Math.abs(to - from) / 100;

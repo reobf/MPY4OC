@@ -53,7 +53,9 @@ public final class Frame {
      *  on the caller. Holds the SETUP_WITH arg (handler offset); -1 when unused.
      *  This makes __enter__ a real, suspendable subframe so a cooperative busy-wait
      *  inside it (e.g. a Lock.acquire spin) yields to the scheduler correctly,
-     *  instead of being driven synchronously by callSync. */
+     *  instead of being driven synchronously by callSync. Below -1 it marks an
+     *  __exit__ subframe pushed by WITH_CLEANUP instead (Vm.WITH_EXIT_*: what is
+     *  left of that instruction when it returns). */
     public int withEnterArg = -1;
     /** Set on a property-getter subframe pushed by LOAD_METHOD: on return, the
      *  getter's result is delivered to the caller's slot and the extra `null`

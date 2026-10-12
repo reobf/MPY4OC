@@ -1,0 +1,7 @@
+to_thread 42
+to_thread raised KeyError 'missing'
+run_in_executor 10
+call_soon_threadsafe from a thread
+run_coroutine_threadsafe 8
+thread get_event_loop ["There is no current event loop in thread 'Thread-4 (no_loop)'."]
+own loop ['worker'] MainThread

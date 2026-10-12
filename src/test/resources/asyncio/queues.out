@@ -1,0 +1,24 @@
+new 0 True False 2
+put 0 1
+put 1 2
+got 0
+put 2 2
+got 1
+put 3 2
+got 2
+put 4 2
+got 3
+got 4
+joined True
+empty: QueueEmpty
+full: QueueFull True
+nowait x y
+task_done: task_done() called too many times
+worked 0
+worked 1
+worked 2
+all work done
+priority ['a', 'b', 'c']
+lifo ['c', 'b', 'a']
+waited for late
+after a cancelled get kept True

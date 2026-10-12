@@ -1,0 +1,30 @@
+# Tips shown when MPYOS starts, one per line; one is picked at random each boot.
+# Blank lines and lines starting with # are skipped. English only.
+"python file.py" runs a script; plain "python" gives you a Python prompt.
+A script run by "python" finds its own arguments in the argv list.
+"edit file" edits a file in the terminal (Ctrl+S saves, Ctrl+Q quits).
+With a Tk display, "tkedit file" opens a mouse-driven editor window.
+Bundled Tk commands run in the background and return the prompt at once.
+End a command with & to run it in the background; "jobs" lists them.
+"kill %1" stops background job 1; its windows close with it.
+Programs share a Tk display: each Tk() is a window you can move and resize.
+Try "tkdemo", "tkdesktop" or "tkttk" to see what a Tk display can do.
+Right-click a Tk display to use it; Esc closes your view, not the programs.
+Join Tk displays with a wrench into one bigger screen, up to 8 by 8 blocks.
+Sneak-right-click a Tk display with an empty hand to set its resolution.
+Up and down arrows bring back the commands you typed before.
+Tab completes commands and paths; ambiguous matches are listed below.
+"help" lists the shell's built-ins; "ls /bin" lists the other commands.
+"components" lists what is attached; "components gpu -l" shows gpu methods.
+"ops" shows the instructions left this tick; idle ticks bank up for later.
+"free" shows memory use, "df" disk space, "uptime" how long it has run.
+With an internet card, "wget url file" downloads a file to disk.
+With an internet card, requests.get(url).json() works just as you expect.
+Both threading and asyncio work: asyncio.run(main()) runs a coroutine.
+The shell waits for threads a finished command left; Ctrl+C stops them.
+"install" copies this LiveCD onto a hard disk and boots from it after that.
+Saving the world saves running programs too: they carry on after loading.
+An SFTP server card lets you edit this computer's files from your desktop.
+"find / name" looks for files by name; "grep text file" looks inside one.
+"which name" tells you where a command comes from.
+"mount" lists the disks under /mnt; new disks show up there by themselves.

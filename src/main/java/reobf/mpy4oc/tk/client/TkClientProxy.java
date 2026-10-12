@@ -10,13 +10,15 @@ import reobf.mpy4oc.tk.net.TkPackets;
 
 @SideOnly(Side.CLIENT)
 public final class TkClientProxy extends TkProxy {
-    @Override public void init() { TkSurfaceClient.init(); }
+    @Override public void init() { TkSurfaceClient.init(); TkWrenchClient.init(); }
     @Override
     public void receive(IMessage message, INetHandler connection) {
         Minecraft mc = Minecraft.getMinecraft();
         mc.func_152344_a(() -> {
             if (mc.getNetHandler() != connection || mc.theWorld == null) return;
-            if (message instanceof TkPackets.SurfaceSync) {
+            if (message instanceof TkPackets.SurfaceImageData) {
+                TkSurfaceClient.image((TkPackets.SurfaceImageData) message);
+            } else if (message instanceof TkPackets.SurfaceSync) {
                 TkSurfaceClient.receive((TkPackets.SurfaceSync) message);
             } else if (message instanceof TkPackets.SurfaceEnd) {
                 TkSurfaceClient.end((TkPackets.SurfaceEnd) message);
@@ -27,6 +29,7 @@ public final class TkClientProxy extends TkProxy {
                 GuiTkDisplay gui = (GuiTkDisplay) mc.currentScreen;
                 if (message instanceof TkPackets.SceneSync) gui.sync((TkPackets.SceneSync) message);
                 else if (message instanceof TkPackets.CopyResult) gui.copyResult((TkPackets.CopyResult) message);
+                else if (message instanceof TkPackets.ImageData) gui.image((TkPackets.ImageData) message);
                 else if (message instanceof TkPackets.CloseGui
                         && gui.state().target.equals(((TkPackets.CloseGui) message).target)) gui.closeFromServer();
             }

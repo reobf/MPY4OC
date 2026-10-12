@@ -40,61 +40,34 @@ public final class Builtins {
         globals.putIfAbsent("int", BuiltinType.INT);
         globals.putIfAbsent("float", BuiltinType.FLOAT);
         globals.putIfAbsent("chr", (HostFunction) a -> {
+            arityExact(a, 1, "chr");
             long c = longOf(a[0]);
+            if (c < 0 || c > 0x10FFFF) throw PyException.valueError("chr() arg not in range(0x110000)");
             return new String(Character.toChars((int) c));
         });
         globals.putIfAbsent("ord", (HostFunction) a -> {
-            String s = (String) a[0];
-            return (long) s.codePointAt(0);
+            arityExact(a, 1, "ord");
+            Object o = Ops.unwrapNative(a[0]);
+            int n;
+            if (o instanceof String) {
+                String s = (String) o;
+                if ((n = s.codePointCount(0, s.length())) == 1) return (long) s.codePointAt(0);
+                throw PyException.typeError("ord() expected a character, but string of length " + n + " found");
+            }
+            byte[] b = o instanceof PyObj.Bytes ? ((PyObj.Bytes) o).data : null;
+            if (o instanceof PyObj.ByteArray) b = java.util.Arrays.copyOf(((PyObj.ByteArray) o).data, ((PyObj.ByteArray) o).size);
+            if (b == null) throw PyException.typeError("ord() expected string of length 1, but " + StdLib.typeName(a[0]) + " found");
+            if (b.length != 1) throw PyException.typeError("ord() expected a character, but string of length " + b.length + " found");
+            return (long) (b[0] & 0xff);
         });
         globals.putIfAbsent("bool", BuiltinType.BOOL);
         globals.putIfAbsent("min", (HostFunction) a -> minmax(a, true));
         globals.putIfAbsent("max", (HostFunction) a -> minmax(a, false));
         globals.putIfAbsent("sum", Vm.SUM_BUILTIN);
-        globals.putIfAbsent("round", (HostFunction) a -> {
-            if (a.length == 0 || a.length > 2) throw PyException.typeError("round expected 1 or 2 arguments");
-            double x = a[0] instanceof Double ? (Double) a[0]
-                    : a[0] instanceof Long ? (Long) a[0]
-                    : a[0] instanceof java.math.BigInteger ? ((java.math.BigInteger) a[0]).doubleValue()
-                    : a[0] instanceof Boolean ? ((Boolean) a[0] ? 1.0 : 0.0)
-                    : Double.NaN;
-            if (Double.isNaN(x) && !(a[0] instanceof Double)) throw PyException.typeError("round: expected a number");
-            if (a.length == 1) {
-                if (a[0] instanceof Long || a[0] instanceof java.math.BigInteger || a[0] instanceof Boolean)
-                    return a[0] instanceof Boolean ? (long) ((Boolean) a[0] ? 1 : 0) : a[0];
-                double r = Math.rint(x);              // banker's rounding, like Python
-                return PyObj.normInt(java.math.BigInteger.valueOf((long) r));
-            }
-            long nd = a[1] instanceof Long ? (Long) a[1] : ((Boolean) a[1] ? 1 : 0);
-            if (a[0] instanceof Long || a[0] instanceof java.math.BigInteger || a[0] instanceof Boolean) {
-                if (nd >= 0) return a[0];   // rounding an int to >=0 digits is a no-op
-                // round(int, negative) stays in INTEGER arithmetic (mp_builtin_round):
-                // scale by 10^-nd, then compare the remainder against half the scale,
-                // breaking ties to even. Going through a double instead -- which is what
-                // this used to do -- both returns a float where Python returns an int
-                // and loses precision once the value exceeds 2^53.
-                java.math.BigInteger v = a[0] instanceof java.math.BigInteger
-                        ? (java.math.BigInteger) a[0]
-                        : java.math.BigInteger.valueOf(a[0] instanceof Boolean
-                                ? ((Boolean) a[0] ? 1 : 0) : (Long) a[0]);
-                if (-nd > 1000) return PyObj.normInt(java.math.BigInteger.ZERO);
-                java.math.BigInteger mult = java.math.BigInteger.TEN.pow((int) -nd);
-                java.math.BigInteger half = mult.divide(java.math.BigInteger.valueOf(2));
-                // floorMod/floorDiv semantics: Python's % and // round toward -inf
-                java.math.BigInteger modulo = v.mod(mult);          // always >= 0
-                java.math.BigInteger rounded = v.subtract(modulo);
-                int cmp = half.compareTo(modulo);
-                if (cmp > 0) return PyObj.normInt(rounded);
-                if (cmp < 0) return PyObj.normInt(rounded.add(mult));
-                java.math.BigInteger floor = v.subtract(modulo).divide(mult);
-                return PyObj.normInt(floor.testBit(0) ? rounded.add(mult) : rounded);
-            }
-            // MicroPython: nearbyint(val * 10^n) / 10^n, i.e. round-half-to-even
-            // on the scaled float - pure float arithmetic (Math.rint == nearbyint
-            // in the default rounding mode).
-            double mult = Math.pow(10, (double) nd);
-            return Math.rint(x * mult) / mult;
-        });
+        // round(): user instances go to their __round__ (see Vm.callHost)
+        globals.putIfAbsent("round", new DunderHostFunction("__round__", Builtins::round));
+        globals.putIfAbsent("format", Vm.FORMAT_BUILTIN);
+        globals.putIfAbsent("ascii", Vm.ASCII_BUILTIN);
         // ---- type queries -------------------------------------------------
         globals.putIfAbsent("type", BuiltinType.TYPE);
         // callable(obj): True if obj can be called.
@@ -143,6 +116,18 @@ public final class Builtins {
         globals.putIfAbsent("__jasyncio_in_task", Vm.IN_TASK_BUILTIN);
         globals.putIfAbsent("__jasyncio_current_coro", Vm.CURRENT_CORO_BUILTIN);
         globals.putIfAbsent("__jasyncio_sleep_ms", Vm.SLEEP_MS_OF_BUILTIN);
+        // The thread primitives under their own names (threading and asyncio use these; the
+        // __jasyncio_ names above stay for VMs saved before, whose code still calls them):
+        // start a generator as a thread, which one is running (None: the main frame), park
+        // the main frame until a generator ends, and a timed yield for a thread's generator.
+        globals.putIfAbsent("__thread_start", Vm.CREATE_TASK_BUILTIN);
+        globals.putIfAbsent("__thread_current", Vm.CURRENT_CORO_BUILTIN);
+        globals.putIfAbsent("__thread_wait", Vm.RUN_BUILTIN);
+        globals.putIfAbsent("__thread_sleep", Vm.MAKE_SLEEP_BUILTIN);
+        // asyncio.iscoroutinefunction: an async def compiles to a generator function, which
+        // the code's scope flags tell (a plain generator function is one too, as in MicroPython).
+        globals.putIfAbsent("__is_generator_function", (HostFunction) a -> a.length == 1 && a[0] instanceof PyFunction
+                && (((PyFunction) a[0]).code.prelude.scopeFlags & 0x01) != 0);
         globals.putIfAbsent("__machine_disable_irq", Vm.DISABLE_IRQ_BUILTIN);
         globals.putIfAbsent("__machine_enable_irq", Vm.ENABLE_IRQ_BUILTIN);
         globals.putIfAbsent("finishDaemonOnExit", Vm.FINISH_DAEMON_BUILTIN);
@@ -389,6 +374,7 @@ public final class Builtins {
      *  constructors, classes, and instances whose class defines __call__. */
     private static boolean isCallable(Object o) {
         if (o instanceof PyFunction) return true;
+        if (o instanceof Closure) return true;          // a function capturing outer locals
         if (o instanceof HostFunction) return true;
         if (o instanceof BoundPyMethod) return true;
         if (o instanceof Methods.BoundMethod) return true;
@@ -497,6 +483,64 @@ public final class Builtins {
         return out;
     }
 
+    /** round(number[, ndigits]) on built-in numbers (and built-in subclass
+     *  instances; Vm.callHost sends user instances to __round__): ties to even;
+     *  an int stays an int; a float with ndigits rounds exactly in decimal like
+     *  CPython (round(2.675, 2) == 2.67, as 2.675 is really 2.67499999...). */
+    static Object round(Object[] a) {
+        if (a.length == 0 || a.length > 2) throw PyException.typeError("round expected 1 or 2 arguments");
+        Object x = Ops.unwrapNative(a[0]);
+        if (!(x instanceof Long || x instanceof java.math.BigInteger || x instanceof Boolean || x instanceof Double))
+            throw PyException.typeError("type " + StdLib.typeName(a[0]) + " doesn't define __round__ method");
+        Object d = a.length == 2 ? Ops.unwrapNative(a[1]) : PyObj.NONE;
+        if (d == PyObj.NONE) {   // round(x) / round(x, None) -> int
+            if (x instanceof Double) return PyObj.normInt(Ops.floatToBig(Math.rint((Double) x)));
+            return x instanceof Boolean ? (Object) ((Boolean) x ? 1L : 0L) : x;
+        }
+        long nd;
+        if (d instanceof Long) nd = (Long) d;
+        else if (d instanceof Boolean) nd = (Boolean) d ? 1 : 0;
+        else if (d instanceof java.math.BigInteger) {   // clamp, like CPython's Py_ssize_t conversion
+            java.math.BigInteger b = (java.math.BigInteger) d;
+            nd = b.bitLength() < 64 ? b.longValue() : b.signum() < 0 ? Long.MIN_VALUE : Long.MAX_VALUE;
+        } else throw PyException.typeError("'" + StdLib.typeName(a[1]) + "' object cannot be interpreted as an integer");
+        if (x instanceof Double) return roundFloat((Double) x, nd);
+        java.math.BigInteger v = x instanceof java.math.BigInteger ? (java.math.BigInteger) x
+                : java.math.BigInteger.valueOf(x instanceof Boolean ? ((Boolean) x ? 1 : 0) : (Long) x);
+        if (nd >= 0) return PyObj.normInt(v);   // rounding an int to >=0 digits is a no-op
+        // round(int, negative) stays in INTEGER arithmetic (mp_builtin_round):
+        // scale by 10^-nd, then compare the remainder against half the scale,
+        // breaking ties to even. Going through a double instead -- which is what
+        // this used to do -- both returns a float where Python returns an int
+        // and loses precision once the value exceeds 2^53.
+        // |v| < 10^digits, so rounding to more places than that gives 0.
+        long digits = (long) Math.ceil(v.bitLength() * 0.30103);
+        if (nd < -digits) return 0L;
+        java.math.BigInteger mult = java.math.BigInteger.TEN.pow((int) -nd);
+        java.math.BigInteger half = mult.divide(java.math.BigInteger.valueOf(2));
+        // floorMod/floorDiv semantics: Python's % and // round toward -inf
+        java.math.BigInteger modulo = v.mod(mult);          // always >= 0
+        java.math.BigInteger rounded = v.subtract(modulo);
+        int cmp = half.compareTo(modulo);
+        if (cmp > 0) return PyObj.normInt(rounded);
+        if (cmp < 0) return PyObj.normInt(rounded.add(mult));
+        java.math.BigInteger floor = v.subtract(modulo).divide(mult);
+        return PyObj.normInt(floor.testBit(0) ? rounded.add(mult) : rounded);
+    }
+
+    /** CPython's float round(x, n): the exact binary value rounded half-even
+     *  to n decimal places, then back to the nearest float. nan/inf/0 round to
+     *  themselves, n > 323 leaves every float unchanged and n < -308 gives a
+     *  signed zero; a result past the float range is an OverflowError. */
+    private static double roundFloat(double x, long n) {
+        if (Double.isNaN(x) || Double.isInfinite(x) || x == 0.0) return x;
+        if (n > 323) return x;
+        if (n < -308) return 0.0 * x;
+        double r = new java.math.BigDecimal(x).setScale((int) n, java.math.RoundingMode.HALF_EVEN).doubleValue();
+        if (Double.isInfinite(r)) throw new PyException("OverflowError", "rounded value too large to represent");
+        return r == 0.0 ? Math.copySign(0.0, x) : r;
+    }
+
     public static String str(Object o) {
         if (o instanceof String) return (String) o;
         if (o instanceof net.mpy.runtime.PyExc.Instance) return net.mpy.runtime.PyExc.str((net.mpy.runtime.PyExc.Instance) o);
@@ -519,7 +563,10 @@ public final class Builtins {
         o = Ops.unwrapNative(o);
         if (o instanceof Long) return (Long) o;
         if (o instanceof Boolean) return (Boolean) o ? 1 : 0;
-        if (o instanceof java.math.BigInteger) return ((java.math.BigInteger) o).longValueExact();
+        if (o instanceof java.math.BigInteger) {
+            if (((java.math.BigInteger) o).bitLength() > 63) throw new PyException("OverflowError", "Python int too large to convert to C long");
+            return ((java.math.BigInteger) o).longValue();
+        }
         throw PyException.typeError("an integer is required");
     }
 

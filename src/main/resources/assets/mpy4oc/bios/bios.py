@@ -22,10 +22,10 @@ def _read_file(fs, path):
             chunk = component.invoke(fs, "read", h, 4096)
             if chunk is None:
                 break
-            if isinstance(chunk, bytes):   # binary read -> text
-                chunk = chunk.decode("utf-8")
             chunks.append(chunk)
-        return "".join(chunks)
+        # Decoded once: a multi-byte character may straddle two reads.
+        data = b"".join(chunks) if chunks and isinstance(chunks[0], bytes) else "".join(chunks)
+        return data.decode("utf-8") if isinstance(data, bytes) else data
     finally:
         try:
             component.invoke(fs, "close", h)

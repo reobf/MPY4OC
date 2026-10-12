@@ -79,6 +79,14 @@ public class MpyArchitecture implements Architecture {
     private boolean initialized;
     /** Set when the program ran to completion or crashed; stops further stepping. */
     private boolean ended;
+    /**
+     * A fresh id for every VM this machine boots (a restored snapshot keeps its own). A Tk
+     * display remembers the id of the run that claimed it: a claim from an earlier run whose
+     * stop the display missed (it was unloaded, or the snapshot failed to restore and the
+     * machine booted afresh without telling anyone) no longer counts as held.
+     */
+    private String bootId = "";
+    public String bootId() { return bootId; }
     /** Pending shutdown/reboot requested from Python via computer.shutdown(). */
     private boolean wantShutdown, wantReboot;
     /** Error to surface to OC on the next runThreaded (crashes the computer). */
@@ -681,6 +689,7 @@ public class MpyArchitecture implements Architecture {
     public void save(NBTTagCompound nbt) {
         nbt.setBoolean("initialized", initialized);
         nbt.setBoolean("ended", ended);
+        nbt.setString("bootId", bootId);
         // Persist any live wrapped OC Values so a value held in a Python variable
         // survives the save (Value is Persistable: class name + its own save(nbt)).
         try {
@@ -716,6 +725,7 @@ public class MpyArchitecture implements Architecture {
     public void load(NBTTagCompound nbt) {
         initialized = nbt.getBoolean("initialized");
         ended = nbt.getBoolean("ended");
+        bootId = nbt.getString("bootId");
         // Rebuild any persisted wrapped OC Values first, so the snapshot resolver
         // below can reconnect their method host-functions to a live value.
         wrappedValues.clear();
@@ -789,6 +799,7 @@ public class MpyArchitecture implements Architecture {
     // ------------------------------------------------------------------ //
 
     private boolean boot() {
+        bootId = java.util.UUID.randomUUID().toString();
         // Resolve the per-tick op budget from the installed CPU/APU tier now that
         // the machine and its inventory are available.
         opsPerTick = resolveOpsPerTick();
@@ -804,7 +815,13 @@ public class MpyArchitecture implements Architecture {
 
         String eeprom = eepromAddress();
         String biosSource = eeprom == null ? null : readEepromCode(eeprom);
-        if (biosSource != null && !biosSource.isEmpty()) {
+        if (BiosVersions.earlierRelease(biosSource)) {
+            // An unchanged copy of an earlier release's BIOS: run the current one, the
+            // same program with its fixes (see BiosVersions).
+            mpy = compileBundledBios();
+            if (mpy != null) from = "bundled bios (the EEPROM holds an earlier release's copy)";
+        }
+        if (mpy == null && biosSource != null && !biosSource.isEmpty()) {
             try {
                 mpy = MyMod.compile(biosSource);
                 from = "eeprom";
@@ -836,7 +853,7 @@ public class MpyArchitecture implements Architecture {
                 mpy = bundled;
                 from = "bundled bios (the EEPROM copy does not compile)";
             }
-        } else {
+        } else if (mpy == null) {
             // No bios: scan filesystems for /init.mpy or /init.py directly.
             for (Map.Entry<String, String> e : machine.components().entrySet()) {
                 if (!"filesystem".equals(e.getValue())) continue;
@@ -887,6 +904,43 @@ public class MpyArchitecture implements Architecture {
             fail("boot failed: " + t);
             return false;
         }
+    }
+
+    /**
+     * The oldest queued signal, or None. With {@code keepTk} (tkinter has windows open)
+     * Tk events are skipped and stay queued for tkinter: a shell waiting for a key must
+     * not swallow the clicks meant for a program running in the background. With
+     * {@code keepInput} (the caller is a background program) keyboard signals are skipped
+     * too and stay queued for the shell, the way a background job cannot read a terminal.
+     * With {@code keepInterrupt} (the shell waits for the caller's program to end) a Ctrl+C
+     * key press is skipped: it is for the shell, which stops the wait with it.
+     */
+    static Object pollSignal(PyObj.PyList list, boolean keepTk, boolean keepInput) {
+        return pollSignal(list, keepTk, keepInput, false);
+    }
+
+    static Object pollSignal(PyObj.PyList list, boolean keepTk, boolean keepInput, boolean keepInterrupt) {
+        for (int i = 0; i < list.items.size(); i++) {
+            Object signal = list.items.get(i);
+            if (keepTk && reobf.mpy4oc.tk.TkHostApi.isTkSignal(signal)) continue;
+            if (keepInput && isKeyboardSignal(signal)) continue;
+            if (keepInterrupt && isInterrupt(signal)) continue;
+            return list.items.remove(i);
+        }
+        return PyObj.NONE;
+    }
+
+    /** A Ctrl+C key press: key_down with char 3. */
+    private static boolean isInterrupt(Object signal) {
+        if (!(signal instanceof PyObj.Tuple) || ((PyObj.Tuple) signal).items.length < 3) return false;
+        Object[] items = ((PyObj.Tuple) signal).items;
+        return "key_down".equals(items[0]) && items[2] instanceof Number && ((Number) items[2]).doubleValue() == 3;
+    }
+
+    private static boolean isKeyboardSignal(Object signal) {
+        if (!(signal instanceof PyObj.Tuple) || ((PyObj.Tuple) signal).items.length == 0) return false;
+        Object name = ((PyObj.Tuple) signal).items[0];
+        return "key_down".equals(name) || "key_up".equals(name) || "clipboard".equals(name);
     }
 
     /** Address of the machine's EEPROM component, or null if it has none. */
@@ -1129,10 +1183,15 @@ public class MpyArchitecture implements Architecture {
 
     private void installComputerBootstrap(Map<String, Object> globals) {
         String boot = String.join("\n",
+            // _program (stdlib): a stopped program's task ends here (SystemExit), a
+            // background program does not take the keyboard from the shell, and a program
+            // the shell waits for leaves it the Ctrl+C that ends the wait.
             "def _mpy_pull_signal(timeout=None):",
+            "    import _program",
             "    _d = None if timeout is None else computer.uptime() + timeout",
             "    while True:",
-            "        _s = computer._poll_signal()",
+            "        _program.check()",
+            "        _s = computer._poll_signal(getattr(computer, '_tk_live', False), _program.in_background(), _program.leaves_interrupt())",
             "        if _s is not None:",
             "            return _s",
             "        if _d is not None and computer.uptime() >= _d:",
@@ -1143,8 +1202,10 @@ public class MpyArchitecture implements Architecture {
             "    # cooperative sleep: yield ticks until the server clock passes the",
             "    # deadline. The frozen time module's default __time_sleep is a no-op,",
             "    # which would make time.sleep(1) return instantly in a game OS.",
+            "    import _program",
             "    _d = computer.uptime() + ms / 1000",
             "    while computer.uptime() < _d:",
+            "        _program.check()",
             "        computer._yield_tick()",
             "",
             "def _mpy_eeprom():",
@@ -1358,6 +1419,14 @@ public class MpyArchitecture implements Architecture {
                 return Double.valueOf(machine.upTime());
             }
         });
+        // The world's time in ticks (what OC's Lua os.time() is built on). Unlike uptime it goes
+        // on across reboots, so a boot can differ from the last one (MPYOS's tip of the day).
+        reg(computer, "worldTime", new HostFunction() {
+            @Override
+            public Object call(Object[] args) {
+                return Long.valueOf(machine.worldTime());
+            }
+        });
         reg(computer, "tmpAddress", new HostFunction() {
             @Override
             public Object call(Object[] args) {
@@ -1494,13 +1563,10 @@ public class MpyArchitecture implements Architecture {
                 Object mod = vm != null ? vm.globals.get("computer") : computer;
                 if (!(mod instanceof PyModule)) mod = computer;
                 Object sigs = ((PyModule) mod).ns.get("_signals");
-                if (sigs instanceof PyObj.PyList) {
-                    PyObj.PyList list = (PyObj.PyList) sigs;
-                    if (!list.items.isEmpty()) {
-                        return list.items.remove(0);
-                    }
-                }
-                return PyObj.NONE;
+                return sigs instanceof PyObj.PyList ? pollSignal((PyObj.PyList) sigs,
+                        args.length > 0 && net.mpy.runtime.Ops.isTrue(args[0]),
+                        args.length > 1 && net.mpy.runtime.Ops.isTrue(args[1]),
+                        args.length > 2 && net.mpy.runtime.Ops.isTrue(args[2])) : PyObj.NONE;
             }
         });
         // _yield_tick suspends the VM until the next tick via the VM's yield flag.

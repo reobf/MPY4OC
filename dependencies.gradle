@@ -44,4 +44,5 @@ dependencies {
 	//api("org.apache.sshd:sshd-sftp:2.13.0")
 	//api("at.released.weh:bindings-chicory-emscripten:0.6.0")
 	api("com.github.GTNewHorizons:Angelica:2.1.16:dev")
+	api("com.github.GTNewHorizons:ModularUI2:2.3.92-1.7.10:dev")
 }

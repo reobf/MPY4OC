@@ -1,0 +1,8 @@
+main returns
+result main
+cancelled ['a', 'b']
+messages ['unhandled exception during asyncio.run() shutdown: RuntimeError']
+never retrieved ['Task exception was never retrieved: ValueError']
+retrieved ValueError
+nothing reported []
+main raised KeyError 'main' ['c']

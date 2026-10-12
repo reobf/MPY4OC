@@ -25,6 +25,9 @@ final class TkGeometryPersistence {
         }
         return values;
     }
+    static NBTTagCompound placeTag(TkPlace place) { return options(TkGeometry.placeInfo(place)); }
+    static TkPlace placeFromTag(NBTTagCompound n) { return TkGeometry.place(options(n), null); }
+
     static void save(TkWidget w, NBTTagCompound n) {
         if (w.savedGrid != null) n.setTag("gridOptions", options(TkGeometry.gridInfo(w.savedGrid)));
         n.setBoolean("gridded", w.grid != null);

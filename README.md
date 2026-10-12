@@ -11,9 +11,9 @@ gpu = component.gpu
 w, h = gpu.getResolution()
 gpu.set(1, 1, "Hello from Python!")
 
-import threading, jasyncio
+import threading, asyncio
 threading.Thread(target=lambda: print("threads work")).start()
-jasyncio.run(main())          # asyncio 也有
+asyncio.run(main())           # asyncio 也有
 ```
 
 ## 特性
@@ -23,12 +23,12 @@ jasyncio.run(main())          # asyncio 也有
 - **同步 / 异步两族处理器,各三档**(CPU 与带内置显卡的 APU):
   - 同步:跑在服务器主线程,组件调用零延迟,每 tick 保证执行——默认选它;
   - 异步:跑在 OC 计算线程,对 TPS 友好,非 direct 组件调用自动回主线程执行,语义与 OC 的 Lua 架构一致。
-- **线程 + asyncio 双并发模型**。`threading` 是有栈的(普通函数任意深度直接 `time.sleep`,整条栈保留);`jasyncio` 是 asyncio 风格的事件循环,每次 `run()` 独立、可以多开、线程里也能开。
+- **线程 + asyncio 双并发模型**。`threading` 是有栈的(普通函数任意深度直接 `time.sleep`,整条栈保留);`asyncio` 按 CPython 3.12 的语义实现(任务、Future、`gather`/`wait_for`/`timeout`、锁和队列、`to_thread`),每个线程跑自己的事件循环,线程里也能 `asyncio.run()`;旧名 `jasyncio` 还能 import,就是同一个模块。
 - **按 tick 的 ops 预算**。脚本每 tick 按 CPU 档次限速(500/2000/16000 条指令),空闲时主动让出能攒预算(至 10 倍)。
 - **26 个冻结标准库模块**:`json` `re`(超集)`struct` `hashlib` `collections` `functools` `pickle` `traceback` `machine` `micropython` …,多数行为与官方逐字节一致。
 - **联网就用 `requests` / `urllib` / `socket`**。插上 OC 的因特网卡,`requests.get(url).json()` 就是你想的那个意思;`urlopen` 返回类文件对象,`socket` 走裸 TCP。这些库**永远都在**(没插卡也 import 得进来),只在真正发请求时抛 `OSError`——等待全程按 tick 让出,不占服务器。
 
-- **Tk 图形界面**。内置 `tkinter` 子集：按钮、输入框、列表、Canvas 和纯文本 Text 等。Tk 显示器支持世界表面预览，右键打开共享鼠标界面；无需安装 MPYOS。见 [Tk 使用说明](docs/tkinter.md)。
+- **Tk 图形界面**。内置 `tkinter` 子集：按钮、输入框、列表、Canvas 和纯文本 Text 等。每个程序的 `Tk()` 是显示器桌面上的一个窗口（可拖动、改大小、最小化/最大化），一台电脑的多个程序共用一块屏。Tk 显示器支持世界表面预览，右键打开共享鼠标界面；无需安装 MPYOS。见 [Tk 使用说明](docs/tkinter.md)。
 
 ## 合成配方
 
@@ -51,7 +51,19 @@ jasyncio.run(main())          # asyncio 也有
 1. 合成 **MPY CPU** 和 **MPYOS BIOS**,像装 Lua 电脑一样组一台机器(机箱、内存、显卡、屏幕、键盘、硬盘),CPU 和 EEPROM 换成 MPY 的;
 2. 合成 **MPYOS LiveCD 软盘**插入软驱,开机——从 LiveCD 启动进 shell;
 3. 运行 `install` 把系统装进硬盘,之后可脱离软盘启动;
-4. 编辑 `/init.py` 写你的程序(游戏内 `edit`,或插一张 SFTP 卡远程改)。
+4. 编辑 `/init.py` 写你的程序(游戏内 `edit`;接了 Tk 显示器时也可以用鼠标操作的 `tkedit`。所有自带 Tk 命令都默认在后台运行、不占住 shell,其他命令末尾加 `&` 也能在后台运行;或插一张 SFTP 卡远程改)。
+
+shell 按 OpenOS 的默认顺序搜索命令：`/bin → /usr/bin → /home/bin → 当前工作目录`，内置命令优先。每个目录先找原文件名，文件不存在时再尝试补 `.py`；因此 `tkedit`、`tkedit.py` 都能运行。带 `/` 的路径不走搜索列表：`./app.py`、`../app`、`scripts/app` 按 cwd 解析，绝对路径直接使用。可用 `which app` 查看命中的文件。
+
+shell 支持 **Tab 命令名和路径补全**：例如 `tkdes` + Tab 补成 `tkdesktop `；命令名来自内置命令和上述搜索目录，`.py` 命令省略扩展名。命令位置输入 `./` 等路径也能逐层补全。参数位置补全文件和目录，`cd` 只补目录，`python`、`cp` 等命令的参数都可使用。支持当前目录下的相对路径、`./`、`../`、绝对路径和 `/mnt/` 下的挂载盘；目录补 `/` 后可继续补下一层，文件补完加空格。带空格或引号的名字自动引用，隐藏项在输入 `.` 后才列出。
+
+有多个匹配时补齐公共前缀、按名称列出候选，并保留后面的参数和光标；没有匹配时不改输入。用 `jobs` 查看后台程序，`kill 编号` 停止它。
+
+脚本里的 `sh.run_command(name, args)` 和 `sh.spawn(name, args)` 使用相同的查找规则；`sh.cwd` 跟随本程序的 `os.chdir()`。后台任务继承启动时的 cwd 和环境变量，之后 shell 的 `cd` 不影响它。`sh.spawn(name, args, cwd='目录')` 可指定子任务的起始目录；脚本路径也从该目录解析。
+
+搜索路径由 **`os.environ['PATH']`** 控制，默认 `/bin:/usr/bin:/home/bin:.`；`sh.path` 保留为同一变量的兼容入口。`os.getenv(name, default=None)` 读取环境变量，`os.environ` 支持赋值、删除、`get/update/setdefault/pop/clear/copy`、遍历和 `dict(os.environ)`。键和值必须是字符串，键区分大小写。每个独立程序继承环境副本，子线程共享本程序的环境；程序里的修改不影响交互式 shell 或其他程序，嵌套 `run_command` 则共用调用者的环境。删除或清空 PATH 后只运行内置命令及显式路径；`./app.py`、绝对路径和参数路径仍可补全。要更改交互式 shell 的默认搜索路径，可在 `/init.py` 调用 `shell.run(...)` 前设置 `os.environ['PATH']`。
+
+已有 MPYOS 硬盘需从新 LiveCD 更新 `/lib/shell.py`、`/lib/term.py`、`/bin/which.py` 和 `/bin/tk*.py`，然后重启 OC 电脑；只换模组 jar 不会覆盖硬盘上的系统文件。
 
 SFTP 卡:`component.sftp.start("user", "password")` 开服务,`getPort()` 看端口,然后用任意 SFTP/SSH 客户端连服务器 IP。电脑关机自动断线注销;区块卸载重载会自动恢复服务。
 
@@ -89,7 +101,7 @@ Hello
 
 修改 `stdlib/*.py` 后，先运行 `./gradlew genStdlib`，再运行 `./gradlew build`。Windows 对应 `./gradlew.bat`；生成器使用内置 Java 编译器，不需要 WSL 或外部 `mpy-cross`。
 
-基于 GTNH 的 [ExampleMod1.7.10](https://github.com/GTNewHorizons/ExampleMod1.7.10) 构建体系。依赖 OpenComputers(GTNH 版),不保证在其他分支稳定运行。
+基于 GTNH 的 [ExampleMod1.7.10](https://github.com/GTNewHorizons/ExampleMod1.7.10) 构建体系。依赖 OpenComputers(GTNH 版)和 ModularUI2,不保证在其他分支稳定运行。
 
 ## 许可
 

@@ -172,12 +172,7 @@ public final class Ops {
 
         if (op == MODULO) {
             // printf-style string formatting: "fmt" % arg  or  "fmt" % (args...)
-            if (a instanceof String) {
-                Object[] args;
-                if (b instanceof PyObj.Tuple) args = ((PyObj.Tuple) b).items;
-                else args = new Object[]{ b };
-                return strFormat((String) a, args);
-            }
+            if (a instanceof String) return strModulo((String) a, b, PyHooks.PLAIN);
         }
 
         // complex arithmetic: promote either operand to Complex
@@ -666,19 +661,27 @@ public final class Ops {
     }
 
     private static int[] sliceIndices(PyObj.Slice s, int len) {
-        int step = (s.step == null || s.step == PyObj.NONE) ? 1 : (int) toLong(s.step);
-        if (step == 0) throw PyException.valueError("slice step cannot be zero");
+        long rawStep = (s.step == null || s.step == PyObj.NONE) ? 1 : sliceBound(s.step);
+        if (rawStep == 0) throw PyException.valueError("slice step cannot be zero");
+        // Clamped so `i += step` cannot overflow; a step that large takes one item anyway.
+        int step = (int) Math.max(-(Integer.MAX_VALUE / 2), Math.min(Integer.MAX_VALUE / 2, rawStep));
         int start, stop;
         if (s.start == null || s.start == PyObj.NONE) start = step > 0 ? 0 : len - 1;
-        else start = clampIndex((int) toLong(s.start), len, step);
+        else start = clampIndex(sliceBound(s.start), len, step);
         if (s.stop == null || s.stop == PyObj.NONE) stop = step > 0 ? len : -1;
-        else stop = clampIndex((int) toLong(s.stop), len, step);
+        else stop = clampIndex(sliceBound(s.stop), len, step);
         return new int[]{start, stop, step};
     }
-    private static int clampIndex(int i, int len, int step) {
+    /** A slice bound as a long; an int past the long range only matters by its sign. */
+    private static long sliceBound(Object o) {
+        o = unwrapNative(o);
+        if (o instanceof BigInteger) return ((BigInteger) o).signum() < 0 ? Long.MIN_VALUE / 2 : Long.MAX_VALUE / 2;
+        return toLong(o);
+    }
+    private static int clampIndex(long i, int len, int step) {
         if (i < 0) i += len;
-        if (step > 0) return Math.max(0, Math.min(i, len));
-        return Math.max(-1, Math.min(i, len - 1));
+        if (step > 0) return (int) Math.max(0, Math.min(i, len));
+        return (int) Math.max(-1, Math.min(i, len - 1));
     }
 
     private static int checkIndex(int i, int len, String msg) {
@@ -863,20 +866,34 @@ public final class Ops {
         return sb.toString();
     }
 
-    /** printf-style `"fmt" % args` — Python/MicroPython semantics. Supports flags
-     *  ( - 0 + space # ), width, .precision, and conversions d i u s r x X o c f F
-     *  e E g G %. Args are consumed left to right; %% consumes none. */
-    private static String strFormat(String fmt, Object[] args) {
+    /** printf-style {@code fmt % rhs} with CPython semantics (3.4 rules, plus the
+     *  3.5 TypeError for non-integers in %x/%X/%o/%c): %(key) lookups in a mapping
+     *  rhs, flags ( - 0 + space # ), width and .precision (either may be *), the
+     *  ignored length modifiers h l L, and conversions d i u o x X e E f F g G c s
+     *  r a %. A tuple rhs supplies the arguments in order; anything else is the
+     *  single argument (or the mapping). {@code h} runs user __str__/__repr__/
+     *  __int__/__index__/__float__/__getitem__. */
+    public static String strModulo(String fmt, Object rhs, PyHooks h) {
+        FormatArgs args = new FormatArgs(rhs);
+        Object mapping = args.items == null && isMappingArg(rhs) ? rhs : null;
         StringBuilder out = new StringBuilder();
-        int ai = 0;
         int n = fmt.length();
         for (int i = 0; i < n; i++) {
             char ch = fmt.charAt(i);
             if (ch != '%') { out.append(ch); continue; }
-            i++;
-            if (i >= n) throw PyException.valueError("incomplete format");
+            if (++i >= n) throw PyException.valueError("incomplete format");
             if (fmt.charAt(i) == '%') { out.append('%'); continue; }
-            // flags
+            if (fmt.charAt(i) == '(') {
+                if (mapping == null) throw PyException.typeError("format requires a mapping");
+                int start = ++i, depth = 1;
+                for (; i < n; i++) {
+                    char c = fmt.charAt(i);
+                    if (c == '(') depth++;
+                    else if (c == ')' && --depth == 0) break;
+                }
+                if (i >= n) throw PyException.valueError("incomplete format key");
+                args = new FormatArgs(mappingItem(mapping, fmt.substring(start, i++), h), false);
+            }
             boolean left = false, zero = false, plus = false, space = false, alt = false;
             for (; i < n; i++) {
                 char f = fmt.charAt(i);
@@ -887,105 +904,203 @@ public final class Ops {
                 else if (f == '#') alt = true;
                 else break;
             }
-            // width (may be '*')
-            int width = -1;
+            long width = -1;
             if (i < n && fmt.charAt(i) == '*') {
-                width = (int) toLong(args[ai++]); i++;
+                width = starArg(args.next(), "width");
                 if (width < 0) { left = true; width = -width; }
-            } else {
-                int w = 0; boolean has = false;
-                while (i < n && Character.isDigit(fmt.charAt(i))) { w = w * 10 + (fmt.charAt(i) - '0'); i++; has = true; }
-                if (has) width = w;
+                i++;
+            } else if (i < n && fmt.charAt(i) >= '0' && fmt.charAt(i) <= '9') {
+                width = 0;
+                while (i < n && fmt.charAt(i) >= '0' && fmt.charAt(i) <= '9') {
+                    width = width * 10 + (fmt.charAt(i++) - '0');
+                    if (width > Integer.MAX_VALUE) throw PyException.valueError("width too big");
+                }
             }
-            // precision
-            int prec = -1;
+            long prec = -1;
             if (i < n && fmt.charAt(i) == '.') {
                 i++;
-                if (i < n && fmt.charAt(i) == '*') { prec = (int) toLong(args[ai++]); i++; }
-                else { int p = 0; while (i < n && Character.isDigit(fmt.charAt(i))) { p = p * 10 + (fmt.charAt(i) - '0'); i++; } prec = p; }
+                if (i < n && fmt.charAt(i) == '*') {
+                    prec = Math.max(0, starArg(args.next(), "precision"));
+                    i++;
+                } else {
+                    prec = 0;
+                    while (i < n && fmt.charAt(i) >= '0' && fmt.charAt(i) <= '9') {
+                        prec = prec * 10 + (fmt.charAt(i++) - '0');
+                        if (prec > Integer.MAX_VALUE) throw PyException.valueError("precision too big");
+                    }
+                }
             }
+            if (i < n && (fmt.charAt(i) == 'h' || fmt.charAt(i) == 'l' || fmt.charAt(i) == 'L')) i++;
             if (i >= n) throw PyException.valueError("incomplete format");
             char conv = fmt.charAt(i);
-            Object arg = (conv == '%') ? null : (ai < args.length ? args[ai++] : errNotEnough());
-            String body;
-            boolean numeric = false;
-            String sign = "";
+            if (conv == '%') { out.append('%'); continue; }   // "%5%": CPython 3.4 ignores the spec
+            checkAlloc(Math.max(0, Math.max(width, prec)), 2);
+            Object arg = args.next();
+
+            String sign = "", prefix = "", body;
+            boolean numeric = true;
             switch (conv) {
-                case 'd': case 'i': case 'u': {
-                    java.math.BigInteger v = toBig(arg);
-                    numeric = true;
-                    if (v.signum() < 0) { sign = "-"; body = v.negate().toString(); }
-                    else { sign = plus ? "+" : (space ? " " : ""); body = v.toString(); }
-                    if (prec >= 0) { zero = false; while (body.length() < prec) body = "0" + body; }
+                case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': {
+                    BigInteger v = formatIntArg(arg, conv, h);
+                    body = v.abs().toString(conv == 'o' ? 8 : conv == 'x' || conv == 'X' ? 16 : 10);
+                    if (conv == 'X') body = body.toUpperCase(java.util.Locale.ROOT);
+                    if (prec > body.length()) body = repeat("0", (int) (prec - body.length())) + body;
+                    sign = v.signum() < 0 ? "-" : plus ? "+" : space ? " " : "";
+                    if (alt && (conv == 'x' || conv == 'X' || conv == 'o')) prefix = "0" + conv;
                     break;
                 }
-                case 'x': case 'X': case 'o': {
-                    java.math.BigInteger v = toBig(arg);
-                    numeric = true;
-                    int base = (conv == 'o') ? 8 : 16;
-                    if (v.signum() < 0) { sign = "-"; body = v.negate().toString(base); }
-                    else { sign = plus ? "+" : (space ? " " : ""); body = v.toString(base); }
-                    if (conv == 'X') body = body.toUpperCase();
-                    if (prec >= 0) { zero = false; while (body.length() < prec) body = "0" + body; }
-                    if (alt && v.signum() != 0) body = (conv == 'o' ? "0o" : (conv == 'X' ? "0X" : "0x")) + body;
-                    break;
-                }
-                case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
-                    double d = toDouble(arg);
-                    numeric = true;
-                    int p = prec < 0 ? 6 : prec;
-                    String spec = "%" + (plus ? "+" : (space ? " " : "")) + (alt ? "#" : "") + "." + p + conv;
-                    body = String.format(spec, d);
-                    // Java's %g does not strip trailing zeros the way C/Python does;
-                    // strip them (and a dangling '.') unless the alternate (#) flag is set.
-                    if ((conv == 'g' || conv == 'G') && !alt && body.indexOf('.') >= 0) {
-                        int ePos = body.indexOf(conv == 'g' ? 'e' : 'E');
-                        String mant = ePos < 0 ? body : body.substring(0, ePos);
-                        String exp = ePos < 0 ? "" : body.substring(ePos);
-                        if (mant.indexOf('.') >= 0) {
-                            int end = mant.length();
-                            while (end > 0 && mant.charAt(end - 1) == '0') end--;
-                            if (end > 0 && mant.charAt(end - 1) == '.') end--;
-                            mant = mant.substring(0, end);
-                        }
-                        body = mant + exp;
-                    }
-                    if (body.startsWith("-")) { sign = "-"; body = body.substring(1); }
-                    else if (body.startsWith("+")) { sign = "+"; body = body.substring(1); }
-                    else if (body.startsWith(" ")) { sign = " "; body = body.substring(1); }
+                case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': {
+                    body = Format.floatBody(formatFloatArg(arg, h), conv, (int) prec, plus ? '+' : space ? ' ' : '-', alt);
+                    char s0 = body.isEmpty() ? 0 : body.charAt(0);
+                    if (s0 == '-' || s0 == '+' || s0 == ' ') { sign = String.valueOf(s0); body = body.substring(1); }
                     break;
                 }
                 case 'c': {
-                    if (arg instanceof String) body = (String) arg;
-                    else body = String.valueOf((char) (int) toLong(arg));
+                    numeric = false;
+                    body = formatCharArg(arg, h);
                     break;
                 }
-                case 's': {
-                    body = net.mpy.vm.Builtins.str(arg);
-                    if (prec >= 0 && body.length() > prec) body = body.substring(0, prec);
+                case 's': case 'r': case 'a': {
+                    numeric = false;
+                    body = conv == 's' ? (arg instanceof String ? (String) arg : h.str(arg))
+                         : conv == 'r' ? h.repr(arg) : PyObj.asciiEscape(h.repr(arg));
+                    if (prec >= 0 && body.codePointCount(0, body.length()) > prec)
+                        body = body.substring(0, body.offsetByCodePoints(0, (int) prec));
                     break;
                 }
-                case 'r': {
-                    body = PyObj.repr(arg);
-                    if (prec >= 0 && body.length() > prec) body = body.substring(0, prec);
-                    break;
+                default: {
+                    int cp = fmt.codePointAt(i);
+                    throw PyException.valueError("unsupported format character '" + (cp >= 31 && cp <= 126 ? (char) cp : '?')
+                            + "' (0x" + Integer.toHexString(cp) + ") at index " + i);
                 }
-                default:
-                    throw PyException.valueError("unsupported format character '" + conv + "'");
             }
-            // apply width with sign/zero/left rules
-            int pad = width < 0 ? 0 : width - sign.length() - body.length();
-            if (pad < 0) pad = 0;
-            if (left) { out.append(sign).append(body); for (int k = 0; k < pad; k++) out.append(' '); }
-            else if (zero && numeric) { out.append(sign); for (int k = 0; k < pad; k++) out.append('0'); out.append(body); }
-            else { for (int k = 0; k < pad; k++) out.append(' '); out.append(sign).append(body); }
+            // CPython's layout: [spaces] sign prefix [zeros] body [spaces]; zeros
+            // only for numeric conversions with the 0 flag, which '-' overrides
+            int len = sign.length() + prefix.length() + body.codePointCount(0, body.length());
+            int pad = width > len ? (int) (width - len) : 0;
+            if (left) out.append(sign).append(prefix).append(body).append(repeat(" ", pad));
+            else if (zero && numeric) out.append(sign).append(prefix).append(repeat("0", pad)).append(body);
+            else out.append(repeat(" ", pad)).append(sign).append(prefix).append(body);
         }
+        if (args.hasMore() && mapping == null)
+            throw PyException.typeError("not all arguments converted during string formatting");
         return out.toString();
     }
 
-    private static Object errNotEnough() {
-        throw PyException.typeError("not enough arguments for format string");
+    /** The argument cursor of {@code fmt % rhs} (CPython's getnextarg): a tuple
+     *  (or tuple subclass) is walked item by item; any other value -- and the
+     *  value of each %(key) -- is exactly one argument. */
+    private static final class FormatArgs {
+        final Object[] items;
+        final Object single;
+        int next;
+
+        FormatArgs(Object rhs) { this(rhs, true); }
+        FormatArgs(Object rhs, boolean tupleSpreads) {
+            Object t = tupleSpreads ? unwrapNative(rhs) : null;
+            items = t instanceof PyObj.Tuple ? ((PyObj.Tuple) t).items : null;
+            single = rhs;
+        }
+        Object next() {
+            if (!hasMore()) throw PyException.typeError("not enough arguments for format string");
+            return items != null ? items[next++] : (next++ == 0 ? single : null);
+        }
+        boolean hasMore() { return next < (items != null ? items.length : 1); }
     }
+
+    /** A non-tuple, non-str rhs with __getitem__ is a mapping (PyMapping_Check):
+     *  %(key) looks keys up in it and it may go unused without an error. */
+    private static boolean isMappingArg(Object o) {
+        if (o instanceof net.mpy.vm.PyInstance && ((net.mpy.vm.PyInstance) o).cls.lookup("__getitem__") != null) return true;
+        o = unwrapNative(o);
+        return o instanceof PyObj.PyDict || o instanceof PyObj.PyList || o instanceof PyObj.Bytes
+                || o instanceof PyObj.ByteArray || o instanceof PyObj.Range;
+    }
+
+    private static Object mappingItem(Object mapping, String key, PyHooks h) {
+        Object r = h.callDunder(mapping, "__getitem__", key);
+        return r != null ? r : subscrGet(mapping, key);
+    }
+
+    /** A '*' width or precision: must be an int (bool included). */
+    private static long starArg(Object v, String what) {
+        Object u = unwrapNative(v);
+        if (!isInt(u)) throw PyException.typeError("* wants int");
+        BigInteger b = toBig(u);
+        if (b.bitLength() > 31) throw PyException.valueError(what + " too big");
+        return b.longValue();
+    }
+
+    /** Integer operand of %d/%i/%u (an int, a float truncated toward zero like
+     *  int(), or anything with __int__/__index__) or %x/%X/%o (an int or
+     *  __index__ only: a float is a TypeError, as in CPython 3.5+). */
+    private static BigInteger formatIntArg(Object arg, char conv, PyHooks h) {
+        boolean decimal = conv == 'd' || conv == 'i' || conv == 'u';
+        String dunder = decimal ? "__int__" : "__index__";
+        Object r = h.callDunder(arg, dunder);
+        if (r == null && decimal) r = h.callDunder(arg, dunder = "__index__");
+        if (r != null) {
+            Object ri = unwrapNative(r);
+            if (!isInt(ri)) throw PyException.typeError(dunder + " returned non-int (type " + net.mpy.vm.StdLib.typeName(r) + ")");
+            return toBig(ri);
+        }
+        Object v = unwrapNative(arg);
+        if (isInt(v)) return toBig(v);
+        if (decimal && v instanceof Double) return floatToBig((Double) v);
+        throw PyException.typeError("%" + conv + " format: " + (decimal ? "a number" : "an integer")
+                + " is required, not " + net.mpy.vm.StdLib.typeName(arg));
+    }
+
+    /** Float operand of %e/%f/%g: a float, an int (OverflowError past the float
+     *  range) or anything with __float__. */
+    private static double formatFloatArg(Object arg, PyHooks h) {
+        Object r = h.callDunder(arg, "__float__");
+        if (r != null) {
+            Object rf = unwrapNative(r);
+            if (!(rf instanceof Double)) throw PyException.typeError("__float__ returned non-float (type " + net.mpy.vm.StdLib.typeName(r) + ")");
+            return (Double) rf;
+        }
+        Object v = unwrapNative(arg);
+        if (v instanceof Double) return (Double) v;
+        if (isInt(v)) return intToDouble(v);
+        if (v instanceof PyObj.Complex) throw PyException.typeError("can't convert complex to float");
+        throw PyException.typeError("a float is required");
+    }
+
+    /** int -> float, raising OverflowError (not inf) past the float range. */
+    public static double intToDouble(Object v) {
+        double d = toDouble(v);
+        if (Double.isInfinite(d)) throw new PyException("OverflowError", "int too large to convert to float");
+        return d;
+    }
+
+    /** %c operand: a one-character str, or an int code point (or __index__) in
+     *  range(0x110000). */
+    private static String formatCharArg(Object arg, PyHooks h) {
+        Object v = unwrapNative(arg);
+        if (v instanceof String) {
+            String s = (String) v;
+            if (s.isEmpty() || s.codePointCount(0, s.length()) != 1) throw PyException.typeError("%c requires int or char");
+            return s;
+        }
+        Object r = h.callDunder(arg, "__index__");
+        if (r != null) v = unwrapNative(r);
+        if (!isInt(v)) throw PyException.typeError("%c requires int or char");
+        BigInteger cp = toBig(v);
+        if (cp.signum() < 0 || cp.compareTo(BigInteger.valueOf(0x10FFFF)) > 0)
+            throw new PyException("OverflowError", "%c arg not in range(0x110000)");
+        return new String(Character.toChars(cp.intValue()));
+    }
+
+    /** int(float) per CPython: exact (no decimal round trip, so int(1e23) is
+     *  99999999999999991611392), truncating toward zero; NaN raises ValueError
+     *  and +-inf OverflowError. */
+    public static BigInteger floatToBig(double d) {
+        if (Double.isNaN(d)) throw PyException.valueError("cannot convert float NaN to integer");
+        if (Double.isInfinite(d)) throw new PyException("OverflowError", "cannot convert float infinity to integer");
+        return new java.math.BigDecimal(d).toBigInteger();
+    }
+
     private static PyObj.PyList repeatList(PyObj.PyList a, int n) {
         checkAlloc((long) a.items.size() * Math.max(n, 0), 8);
         List<Object> r = new ArrayList<>();

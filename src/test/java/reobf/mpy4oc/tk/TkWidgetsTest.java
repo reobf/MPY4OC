@@ -109,8 +109,8 @@ class TkWidgetsTest {
         assertNotEquals(old, updated); assertEquals("中文 🌍", old.items.get(0).text); assertTrue(changes.get() > 0);
         assertThrows(UnsupportedOperationException.class, () -> updated.items.clear());
         TkTarget target = new TkTarget(0, 1, 64, 2, "display", 1);
-        TkScene before = new TkScene(320, 240, 0, "Title", true, old);
-        TkScene after = new TkScene(320, 240, 0, "Title", true, updated);
+        TkScene before = new TkScene(320, 240, 0, true, old);
+        TkScene after = new TkScene(320, 240, 0, true, updated);
         TkClientState client = new TkClientState(new TkPackets.OpenGui(target, 1, before));
         ByteBuf bytes = Unpooled.buffer();
         try {
@@ -150,7 +150,7 @@ class TkWidgetsTest {
         assertThrows(IllegalArgumentException.class, () -> new TkDisplayList.Item(1, TkWidget.Kind.FRAME, rect,
                 new TkRect(0, 0, 11, 10), 0, 0, 0, 0, 0, 0, ""));
         tree.clear();
-        for (int i = 0; i < TkDisplayList.MAX_ITEMS; i++) new Frame(tree.root());
+        for (int i = 0; i < TkTree.MAX_WIDGETS; i++) new Frame(tree.root());
         assertThrows(IllegalArgumentException.class, () -> new Frame(tree.root()));
     }
 
@@ -162,7 +162,7 @@ class TkWidgetsTest {
         assertEquals(-16400, display.items.get(0).textY);
         ByteBuf bytes = Unpooled.buffer();
         try {
-            TkScene scene = new TkScene(200, 120, 0, "Title", true, display);
+            TkScene scene = new TkScene(200, 120, 0, true, display);
             new TkPackets.OpenGui(new TkTarget(0, 0, 64, 0, "display", 1), 1, scene).toBytes(bytes);
             TkPackets.OpenGui decoded = new TkPackets.OpenGui(); decoded.fromBytes(bytes);
             assertEquals(scene, decoded.scene);

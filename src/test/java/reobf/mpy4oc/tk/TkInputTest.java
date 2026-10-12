@@ -34,11 +34,11 @@ class TkInputTest {
     @Test void pasteReplacesSelectionAtomicallyAndDoesNotEraseOnRejectedInput() {
         Entry e = entry("x".repeat(1024)); e.selectionRange(10, 11);
         e.paste("中"); assertEquals(1024, e.length()); assertEquals("x", e.selectedText());
-        e.selectionRange(10, 13); e.paste("中😀");
+        e.selectionRange(10, 13); e.cursor(13); e.paste("中😀");   // a player's selection ends at the cursor
         assertEquals(1022, e.length()); assertEquals('中', e.text().charAt(10)); assertFalse(e.selectionPresent());
         e.text("abc"); e.selectionRange(1, 2); e.paste("\u0000\ud800");
         assertEquals("abc", e.text()); assertEquals("b", e.selectedText());
-        e.paste("甲\n乙"); assertEquals("a甲 乙c", e.text());
+        e.cursor(2); e.paste("甲\n乙"); assertEquals("a甲 乙c", e.text());
     }
 
     @Test void readonlyStillSelectsAndCopiesButCannotCutOrPaste() {
@@ -51,7 +51,7 @@ class TkInputTest {
 
     @Test void draggingIsCapturedPerViewerAndStationaryEdgeDragsScroll() {
         Entry e = entry("0123456789".repeat(12)); e.textSize(8, 1); TkRect r = e.bounds();
-        int start = r.x + e.padx + e.border;
+        int start = r.x + e.insetLeft();
         e.tree.pointerDown(11, start, r.y + 5);
         assertNull(e.tree.pointerDrag(12, start + 20, r.y + 5)); assertFalse(e.selectionPresent());
         e.tree.pointerDrag(11, r.x + r.width + 4, r.y + 5); int oldScroll = e.scrollX;
@@ -93,7 +93,12 @@ class TkInputTest {
         pointer.tick(); assertEquals(1, packets.size(), "stationary hover sends no packets");
         pointer.press(0); pointer.sample(-25, 10, false, 1); pointer.release(0);
         assertEquals(TkPackets.InputEvent.DRAG, packets.get(2).kind); assertEquals(-25, packets.get(2).x);
-        assertEquals(TkPackets.InputEvent.MOUSE_UP, packets.get(3).kind); pointer.tick(); assertEquals(4, packets.size());
+        assertEquals(TkPackets.InputEvent.MOUSE_UP, packets.get(3).kind);
+        pointer.tick(); assertEquals(5, packets.size(), "released outside: one motion tells the server the pointer left");
+        assertEquals(TkPackets.InputEvent.MOTION, packets.get(4).kind); assertEquals(-25, packets.get(4).x);
+        pointer.sample(-40, 10, false, 0); pointer.tick(); assertEquals(5, packets.size(), "only one");
+        pointer.sample(30, 10, true, 0); pointer.tick(); pointer.sample(400, 10, false, 0); pointer.tick();
+        assertEquals(7, packets.size(), "back inside and out again: another");
     }
 
     @Test void onlyLatestRequestedClipboardReplyMayBeAcceptedOnce() {

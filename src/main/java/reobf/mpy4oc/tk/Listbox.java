@@ -13,11 +13,11 @@ public final class Listbox extends TkWidget {
     long selectionVersion;
     String selectmode = "browse";
     private String lastX = "", lastY = "";
-    public Listbox(Frame parent) { super(parent.tree, parent, Kind.LISTBOX); background = 0xFFFFFF; border = 1; padx = pady = 2; }
+    public Listbox(Frame parent) { super(parent.tree, parent, Kind.LISTBOX); background = 0xFFFFFF; border = 1; padLeft = padTop = padRight = padBottom = 2; relief = Relief.SUNKEN; }
     public int size() { return rows.size(); }
     int maxWidth() { return widths.isEmpty() ? 0 : widths.lastKey(); }
-    int page() { return Math.max(1, (bounds.height - 2 * (pady + border)) / TkFontMetrics.LINE_HEIGHT); }
-    int pixels() { return Math.max(1, bounds.width - 2 * (padx + border)); }
+    int page() { return Math.max(1, (bounds.height - insetHeight()) / TkFontMetrics.LINE_HEIGHT); }
+    int pixels() { return Math.max(1, bounds.width - insetWidth()); }
     private void width(String row, int delta) {
         int key = TkFontMetrics.width(row), count = widths.getOrDefault(key, 0) + delta;
         if (count == 0) widths.remove(key); else widths.put(key, count);
@@ -80,7 +80,7 @@ public final class Listbox extends TkWidget {
         int a = Math.max(0, first), b = Math.min(size() - 1, last);
         if (a <= b) { selected.set(a, b + 1, value); tree.changed(false); }
     }
-    public int nearest(int localY) { bounds(); return clamp(top + Math.floorDiv(localY - pady - border, TkFontMetrics.LINE_HEIGHT)); }
+    public int nearest(int localY) { bounds(); return clamp(top + Math.floorDiv(localY - insetTop(), TkFontMetrics.LINE_HEIGHT)); }
     public void see(int index) {
         bounds(); int at = clamp(index);
         if (at < top) top = at; else if (at >= top + page()) top = at - page() + 1;
@@ -134,7 +134,7 @@ public final class Listbox extends TkWidget {
         if (size() == 0 || selectmode.equals("single") || selectmode.equals("multiple")) return;
         if (y < bounds.y) top = Math.max(0, top - 1); else if (y >= bounds.y + bounds.height) top++;
         clampScroll();
-        int at = clamp(top + Math.floorDiv(y - bounds.y - pady - border, 16)); BitSet before = (BitSet) selected.clone();
+        int at = clamp(top + Math.floorDiv(y - bounds.y - insetTop(), 16)); BitSet before = (BitSet) selected.clone();
         active = at; selected.clear(); selected.set(selectmode.equals("extended") ? Math.min(anchor, at) : at, selectmode.equals("extended") ? Math.max(anchor, at) + 1 : at + 1);
         if (!before.equals(selected)) selectionVersion++; tree.changed(false);
     }
@@ -143,6 +143,6 @@ public final class Listbox extends TkWidget {
         int at = active;
         if (code == 200) at--; else if (code == 208) at++; else if (code == 199) at = 0; else if (code == 207) at = size() - 1;
         else if (code == 201) at -= page(); else if (code == 209) at += page(); else if (code != 57) return;
-        at = clamp(at); see(at); press(bounds.y + pady + border + (at - top) * 16 + 1, modifiers);
+        at = clamp(at); see(at); press(bounds.y + insetTop() + (at - top) * 16 + 1, modifiers);
     }
 }

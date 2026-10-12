@@ -1,49 +1,81 @@
-# threading: a cooperative re-creation of Python's threading API on top of this
-# VM's single-threaded, stackful-coroutine scheduler (jasyncio). There is NO real
-# OS thread and NO preemptive time-slicing: a "thread" is an ordinary function
-# scheduled as a cooperative task and driven by the VM's per-step op budget, so
-# threads interleave at instruction-budget boundaries and at explicit yield points
-# (sleep, a contended Lock). The main frame acts as the non-daemon main thread;
-# Thread.join() blocks it (via jasyncio.run) until the target task settles. Being
-# pure Python over jasyncio, threads/locks are captured by VM snapshots.
+# threading: Python's threading API on this VM's threads. A thread is a generator the VM
+# runs as a task of its own (__thread_start): the VM shares each step's instruction budget
+# between the main frame and the runnable threads and switches between them when a share
+# runs out, so threads interleave even when they never wait. There is one execution line,
+# no parallelism. Waiting (time.sleep, a contended Lock, join from a thread) is a poll each
+# tick; join() from the main frame parks it in the VM (__thread_wait), so the threads get
+# its share. Being plain Python over the VM's tasks, threads and locks are saved with it.
 #
-# Differences from CPython threading:
-#  - no preemption: a thread that never hits an instruction-budget boundary or a
-#    yield point runs to completion before another thread advances;
-#  - no real parallelism (single execution line);
-#  - Lock is a cooperative busy-wait flag, not owned by a thread;
-#  - subset API: Thread(target/name/args/kwargs/daemon), start, join, is_alive,
-#    name, daemon, run; Lock (acquire/release/locked/context manager);
-#    current_thread(), active_count(), get_ident() (approximate).
+# As CPython: Thread(group, target, name, args, kwargs, daemon) with names Thread-N (target),
+# start/run/join/is_alive, name/daemon/ident, a daemon by default when started by a daemon
+# (an MPYOS background job's runner counts as its program's main thread), an exception that
+# leaves run() is printed as "Exception in thread NAME:" with its traceback, SystemExit ends
+# the thread quietly. Lock is not owned by a thread (as CPython's primitive lock); RLock is
+# a plain Lock here.
 
-import jasyncio
 import time
+import _program
 
 _counter = [0]          # for default Thread-N names
 _active = []            # started, not-yet-finished Thread objects
 _ident = [1]            # monotonic id source; main thread is 1
 
+# CPython: threading.ThreadError is _thread.error, i.e. RuntimeError.
+ThreadError = RuntimeError
 
-class ThreadError(Exception):
-    pass
+
+def _here():
+    # The thread running now (its generator), or None on the main frame.
+    try:
+        return __thread_current()
+    except NameError:    # a VM without threads
+        return None
+
+
+def _run(thread):
+    # A thread's own generator: it starts in the VM's next round, as a new thread does.
+    yield
+    thread._bootstrap()
+
+
+def _await_thread(thread):
+    # What the main frame waits on in join(): ends when the thread does.
+    spin = 0
+    while not thread._done:
+        if spin < 2:
+            spin += 1
+            yield
+        else:
+            yield __thread_sleep(50)
 
 
 class Thread:
+    _program_main = False   # set on an MPYOS job's runner (see __init__)
+
     def __init__(self, group=None, target=None, name=None, args=(), kwargs=None,
                  daemon=None):
         if group is not None:
-            raise ValueError("group argument must be None for now")
+            raise AssertionError("group argument must be None for now")
         self._target = target
         self._args = args
         self._kwargs = kwargs if kwargs is not None else {}
         if name is not None:
-            self._name = name
+            self._name = str(name)
         else:
             _counter[0] += 1
             self._name = "Thread-" + str(_counter[0])
-        self._daemon = bool(daemon) if daemon is not None else False
-        self._task = None
+            target_name = getattr(target, "__name__", None)
+            if target_name:
+                self._name += " (" + str(target_name) + ")"
+        if daemon is None:
+            # As CPython: a new thread is a daemon if the thread starting it is. The runner
+            # of an MPYOS background job counts as its program's main thread.
+            creator = current_thread()
+            daemon = creator._daemon and not creator._program_main
+        self._daemon = bool(daemon)
+        self._gen = None
         self._started = False
+        self._done = False
         self._ident = None
 
     # --- run/target ---------------------------------------------------------
@@ -55,65 +87,80 @@ class Thread:
 
     def start(self):
         if self._started:
-            raise ThreadError("threads can only be started once")
+            raise RuntimeError("threads can only be started once")
         self._started = True
         _ident[0] += 1
         self._ident = _ident[0]
         _active.append(self)
-        # schedule run() as a cooperative task; returns immediately
-        self._task = jasyncio.to_thread(self.run)
+        # The program the thread runs for: its creator's (see _program).
+        self._program = _program.current()
+        _program._threads.append(self)
+        gen = _run(self)
+        self._gen = gen
+        _program.adopt(gen)
+        __thread_start(gen)
         if self._daemon:
             # daemon threads must not keep the program alive on their own
             finishDaemonOnExit()
 
+    def _bootstrap(self):
+        try:
+            self.run()
+        except SystemExit:
+            pass
+        except BaseException as exc:
+            # threading.excepthook: the thread's name, then the traceback.
+            print("Exception in thread " + self._name + ":")
+            __thread_print_exc(exc)
+        finally:
+            # As CPython: a finished thread leaves the active list and drops its target
+            # (whose closure may hold a lot), whether or not anyone joins it.
+            self._target = self._args = self._kwargs = None
+            for registry in (_active, _program._threads):
+                if self in registry:
+                    registry.remove(self)
+            self._done = True
+            _program.forget(self._gen)
+
     def join(self, timeout=None):
         if not self._started:
-            raise ThreadError("cannot join thread before it is started")
-        task = self._task
-        if timeout is None:
-            # block until the task settles
-            def _wait():
-                _spin = 0
-                while not task.done():
-                    if _spin < 2:
-                        _spin += 1
-                        yield
-                    else:
-                        yield __jasyncio_make_sleep(50)
-            jasyncio.run(_wait())
-        else:
-            # bounded wait: stop after `timeout` seconds of wall-clock
-            deadline_ms = int(timeout * 1000)
-            def _wait_to():
-                elapsed = 0
-                step = 1
-                while not task.done() and elapsed < deadline_ms:
-                    yield __jasyncio_make_sleep(step)
-                    elapsed += step
-            jasyncio.run(_wait_to())
-        if task.done() and self in _active:
-            _active.remove(self)
+            raise RuntimeError("cannot join thread before it is started")
+        if self is current_thread():
+            raise RuntimeError("cannot join current thread")
+        if self._done:
+            return
+        if timeout is None and _here() is None:
+            # The main frame waits in the VM: its share of each step goes to the threads.
+            try:
+                __thread_wait(_await_thread(self))
+                return
+            except RuntimeError:
+                pass             # called from inside a generator on the main frame: poll
+        deadline = None if timeout is None else time.ticks_add(time.ticks_ms(), int(max(0, timeout) * 1000))
+        while not self._done:
+            if deadline is not None and time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+                return
+            time.sleep(0.05)
         # join() returns None; per docs, callers use is_alive() to detect timeout
 
     def is_alive(self):
-        return self._started and self._task is not None and not self._task.done()
+        return self._started and not self._done
 
     # --- name / daemon / ident ---------------------------------------------
-    # NOTE: CPython exposes name/daemon as properties. This VM's property lacks
-    # .setter, so we expose them as plain attributes plus getName/setName and
-    # isDaemon/setDaemon (the classic threading API) for compatibility.
+    # NOTE: CPython exposes name/daemon as properties with setters. This VM's property
+    # lacks .setter, so setName/setDaemon (the classic threading API) set them.
     def getName(self):
         return self._name
 
     def setName(self, value):
-        self._name = value
+        self._name = str(value)
 
     def isDaemon(self):
         return self._daemon
 
     def setDaemon(self, value):
         if self._started:
-            raise ThreadError("cannot set daemon status of active thread")
+            raise RuntimeError("cannot set daemon status of active thread")
         self._daemon = bool(value)
 
     @property
@@ -129,15 +176,19 @@ class Thread:
         return self._ident
 
     def __repr__(self):
-        status = "started" if self._started else "initial"
-        if self._started and self._task is not None and self._task.done():
-            status = "stopped"
-        return "<Thread(" + self._name + ", " + status + ")>"
+        status = "initial"
+        if self._started:
+            status = "stopped" if self._done else "started"
+        if self._daemon:
+            status += " daemon"
+        if self._ident is not None:
+            status += " " + str(self._ident)
+        return "<" + type(self).__name__ + "(" + self._name + ", " + status + ")>"
 
 
 class _MainThread(Thread):
     def __init__(self):
-        Thread.__init__(self, name="MainThread")
+        Thread.__init__(self, name="MainThread", daemon=False)
         self._started = True
         self._ident = 1
 
@@ -146,15 +197,17 @@ _main = _MainThread()
 
 
 def current_thread():
-    # Ask the VM which pool task we are running inside and match it against the
-    # live Thread objects; the main frame (or any non-thread task) maps to the
-    # main-thread object.
-    cur = __jasyncio_current_coro()
+    # Ask the VM which thread is running and match it against the live Thread objects; the
+    # main frame (or a VM task that is not a Thread) maps to the main-thread object.
+    cur = _here()
     if cur is not None:
         for t in _active:
-            if t._task is not None and cur is t._task._driver:
+            if cur is t._gen:
                 return t
     return _main
+
+
+currentThread = current_thread
 
 
 def active_count():
@@ -164,6 +217,9 @@ def active_count():
         if t.is_alive():
             n += 1
     return n
+
+
+activeCount = active_count
 
 
 def enumerate():
@@ -187,20 +243,21 @@ class Lock:
     # A cooperative primitive lock. The flag lives in a 1-element list so the VM's
     # atomic __thread_test_and_set can check-and-set it in a single native step
     # (no instruction-boundary interleaving), making acquire race-free even though
-    # threads are preempted at op-budget boundaries. acquire() busy-waits on that
-    # atomic primitive, letting the scheduler interleave other threads until the
-    # lock is free. Not owned by a particular thread, matching CPython's primitive.
+    # threads are preempted at op-budget boundaries. acquire() polls that primitive,
+    # sleeping a tick between tries so the holder gets the budget. Not owned by a
+    # particular thread, matching CPython's primitive lock.
     def __init__(self):
         self._flag = [False]
 
-    def acquire(self, blocking=True):
+    def acquire(self, blocking=True, timeout=-1):
         if not blocking:
+            if timeout != -1:
+                raise ValueError("can't specify a timeout for a non-blocking call")
             return __thread_test_and_set(self._flag)
-        # Cooperative blocking acquire: retry the atomic test-and-set; while
-        # contended, sleep a tick per round -- in mpyos time.sleep yields the
-        # tick, so the holder gets budget and we do not burn ours spinning
-        # (in a bare VM sleep is a no-op and this degrades to the old spin).
+        deadline = None if timeout is None or timeout < 0 else time.ticks_add(time.ticks_ms(), int(timeout * 1000))
         while not __thread_test_and_set(self._flag):
+            if deadline is not None and time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+                return False
             time.sleep(0.05)
         return True
 

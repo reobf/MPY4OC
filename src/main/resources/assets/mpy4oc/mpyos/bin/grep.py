@@ -6,10 +6,11 @@ if len(args) < 2:
 else:
     pattern = args[0]
     path = sh.resolve(args[1])
-    data = sh.fs.read_file(path)
+    data = sh.fs.read_bytes(path)
     if data is None:
         tty.print("grep: no such file: " + path)
     else:
+        data = data.decode("utf-8", "replace")
         num = 0
         for line in data.split("\n"):
             num += 1

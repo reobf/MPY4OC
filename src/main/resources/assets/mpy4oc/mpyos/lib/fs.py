@@ -93,21 +93,9 @@ class Filesystem:
     # -- whole-file convenience --
     def read_file(self, path):
         """Read a whole file as text, or None if it does not exist."""
-        if not self.exists(path):
-            return None
-        h = self.open(path, "r")
-        try:
-            chunks = []
-            while True:
-                chunk = self._read_chunk(h, 4096)
-                if chunk is None:
-                    break
-                if isinstance(chunk, bytes):
-                    chunk = chunk.decode("utf-8")
-                chunks.append(chunk)
-            return "".join(chunks)
-        finally:
-            self.close(h)
+        # Decoded once at the end: a multi-byte character may straddle two chunks.
+        data = self.read_bytes(path)
+        return None if data is None else data.decode("utf-8")
 
     def read_bytes(self, path):
         if not self.exists(path):

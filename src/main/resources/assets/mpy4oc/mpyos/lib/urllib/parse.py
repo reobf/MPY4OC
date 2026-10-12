@@ -51,7 +51,7 @@ def unquote(s):
             except ValueError:
                 pass
         out.append(b"%" + part.encode())
-    return b"".join(out).decode()
+    return b"".join(out).decode("utf-8", "replace")   # as CPython's unquote
 
 
 def unquote_plus(s):

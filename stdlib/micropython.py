@@ -5,7 +5,7 @@ scheduler; the heap ones do not, because we run on the JVM and have no heap of o
 own to lock. Rather than pretend, the no-ops below say so.
 """
 
-import jasyncio as _a
+import _program
 
 
 _pending = [0]
@@ -23,15 +23,20 @@ def schedule(func, arg):
     if _pending[0] >= 8:
         raise RuntimeError("schedule queue full")
     _pending[0] += 1
-    _a._spawn(_run_scheduled(func, arg))
+    task = _run_scheduled(func, arg)
+    _program.adopt(task)             # it runs for the caller's program
+    __thread_start(task)
 
 
 def _run_scheduled(func, arg):
-    # A one-shot coroutine: yield once so the callback lands on the NEXT scheduling
-    # round (schedule() must not run it inline), then invoke it.
-    yield
-    _pending[0] -= 1
-    func(arg)
+    # A one-shot thread: yield once so the callback lands on the NEXT scheduling round
+    # (schedule() must not run it inline), then invoke it.
+    try:
+        yield
+        _pending[0] -= 1
+        func(arg)
+    finally:
+        _program.forget(__thread_current())
 
 
 def heap_lock():

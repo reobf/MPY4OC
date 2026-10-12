@@ -29,6 +29,8 @@ public final class TkSurfaceClient implements IResourceManagerReloadListener {
         double distance;
         TkClientState state;
         TkSurfaceTexture texture;
+        /** Image textures, kept while the lease lives (the server sends each image once). */
+        final TkImageCache images=new TkImageCache();
         boolean resync;
         Entry(TileTkDisplay tile,double distance){this.tile=tile;this.distance=distance;}
     }
@@ -68,14 +70,19 @@ public final class TkSurfaceClient implements IResourceManagerReloadListener {
             e.state=new TkClientState(new TkPackets.OpenGui(message.target,message.revision,message.scene));
         } else if(!e.state.accept(message))e.resync=true;
         if(message.isFull())e.resync=false;
+        e.images.prune(e.state.scene());
+    }
+    public static void image(TkPackets.SurfaceImageData message) {
+        Entry e=find(message.target);if(e==null||!enabled())return;
+        if(!e.images.accept(message))e.resync=true;
     }
     public static void end(TkPackets.SurfaceEnd message) {
         Entry e=find(message.target);if(e==null)return;
-        dispose(e);e.state=null;e.resync=false;e.nonce=nextNonce();e.nextRequest=tick+100;
+        dispose(e);e.images.dispose();e.state=null;e.resync=false;e.nonce=nextNonce();e.nextRequest=tick+100;
     }
     private static void dispose(Entry e){if(e.texture!=null){e.texture.dispose();e.texture=null;}}
     private static void reset(World next) {
-        for(Entry e:entries.values())dispose(e);entries.clear();world=next;
+        for(Entry e:entries.values()){dispose(e);e.images.dispose();}entries.clear();world=next;
     }
     @SubscribeEvent public void config(ConfigChangedEvent.OnConfigChangedEvent event) {
         if(MyMod.MODID.equals(event.modID))Config.loadFromConfig();
@@ -89,11 +96,11 @@ public final class TkSurfaceClient implements IResourceManagerReloadListener {
         Iterator<Entry> iterator=entries.values().iterator();
         while(iterator.hasNext()) {
             Entry e=iterator.next();
-            boolean valid=world!=null&&mc.thePlayer!=null&&!e.tile.isInvalid()&&world.blockExists(e.tile.xCoord,e.tile.yCoord,e.tile.zCoord)
+            boolean valid=world!=null&&mc.thePlayer!=null&&!e.tile.isInvalid()&&!e.tile.isSlave()&&world.blockExists(e.tile.xCoord,e.tile.yCoord,e.tile.zCoord)
                     &&world.getTileEntity(e.tile.xCoord,e.tile.yCoord,e.tile.zCoord)==e.tile;
-            double distance=valid?mc.thePlayer.getDistanceSq(e.tile.xCoord+.5,e.tile.yCoord+.5,e.tile.zCoord+.5):Double.POSITIVE_INFINITY;
+            double distance=valid?e.tile.distanceSq(mc.thePlayer):Double.POSITIVE_INFINITY;
             if(!enabled()||!valid||tick-e.seen>20||!TkSurfacePolicy.within(distance,Config.tkSurfaceDistance)) {
-                request(e,TkPackets.SurfaceRequest.CLOSE);dispose(e);iterator.remove();continue;
+                request(e,TkPackets.SurfaceRequest.CLOSE);dispose(e);e.images.dispose();iterator.remove();continue;
             }
             e.distance=distance;
             if(requests<2&&tick>=e.nextRequest&&(e.resync&&tick-e.lastRequest>=20||tick-e.lastRequest>=TkSurfacePolicy.HEARTBEAT_TICKS)) {
@@ -112,12 +119,13 @@ public final class TkSurfaceClient implements IResourceManagerReloadListener {
         candidates.sort(Comparator.comparingLong(e->e.lastPaint));
         for(Entry e:candidates) {
             if(!keep.contains(e)||paints>=TkSurfacePolicy.UPDATES_PER_FRAME)continue;
-            int size=TkSurfacePolicy.resolution(e.distance);
-            if(e.texture!=null&&e.texture.revision==e.state.revision()&&e.texture.size==size&&e.texture.generation==generation)continue;
+            int size=TkSurfacePolicy.resolution(e.distance,Math.max(e.tile.group().width,e.tile.group().height));
+            if(e.texture!=null&&e.texture.revision==e.state.revision()&&e.texture.size==size&&e.texture.generation==generation
+                    &&e.texture.imageGeneration==e.images.generation)continue;
             if(tick-e.lastPaint<TkSurfacePolicy.interval(e.distance))continue;
             try {
                 if(e.texture==null)e.texture=new TkSurfaceTexture();
-                e.texture.update(e.state.scene(),e.state.revision(),size,generation);e.lastPaint=tick;paints++;
+                e.texture.update(e.state.scene(),e.state.revision(),size,generation,e.images);e.lastPaint=tick;paints++;
             } catch(RuntimeException error) {
                 failed=true;MyMod.LOG.warn("Tk surface rendering disabled until resource reload; GUI remains available",error);
                 for(Entry cached:entries.values())dispose(cached);return;

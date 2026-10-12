@@ -234,12 +234,50 @@ public final class PyObj {
             else if (cp == '\n') sb.append("\\n");
             else if (cp == '\r') sb.append("\\r");
             else if (cp == '\t') sb.append("\\t");
-            else if (cp >= 0x20 && cp < 0x7f) sb.appendCodePoint(cp);
-            else if (cp < 0x100) sb.append(String.format("\\x%02x", cp));
-            else if (cp < 0x10000) sb.append(String.format("\\u%04x", cp));
-            else sb.append(String.format("\\U%08x", cp));
+            else if (cp >= 0x20 && cp < 0x7f || cp >= 0x80 && isPrintable(cp)) sb.appendCodePoint(cp);
+            else escapeCodePoint(sb, cp);
         }
         return sb.append(q).toString();
+    }
+
+    /** CPython's str.isprintable() per code point: not a control, format,
+     *  surrogate, private-use, unassigned or separator character (space aside). */
+    private static boolean isPrintable(int cp) {
+        switch (Character.getType(cp)) {
+            case Character.CONTROL: case Character.FORMAT: case Character.SURROGATE:
+            case Character.PRIVATE_USE: case Character.UNASSIGNED:
+            case Character.LINE_SEPARATOR: case Character.PARAGRAPH_SEPARATOR:
+                return false;
+            case Character.SPACE_SEPARATOR:
+                return cp == ' ';
+            default:
+                return true;
+        }
+    }
+
+    private static void escapeCodePoint(StringBuilder sb, int cp) {
+        String hex = Integer.toHexString(cp);
+        int digits = cp < 0x100 ? 2 : cp < 0x10000 ? 4 : 8;
+        sb.append(cp < 0x100 ? "\\x" : cp < 0x10000 ? "\\u" : "\\U");
+        for (int k = hex.length(); k < digits; k++) sb.append('0');
+        sb.append(hex);
+    }
+
+    /** ascii(): a repr() with every non-ASCII character escaped. */
+    public static String asciiEscape(String repr) {
+        StringBuilder sb = null;
+        for (int i = 0; i < repr.length(); ) {
+            int cp = repr.codePointAt(i);
+            int next = i + Character.charCount(cp);
+            if (cp >= 0x80) {
+                if (sb == null) sb = new StringBuilder(repr.length() + 8).append(repr, 0, i);
+                escapeCodePoint(sb, cp);
+            } else if (sb != null) {
+                sb.append((char) cp);
+            }
+            i = next;
+        }
+        return sb == null ? repr : sb.toString();
     }
 
     private static String reprBytes(byte[] b) {
@@ -316,6 +354,37 @@ public final class PyObj {
         @Override public String toString() { return "<cell>"; }
     }
 
+    /** The shortest decimal that reads back as v (positive, finite), and of
+     *  those the nearest to v -- Python's repr digits. Double.toString can't be
+     *  used as is: it always keeps a fraction digit (4.9E-324 where Python has
+     *  5e-324) and before JDK 19 sometimes gave extra digits
+     *  (2.82879384806159008E17), so it only bounds the search. */
+    private static java.math.BigDecimal shortestDecimal(double v) {
+        java.math.BigDecimal exact = new java.math.BigDecimal(v);
+        java.math.BigDecimal best = new java.math.BigDecimal(Double.toString(v));
+        // If any p-digit decimal round-trips, so does the nearest p-digit
+        // decimal below or above v; so stop at the first length that fails.
+        for (int p = best.stripTrailingZeros().precision() - 1; p >= 1; p--) {
+            java.math.BigDecimal c = roundTrip(exact, p, v);
+            if (c == null) break;
+            best = c;
+        }
+        // the nearest such decimal (old JDKs' digits weren't always the nearest)
+        java.math.BigDecimal nearest = roundTrip(exact, best.stripTrailingZeros().precision(), v);
+        return (nearest != null ? nearest : best).stripTrailingZeros();
+    }
+
+    private static final java.math.RoundingMode[] NEAREST_THEN_NEIGHBOURS = {
+            java.math.RoundingMode.HALF_EVEN, java.math.RoundingMode.DOWN, java.math.RoundingMode.UP };
+
+    private static java.math.BigDecimal roundTrip(java.math.BigDecimal exact, int digits, double v) {
+        for (java.math.RoundingMode m : NEAREST_THEN_NEIGHBOURS) {
+            java.math.BigDecimal c = exact.round(new java.math.MathContext(digits, m));
+            if (c.doubleValue() == v) return c;
+        }
+        return null;
+    }
+
     /** CPython/MicroPython-style repr of a float: shortest round-trip digits,
      *  plain decimal for 1e-4..1e16, else scientific like {@code 1e+20} / {@code 2e-05}. */
     public static String floatRepr(double v) {
@@ -324,8 +393,7 @@ public final class PyObj {
         String sign = "";
         if (v < 0 || (v == 0.0 && 1 / v < 0)) { sign = "-"; v = -v; }
         if (v == 0.0) return sign + "0.0";
-        // Java's Double.toString gives the shortest round-trip digits; re-format them.
-        java.math.BigDecimal bd = new java.math.BigDecimal(Double.toString(v));
+        java.math.BigDecimal bd = shortestDecimal(v);
         String digits = bd.unscaledValue().toString();
         int pointPos = digits.length() - bd.scale();   // value = 0.<digits> * 10^pointPos
         int end = digits.length();

@@ -303,12 +303,22 @@ class Terminal:
         without the trailing newline, or None on interrupt (Ctrl+D / Ctrl+C on
         empty).
 
+        prompt may be a string or a function that draws it (e.g. a coloured prompt).
+        It is drawn again after listing ambiguous completions.
         complete(text, pos) -- optional Tab callback: given the current line and
         cursor index, return a list of full-line candidates, each a (new_text,
-        new_pos) tuple; empty list = no completion. One candidate: applied. Many:
-        the candidates' common prefix is applied and names are listed below."""
-        if prompt:
-            self.write(prompt)
+        new_pos, display_name) tuple (display_name is optional); empty list = no
+        completion. One candidate: applied. Many:
+        the candidates' common prefix is applied and names are listed below.
+        The first candidate may have a fourth item (shared_text, shared_pos) to
+        specify the common replacement when quoting needs more than a string prefix."""
+        def write_prompt():
+            if callable(prompt):
+                prompt()
+            elif prompt:
+                self.write(prompt)
+
+        write_prompt()
 
         buf = []          # list of characters
         pos = 0           # cursor index within buf
@@ -445,7 +455,7 @@ class Terminal:
                     buf = []
                     pos = 0
                     redraw()
-            elif ch == 9:          # Tab: completion via the callback
+            elif ch == 9 or code == KEY_TAB:  # OC and remote keyboards may differ in char
                 if complete:
                     try:
                         cands = complete("".join(buf), pos)
@@ -460,14 +470,19 @@ class Terminal:
                         else:
                             # apply the common prefix of all candidates, then list
                             # them below and re-draw the prompt + line
-                            texts = [c[0] for c in cands]
-                            common = texts[0]
-                            for t in texts[1:]:
-                                n = 0
-                                lim = len(common) if len(common) < len(t) else len(t)
-                                while n < lim and common[n] == t[n]:
-                                    n += 1
-                                common = common[:n]
+                            shared = cands[0][3] if len(cands[0]) > 3 else None
+                            if shared is None:
+                                texts = [c[0][:c[1]] for c in cands]
+                                common = texts[0]
+                                for t in texts[1:]:
+                                    n = 0
+                                    lim = min(len(common), len(t))
+                                    while n < lim and common[n] == t[n]:
+                                        n += 1
+                                    common = common[:n]
+                                if len(common) > pos:
+                                    suffix = cands[0][0][cands[0][1]:]
+                                    shared = (common + suffix, len(common))
                             shown = []
                             for c in cands:
                                 w = c[2] if len(c) > 2 else c[0]
@@ -475,12 +490,11 @@ class Terminal:
                             self._newline()
                             self.write("  ".join(shown))
                             self._newline()
-                            if len(common) > len(buf):
-                                buf = list(common)
-                                pos = len(buf)
+                            if shared is not None:
+                                buf = list(shared[0])
+                                pos = shared[1]
                             # re-print the prompt + current line on the new row
-                            if prompt:
-                                self.write(prompt)
+                            write_prompt()
                             start_x = self.x
                             start_y = self.y
                             redraw()

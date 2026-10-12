@@ -1,0 +1,26 @@
+cancel True 1
+inner cancelled ('stop',)
+inner finally
+outer cancelled
+waiter saw the cancellation
+main saw CancelledError ()
+states True True False
+result raises CancelledError
+exception() raises too
+watcher True
+early cancel True
+early True
+swallowed
+kept kept going False 1 0 0
+caught by BaseException CancelledError
+plain cancelled True
+guard cancelled False False
+child done shielded
+shielded result shielded
+child done g1
+gather cancel True
+child cancelled g2
+gather cancelled False
+child cancelled first
+chained cancelled
+chain True True

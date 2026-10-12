@@ -19,6 +19,7 @@ public final class GuiTkDisplay extends GuiScreen {
     private final TkClientState state;
     private final TkCanvasRenderer renderer = new TkCanvasRenderer();
     private final TkPointerInput pointer;
+    private final TkImageCache images = new TkImageCache();
     private boolean serverClosed, resyncPending;
     private int left, top, canvasWidth, canvasHeight;
     private int ticks, resyncTick;
@@ -44,18 +45,17 @@ public final class GuiTkDisplay extends GuiScreen {
         TkScene scene = state.scene();
         renderer.prepare(scene, state.revision());
         double scale = Math.min(1.0, Math.min(Math.max(1, width - 32) / (double) scene.width,
-                Math.max(1, height - 54) / (double) scene.height));
+                Math.max(1, height - 32) / (double) scene.height));
         canvasWidth = Math.max(1, (int) (scene.width * scale));
         canvasHeight = Math.max(1, (int) (scene.height * scale));
         left = (width - canvasWidth) / 2;
-        top = (height - canvasHeight + 18) / 2;
+        // The desktop alone in a thin frame: no title bar and no close box of its own (each
+        // window has one; Esc closes this view, as with any other screen).
+        top = (height - canvasHeight) / 2;
         samplePointer(mouseX, mouseY);
-        drawRect(left - 2, top - 20, left + canvasWidth + 2, top + canvasHeight + 2, 0xFF555555);
-        drawRect(left, top - 18, left + canvasWidth, top, 0xFF303030);
+        drawRect(left - 2, top - 2, left + canvasWidth + 2, top + canvasHeight + 2, 0xFF555555);
         drawRect(left, top, left + canvasWidth, top + canvasHeight, 0xFF000000 | scene.background);
-        renderer.draw(mc, scene, left, top, canvasWidth, canvasHeight);
-        renderer.title(scene.title, left + 4, top - 17, Math.max(0, canvasWidth - 8 - CLOSE_SIZE));
-        drawCloseButton(onClose(mouseX, mouseY));
+        renderer.draw(mc, scene, images, left, top, canvasWidth, canvasHeight);
         super.drawScreen(mouseX, mouseY, partialTick);
     }
 
@@ -63,6 +63,13 @@ public final class GuiTkDisplay extends GuiScreen {
         if (!state.target.equals(update.target)) return;
         if (!state.accept(update) && !resyncPending) requestResync();
         else if (update.isFull()) resyncPending = false;
+        images.prune(state.scene());
+    }
+
+    /** A piece of an image's pixels for this GUI. */
+    public void image(TkPackets.ImageData piece) {
+        if (!state.target.equals(piece.target)) return;
+        if (!images.accept(piece) && !resyncPending) requestResync();
     }
 
     /**
@@ -83,6 +90,7 @@ public final class GuiTkDisplay extends GuiScreen {
     @Override
     public void onGuiClosed() {
         if (repeatSaved) Keyboard.enableRepeatEvents(previousRepeat);
+        images.dispose();
         if (!serverClosed && mc.getNetHandler() != null) TkNetwork.sendToServer(new TkPackets.CloseRequest(state.target));
     }
 
@@ -96,31 +104,8 @@ public final class GuiTkDisplay extends GuiScreen {
         }
     }
 
-    /** Width and height of the title bar's close button, in GUI pixels. */
-    private static final int CLOSE_SIZE = 18;
-
-    private boolean onClose(int x, int y) {
-        return x >= left + canvasWidth - CLOSE_SIZE && x < left + canvasWidth && y >= top - CLOSE_SIZE && y < top;
-    }
-
-    /** A desktop-style close button: a cross that turns red under the pointer. */
-    private void drawCloseButton(boolean hover) {
-        int x0 = left + canvasWidth - CLOSE_SIZE, y0 = top - CLOSE_SIZE;
-        if (hover) drawRect(x0, y0, x0 + CLOSE_SIZE, y0 + CLOSE_SIZE, 0xFFE81123);
-        int color = hover ? 0xFFFFFFFF : 0xFFC8C8C8, cx = x0 + (CLOSE_SIZE - 9) / 2, cy = y0 + (CLOSE_SIZE - 9) / 2;
-        for (int i = 0; i < 9; i++) {
-            drawRect(cx + i, cy + i, cx + i + 1, cy + i + 1, color);
-            drawRect(cx + 8 - i, cy + i, cx + 9 - i, cy + i + 1, color);
-        }
-    }
-
     @Override
     protected void mouseClicked(int x, int y, int button) {
-        if (button == 0 && onClose(x, y)) {
-            // The server decides: WM_DELETE_WINDOW for the application, or close just this GUI.
-            TkNetwork.sendToServer(new TkPackets.WindowClose(state.target));
-            return;
-        }
         if (!inside(x, y)) return;
         samplePointer(x, y);
         if (button == 2) paste();
@@ -151,8 +136,9 @@ public final class GuiTkDisplay extends GuiScreen {
     @Override
     protected void keyTyped(char character, int code) {
         if (code == Keyboard.KEY_ESCAPE) {
-            mc.displayGuiScreen(null);
-            mc.setIngameFocus();
+            // With a Combobox's list open, Esc closes the list (Tk's binding), not this view.
+            if (listOpen()) TkNetwork.sendToServer(new TkPackets.InputEvent(state.target, TkPackets.InputEvent.KEY_DOWN, 0, 0, code, 0, modifiers()));
+            else { mc.displayGuiScreen(null); mc.setIngameFocus(); }
             return;
         }
         int point = character;
@@ -180,6 +166,13 @@ public final class GuiTkDisplay extends GuiScreen {
     public void copyResult(TkPackets.CopyResult reply) {
         String text = state.acceptCopy(reply);
         if (text != null && !text.isEmpty()) setClipboardString(text);
+    }
+
+    /** Whether the scene shows a Combobox's open list: records of the popup layer's parts (TkDisplayList.POPUP_PART). */
+    private boolean listOpen() {
+        for (reobf.mpy4oc.tk.TkDisplayList.Item item : state.scene().display.items)
+            if (item.part >= reobf.mpy4oc.tk.TkDisplayList.POPUP_PART && item.vector == null) return true;
+        return false;
     }
 
     private boolean inside(int x, int y) {

@@ -4,10 +4,12 @@ import net.mpy.bytecode.Opcodes;
 import net.mpy.loader.MpyLoader;
 import net.mpy.loader.MpyModule;
 import net.mpy.qstr.QstrPool;
+import net.mpy.runtime.Format;
 import net.mpy.runtime.Methods;
 import net.mpy.runtime.PyExc;
 import net.mpy.runtime.Ops;
 import net.mpy.runtime.PyException;
+import net.mpy.runtime.PyHooks;
 import net.mpy.runtime.PyObj;
 
 import java.io.ByteArrayInputStream;
@@ -91,7 +93,7 @@ public final class Vm {
      *  when {@link #daemonFinishOnExit} is on and async tasks remain, the main frame
      *  can be done while the VM is not yet finished (it keeps draining tasks). */
     private boolean mainReturned;
-    /** When jasyncio.run(coro) blocks the main frame on a task, this is that task.
+    /** When __thread_wait(gen) blocks the main frame on a task, this is that task.
      *  While non-null, step() drives only async; once the task settles, its result
      *  is delivered to the main frame's TOS (or its exception raised) and this clears. */
     private AsyncTask mainWaitingTask;
@@ -290,7 +292,7 @@ public final class Vm {
             any = true;
         }
         // All pending tasks are asleep. This is an idle wait when something is
-        // actually waiting on them: either the main frame blocked in jasyncio.run,
+        // actually waiting on them: either the main frame blocked in __thread_wait,
         // or the main frame already returned (daemon drain mode).
         return any && (mainWaitingTask != null || mainReturned);
     }
@@ -1067,7 +1069,7 @@ public final class Vm {
 
         boolean haveTasks = hasPendingTasks();
 
-        // jasyncio.run(coro): the main frame is blocked on mainWaitingTask. Drive only
+        // __thread_wait(gen): the main frame is blocked on mainWaitingTask. Drive only
         // async until that task settles, then hand its result (or exception) to the
         // main frame and let it resume on a subsequent step.
         if (mainWaitingTask != null) {
@@ -1714,6 +1716,7 @@ public final class Vm {
                     case Opcodes.LOAD_METHOD: {
                         String name = f.code.module.qstr((int) arg);
                         Object obj = f.top();
+                        if (name.equals("__class__")) { f.setTop(Builtins.typeOf(obj)); f.push(null); break dispatch; }
                         if (obj instanceof PyInstance) {
                             PyInstance inst = (PyInstance) obj;
                             Object v = inst.attrs.get(name);
@@ -1922,8 +1925,7 @@ public final class Vm {
                                     if (pos[gi] instanceof PyGen) pos[gi] = new PyObj.PyList(materialize(pos[gi]));
                                 }
                             }
-                            Methods.Impl impl = Methods.lookup(self, ((Methods.Ref) callable).name);
-                            f.setTop(impl.call(self, pos));
+                            f.setTop(callBuiltinMethod(self, ((Methods.Ref) callable).name, pos));
                         } else {
                             // fast path: a bound method that is a simple-signature
                             // Python function binds self+args straight into locals,
@@ -2087,8 +2089,7 @@ public final class Vm {
                         if (callable instanceof Methods.Ref) {
                             if (((String[]) parts[1]).length != 0)
                                 throw PyException.typeError("built-in methods do not accept keyword arguments");
-                            Methods.Impl impl = Methods.lookup(self, ((Methods.Ref) callable).name);
-                            f.setTop(impl.call(self, pos));
+                            f.setTop(callBuiltinMethod(self, ((Methods.Ref) callable).name, pos));
                         } else {
                             Object[] callPos = pos;
                             if (self != null) {
@@ -2174,29 +2175,55 @@ public final class Vm {
                         break dispatch;
                     }
                     case Opcodes.WITH_CLEANUP: {
+                        // An __exit__ written in Python runs as a real subframe, like __enter__, so
+                        // a wait inside it (asyncio.run's `with Runner()` closing its loop, a lock
+                        // polled with time.sleep) yields to the scheduler; what is left of the
+                        // instruction is done when it returns (finishWithExit). Natives stay in place.
                         Object tos = f.top();
                         if (tos == PyObj.NONE) {
                             // (..., __exit__, ctx, None) -> (..., None)
                             f.drop(2);
                             Object exitFn = f.top();
-                            callSync(exitFn, new Object[]{PyObj.NONE, PyObj.NONE, PyObj.NONE});
-                            f.setTop(PyObj.NONE);
+                            if (runsInFrame(exitFn)) {
+                                callInto(exitFn, new Object[]{PyObj.NONE, PyObj.NONE, PyObj.NONE});
+                                exitCalled(f, WITH_EXIT_NONE);
+                            } else {
+                                callSync(exitFn, new Object[]{PyObj.NONE, PyObj.NONE, PyObj.NONE});
+                                f.setTop(PyObj.NONE);
+                            }
                         } else if (tos instanceof Long) {
                             // unwind return/jump: (..., __exit__, ctx, data, cause) -> (..., data, cause)
                             Object cause = f.pop();
                             Object data = f.pop();
                             f.drop(1);           // ctx
                             Object exitFn = f.top();
-                            callSync(exitFn, new Object[]{PyObj.NONE, PyObj.NONE, PyObj.NONE});
-                            f.setTop(data);
-                            f.push(cause);
+                            if (runsInFrame(exitFn)) {
+                                // (..., data, cause, __exit__): the result lands in the last slot
+                                f.setTop(data);
+                                f.push(cause);
+                                f.push(exitFn);
+                                callInto(exitFn, new Object[]{PyObj.NONE, PyObj.NONE, PyObj.NONE});
+                                exitCalled(f, WITH_EXIT_UNWIND);
+                            } else {
+                                callSync(exitFn, new Object[]{PyObj.NONE, PyObj.NONE, PyObj.NONE});
+                                f.setTop(data);
+                                f.push(cause);
+                            }
                         } else if (tos instanceof PyExc.Instance) {
                             // (..., __exit__, ctx, exc) -> None (swallow) or exc (re-raise)
                             PyExc.Instance exc = (PyExc.Instance) f.pop();
                             f.drop(1);           // ctx
                             Object exitFn = f.top();
-                            Object r = callSync(exitFn, new Object[]{exc.type, exc, PyObj.NONE});
-                            f.setTop(Ops.isTrue(r) ? PyObj.NONE : exc);
+                            if (runsInFrame(exitFn)) {
+                                // (..., exc, __exit__): the result lands in the last slot
+                                f.setTop(exc);
+                                f.push(exitFn);
+                                callInto(exitFn, new Object[]{exc.type, exc, PyObj.NONE});
+                                exitCalled(f, WITH_EXIT_EXC);
+                            } else {
+                                Object r = callSync(exitFn, new Object[]{exc.type, exc, PyObj.NONE});
+                                f.setTop(Ops.isTrue(r) ? PyObj.NONE : exc);
+                            }
                         } else {
                             throw PyException.typeError("bad value on stack at WITH_CLEANUP");
                         }
@@ -2343,7 +2370,21 @@ public final class Vm {
                         Object m = f.pop();
                         if (!(m instanceof PyModule)) throw PyException.typeError("import * requires a module");
                         Map<String, Object> dest = (f.names != null) ? f.names : globals;
-                        for (Map.Entry<String, Object> e : ((PyModule) m).ns.entrySet()) {
+                        PyModule source = (PyModule) m;
+                        // __all__, when the module has one, names exactly what is exported.
+                        Object all = source.ns.get("__all__");
+                        java.util.List<Object> exported = all instanceof PyObj.PyList ? ((PyObj.PyList) all).items
+                                : all instanceof PyObj.Tuple ? java.util.Arrays.asList(((PyObj.Tuple) all).items) : null;
+                        if (exported != null) {
+                            for (Object n : exported) {
+                                if (!(n instanceof String)) throw PyException.typeError("Item in " + source.name + ".__all__ must be str");
+                                Object v = source.ns.get(n);
+                                if (v == null) throw new PyException("AttributeError", "module '" + source.name + "' has no attribute '" + n + "'");
+                                dest.put((String) n, v);
+                            }
+                            break dispatch;
+                        }
+                        for (Map.Entry<String, Object> e : source.ns.entrySet()) {
                             if (!e.getKey().startsWith("_")) dest.put(e.getKey(), e.getValue());
                         }
                         break dispatch;
@@ -2609,6 +2650,13 @@ public final class Vm {
     public static final Object PRINT_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function print>"; }
     };
+    /** format()/ascii(): VM-native so they can dispatch __format__/__repr__. */
+    public static final Object FORMAT_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function format>"; }
+    };
+    public static final Object ASCII_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function ascii>"; }
+    };
     /** globals()/locals(): VM-native so they can see the current frame. In
      *  MicroPython a function's locals() returns the globals (locals are stack
      *  slots with no name dict); only a class body has a real local namespace. */
@@ -2639,14 +2687,14 @@ public final class Vm {
     public static final Object EVAL_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function eval>"; }
     };
-    /** uasyncio bridge: register a coroutine on the VM's cooperative event loop. */
+    /** __thread_start(gen): register a generator as a task of the VM's pool (a thread). */
     public static final Object CREATE_TASK_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function create_task>"; }
     };
-    /** jasyncio bridge: jasyncio.run(coro) — register the coroutine as a task and
+    /** __thread_wait(gen) (once jasyncio.run): register the generator as a task and
      *  BLOCK the main frame until it completes, then return its value (or raise its
-     *  exception). Unlike create_task (which returns immediately), run advances the
-     *  event loop via the host's step() driver until the awaited task settles. */
+     *  exception). Unlike __thread_start (which returns immediately), it advances the
+     *  pool via the host's step() driver until the awaited task settles. */
     public static final Object RUN_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function run>"; }
     };
@@ -2659,29 +2707,29 @@ public final class Vm {
     public static final Object TEST_AND_SET_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _test_and_set>"; }
     };
-    /** jasyncio bridge: build a SleepRequest(ms) for sleep_ms() to yield. */
+    /** __thread_sleep(ms): build a SleepRequest(ms) for a task's generator to yield. */
     public static final Object MAKE_SLEEP_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _make_sleep>"; }
     };
-    /** jasyncio bridge: clear a pending sleep so a task becomes runnable at once.
+    /** Old jasyncio bridge (kept for saved VMs): clear a pending sleep so a task becomes runnable at once.
      *  Task.cancel() needs it -- a coroutine parked in `await sleep(1)` is held out of
      *  the runnable set until the timer expires, so it would not look at the
      *  cancellation flag for a whole second. Cancelling should be prompt. */
     public static final Object WAKE_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _wake>"; }
     };
-    /** jasyncio bridge: turn on daemon-finish mode — after the main frame returns,
+    /** Turn on daemon-finish mode — after the main frame returns,
      *  keep running async tasks to completion instead of finishing immediately. */
     public static final Object FINISH_DAEMON_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function finishDaemonOnExit>"; }
     };
-    /** jasyncio bridge: True when the caller is running inside a scheduled task
+    /** Old jasyncio bridge (kept for saved VMs): True when the caller is running inside a scheduled task
      *  (drivingTask != null) rather than on the main frame. run() uses it to pick
      *  between blocking the main frame (mainWaitingTask) and waiting cooperatively. */
     public static final Object IN_TASK_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _in_task>"; }
     };
-    /** jasyncio bridge: the root coroutine of the pool task we are running inside
+    /** __thread_current(): the root generator of the pool task we are running inside
      *  (None on the main frame). run() compares it against the live group-scheduler
      *  generators to decide "am I inside a coroutine?" -- a GLOBAL flag cannot answer
      *  that, because another task suspended mid-coroutine leaves its marks visible
@@ -2689,7 +2737,7 @@ public final class Vm {
     public static final Object CURRENT_CORO_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _current_coro>"; }
     };
-    /** jasyncio bridge: the milliseconds of a SleepRequest, or None for any other
+    /** Old jasyncio bridge (kept for saved VMs): the milliseconds of a SleepRequest, or None for any other
      *  value. The Python-level group scheduler uses it to recognise a sleep yielded
      *  by one of its member coroutines (the SleepRequest object itself is opaque to
      *  Python). Stateless — no snapshot impact. */
@@ -2719,8 +2767,20 @@ public final class Vm {
     private Object irqHolder = null;              // AsyncTask, or MAIN_IRQ_HOLDER
     private static final Object MAIN_IRQ_HOLDER = new Object();
 
-    /** Synchronously exhaust a generator into a list by running its frame as the
-     *  root of nested mini-executions (one per yield). Used by list(gen). */
+    /** dict(mapping), including Python mappings such as os.environ. */
+    boolean copyMappingTo(PyObj.PyDict target, Object source) {
+        if (!(source instanceof PyInstance)) return false;
+        PyInstance instance = (PyInstance) source;
+        if (!instance.attrs.containsKey("keys") && instance.cls.lookup("keys") == null) return false;
+        Object getitem = instance.cls.lookup("__getitem__");
+        if (getitem == null) throw PyException.typeError("object is not subscriptable");
+        for (Object key : materialize(callSync(loadAttr(source, "keys"), NO_ARGS))) {
+            Object value = callSync(new BoundPyMethod(getitem, source), new Object[]{key});
+            target.map.put(key, value);
+        }
+        return true;
+    }
+
     /** Any iterable -> a Java list, draining generators and __iter__ via the VM. */
     java.util.List<Object> materialize(Object iterable) {
         if (iterable instanceof PyGen) return drainGen((PyGen) iterable).items;
@@ -2812,6 +2872,8 @@ public final class Vm {
         return e.instance != null ? e.instance : PyExc.from(e);
     }
 
+    /** Synchronously exhaust a generator into a list by running its frame as the
+     *  root of nested mini-executions (one per yield). Used by list(gen). */
     private PyObj.PyList drainGen(PyGen gen) {
         Frame sc = current; boolean sf = finished; boolean smr = mainReturned; Object sr = returnValue;
         boolean sy = yielding; int sri = raiseIp;
@@ -3127,6 +3189,13 @@ public final class Vm {
             }
             return Ops.binaryOp(op, lhs, rhs);
         }
+        // str % args is always str's printf formatting (str.__mod__ never returns
+        // NotImplemented, so a user rhs's __rmod__ is not consulted); run it with
+        // hooks so instance arguments get their __str__/__repr__/__int__/...
+        if (op == Ops.MODULO || op == Ops.INPLACE_OR + (Ops.MODULO - Ops.OR)) {
+            Object fmt = lhs instanceof PyInstance ? nativeFallback(lhs, "__mod__") : lhs;
+            if (fmt instanceof String) return Ops.strModulo((String) fmt, rhs, hooks);
+        }
 
         boolean lInst = lhs instanceof PyInstance;
         boolean rInst = rhs instanceof PyInstance;
@@ -3250,6 +3319,48 @@ public final class Vm {
         return null;
     }
 
+    /** Formatting's way back into this VM (str % args, str.format, format()):
+     *  user __str__/__repr__/__format__/__int__/... and .attr lookups. */
+    final PyHooks hooks = new PyHooks() {
+        @Override public String str(Object o) { return stringify(o, false); }
+        @Override public String repr(Object o) { return stringify(o, true); }
+        @Override public Object callDunder(Object o, String name, Object... args) {
+            Object m = o instanceof PyInstance ? ((PyInstance) o).cls.lookup(name) : null;
+            return m == null ? null : callSync(new BoundPyMethod(m, o), args);
+        }
+        @Override public Object getAttr(Object o, String name) { return loadAttr(o, name); }
+    };
+
+    /** A built-in method call. str.format runs with {@link #hooks}, so fields
+     *  dispatch user __format__/__str__/__repr__ and resolve {0.attr}. */
+    private Object callBuiltinMethod(Object self, String name, Object[] args) {
+        if (self instanceof String && name.equals("format")) return Format.apply((String) self, args, hooks);
+        Methods.Impl impl = Methods.lookup(self, name);
+        if (impl == null) throw PyException.typeError("object is not callable");
+        return impl.call(self, args);
+    }
+
+    /** A host function call. A {@link DunderHostFunction} (round) defers to its
+     *  dunder when the first argument is a user instance defining it, and
+     *  converts user instances among the other arguments with __index__. */
+    private Object callHost(HostFunction fn, Object[] args) {
+        if (fn instanceof DunderHostFunction && args.length > 0) {
+            Object first = args[0];
+            Object m = first instanceof PyInstance ? ((PyInstance) first).cls.lookup(((DunderHostFunction) fn).dunder) : null;
+            if (m != null) return callSync(new BoundPyMethod(m, first), java.util.Arrays.copyOfRange(args, 1, args.length));
+            Object[] converted = args;
+            for (int i = 1; i < args.length; i++) {
+                Object r = hooks.callDunder(args[i], "__index__");
+                if (r != null) {
+                    if (converted == args) converted = args.clone();
+                    converted[i] = r;
+                }
+            }
+            args = converted;
+        }
+        return fn.call(args);
+    }
+
     /** str()/repr() with __str__/__repr__ dispatch on user instances. repr falls
      *  back to __repr__ if __str__ is absent (str() does too, like Python). */
     String stringify(Object o, boolean useRepr) {
@@ -3369,14 +3480,14 @@ public final class Vm {
     private Object callSync(Object callable, Object[] args) {
         if (callable instanceof BuiltinType && ((BuiltinType) callable).isConstructor())
             return ((BuiltinType) callable).construct(this, args, NO_KW_NAMES, NO_KW_VALUES);
-        if (callable instanceof HostFunction) return ((HostFunction) callable).call(args);
-        if (callable instanceof Methods.BoundMethod) return ((Methods.BoundMethod) callable).call(args);
+        if (callable instanceof HostFunction) return callHost((HostFunction) callable, args);
+        if (callable instanceof Methods.BoundMethod) return callBuiltinMethod(((Methods.BoundMethod) callable).self, ((Methods.BoundMethod) callable).name, args);
         // native builtin singletons (len/sorted/map/filter/dict/list/sum/...) that
         // are dispatched specially in callInto: run them via a one-off nested call
         // so they're usable as first-class callables (e.g. sorted(key=len)).
         if (callable == LEN_BUILTIN || callable == BOOL_BUILTIN || callable == ALL_BUILTIN || callable == ANY_BUILTIN || callable == REPR_BUILTIN || callable == PRINT_BUILTIN || callable == GLOBALS_BUILTIN || callable == LOCALS_BUILTIN || callable == COMPILE_BUILTIN || callable == EXEC_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN || callable == EVAL_BUILTIN || callable == CREATE_TASK_BUILTIN || callable == RUN_BUILTIN || callable == TEST_AND_SET_BUILTIN || callable == MAKE_SLEEP_BUILTIN || callable == WAKE_BUILTIN || callable == IN_TASK_BUILTIN || callable == CURRENT_CORO_BUILTIN || callable == SLEEP_MS_OF_BUILTIN || callable == BYTEARRAY_BUILTIN || callable == DISABLE_IRQ_BUILTIN || callable == ENABLE_IRQ_BUILTIN || callable == FINISH_DAEMON_BUILTIN || callable == SORTED_BUILTIN || callable == MAP_BUILTIN
                 || callable == FILTER_BUILTIN || callable == DICT_BUILTIN || callable == LIST_BUILTIN
-                || callable == SUM_BUILTIN) {
+                || callable == SUM_BUILTIN || callable == FORMAT_BUILTIN || callable == ASCII_BUILTIN) {
             Frame sc = current; boolean sf = finished; boolean smr = mainReturned; Object sr = returnValue;
             boolean sy = yielding; int sri = raiseIp;
             Frame probe = new Frame(current.code);   // scratch frame to receive setTop
@@ -3434,6 +3545,9 @@ public final class Vm {
     /** LOAD_ATTR semantics: instance attrs, class-chain methods (bound), class
      *  namespace entries, and built-in type methods (bound). */
     private Object loadAttr(Object obj, String name) {
+        // Every object's type, as in CPython. MicroPython's compiler reads it for async with
+        // (__aexit__ gets type(exc)), and programs use self.__class__.
+        if (name.equals("__class__")) return Builtins.typeOf(obj);
         if (obj instanceof Descriptors.Property) {
             // property.setter / property.deleter: return a decorator that attaches
             // the given function and yields a new Property (as @x.setter does).
@@ -3539,6 +3653,8 @@ public final class Vm {
             // user exception subclass: custom instance attrs, then class methods
             Object ua = e.userAttrs.get(name);
             if (ua != null) return ua;
+            Object decodeAttr = PyExc.unicodeDecodeAttr(e, name);
+            if (decodeAttr != null) return decodeAttr;
             if (e.type.userClass != null) {
                 Object m = ((PyClass) e.type.userClass).lookup(name);
                 if (m instanceof PyFunction || m instanceof Closure) return new BoundPyMethod(m, e);
@@ -3799,10 +3915,10 @@ public final class Vm {
             // run() is only meaningful from the top-level (main) frame -- it blocks it.
             // Nesting run() inside a coroutine is a programming error (as in CPython).
             //
-            // Walk the whole call chain, not just the current frame: jasyncio.run is
-            // itself a plain Python function, so by the time this builtin runs, `current`
-            // is run()'s own frame (genOwner == null) even when the caller was a
-            // coroutine. Checking only the top frame let the nested call through, which
+            // Walk the whole call chain, not just the current frame: its caller
+            // (threading.join, once jasyncio.run) is itself a plain Python function, so by
+            // the time this builtin runs, `current` is that function's own frame
+            // (genOwner == null) even when it was called from a coroutine. Checking only the top frame let the nested call through, which
             // then suspended the main frame from inside a coroutine and quietly wedged
             // the whole thing -- the coroutine simply returned None with no error.
             for (Frame fr = current; fr != null; fr = fr.caller) {
@@ -3863,6 +3979,21 @@ public final class Vm {
         }
         if (callable == REPR_BUILTIN) {
             current.setTop(stringify(args[0], true));
+            return;
+        }
+        if (callable == FORMAT_BUILTIN) {
+            if (kwNames.length != 0) throw PyException.typeError("format() takes no keyword arguments");
+            if (args.length < 1 || args.length > 2)
+                throw PyException.typeError("format expected at most 2 arguments, got " + args.length);
+            Object spec = args.length > 1 ? args[1] : "";
+            if (!(spec instanceof String))
+                throw PyException.typeError("format() argument 2 must be str, not " + StdLib.typeName(spec));
+            current.setTop(Format.formatValue(args[0], (String) spec, hooks));
+            return;
+        }
+        if (callable == ASCII_BUILTIN) {
+            if (args.length != 1) throw PyException.typeError("ascii() takes exactly one argument (" + args.length + " given)");
+            current.setTop(PyObj.asciiEscape(stringify(args[0], true)));
             return;
         }
         if (callable == PRINT_BUILTIN) {
@@ -4004,12 +4135,12 @@ public final class Vm {
             if (kwNames.length != 0) throw PyException.typeError("host functions do not accept keyword arguments");
             // Host (Java) API: call synchronously and leave the result on the
             // caller's stack (the callable slot is TOS). No frame is pushed.
-            current.setTop(((HostFunction) callable).call(args));
+            current.setTop(callHost((HostFunction) callable, args));
             return;
         }
         if (callable instanceof Methods.BoundMethod) {
             if (kwNames.length != 0) throw PyException.typeError("built-in methods do not accept keyword arguments");
-            current.setTop(((Methods.BoundMethod) callable).call(args));
+            current.setTop(callBuiltinMethod(((Methods.BoundMethod) callable).self, ((Methods.BoundMethod) callable).name, args));
             return;
         }
         if (callable instanceof PyExc.Type) {
@@ -4239,6 +4370,11 @@ public final class Vm {
                 PyModule failed = (PyModule) f.returnOverride;
                 failed.initializing = false;
                 loadedModules.remove(failed.name);
+                // Also unbind it from its package, which the import bound it to before it ran:
+                // a retried `from pkg import child` must import again, not find the corpse.
+                int dot = failed.name.lastIndexOf('.');
+                PyModule parent = dot > 0 ? loadedModules.get(failed.name.substring(0, dot)) : null;
+                if (parent != null) parent.ns.remove(failed.name.substring(dot + 1), failed);
             }
             f = f.caller;                  // propagate: discard the frame
             current = f;
@@ -4270,6 +4406,36 @@ public final class Vm {
         f.excValSp[i] = f.sp - 1;      // unwind restores to (..., __exit__, ctx)
         f.excIsFinally[i] = true;
         f.excPrevExc[i] = null;
+    }
+
+    /** What an __exit__ subframe's withEnterArg says is left of WITH_CLEANUP when it returns:
+     *  replace its slot with None; drop its slot (unwind data and cause stay); or drop it and
+     *  swallow the exception under it when the result is true. Below -1, so a snapshot keeps
+     *  them in the same int and -1 still means none. */
+    static final int WITH_EXIT_NONE = -2, WITH_EXIT_UNWIND = -3, WITH_EXIT_EXC = -4;
+
+    /** Whether calling fn runs Python code in a frame of its own. */
+    private static boolean runsInFrame(Object fn) {
+        if (fn instanceof BoundPyMethod) fn = ((BoundPyMethod) fn).fn;
+        return fn instanceof PyFunction || fn instanceof Closure;
+    }
+
+    /** After WITH_CLEANUP's callInto: a pushed __exit__ frame finishes the instruction when it
+     *  returns; a call that completed in place (a generator function) finishes it now. */
+    private void exitCalled(Frame f, int kind) {
+        if (current != f) current.withEnterArg = kind;
+        else finishWithExit(f, kind, f.top());
+    }
+
+    private static void finishWithExit(Frame f, int kind, Object result) {
+        if (kind == WITH_EXIT_NONE) {
+            f.setTop(PyObj.NONE);
+        } else if (kind == WITH_EXIT_UNWIND) {
+            f.drop(1);
+        } else {
+            f.drop(1);
+            if (Ops.isTrue(result)) f.setTop(PyObj.NONE);
+        }
     }
 
     private void doReturn() {
@@ -4317,6 +4483,14 @@ public final class Vm {
             current = caller;
             caller.setTop(res);            // (..., __exit__, ctx, enter_result)
             installWithBlock(caller, warg);
+            return;
+        }
+        if (f.withEnterArg <= WITH_EXIT_NONE) {
+            // an __exit__ subframe (pushed by WITH_CLEANUP) finished: finish the instruction
+            Frame caller = f.caller;
+            f.caller = null;
+            current = caller;
+            finishWithExit(caller, f.withEnterArg, res);
             return;
         }
         if (f.buildingClass != null) {

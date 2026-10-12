@@ -12,8 +12,9 @@ class TkHardeningTest {
     @Test void renderTruncatesAFrameOverThePaintBudgetInsteadOfThrowing() {
         // A plain Python program could build this; render() runs in the tile entity tick,
         // where an exception used to crash the server.
-        TkTree tree = new TkTree(); tree.resize(1024, 1024);
-        String[] rows = new String[65]; Arrays.fill(rows, "x");
+        // 70 listboxes showing 128 rows each: more records than a display draws (MAX_RECORDS).
+        TkTree tree = new TkTree(); tree.resize(2048, 2048);
+        String[] rows = new String[130]; Arrays.fill(rows, "x");
         for (int i = 0; i < 70; i++) {
             Listbox list = new Listbox(tree.root()); TkOptions.configure(list, Map.of("width", 1));
             list.pack(fillY()); list.insert(0, rows);

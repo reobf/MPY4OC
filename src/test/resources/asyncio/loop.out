@@ -1,0 +1,40 @@
+auto loop True True
+create_task outside RuntimeError: no running event loop
+get_running_loop outside RuntimeError: no running event loop
+current_task outside RuntimeError: no running event loop
+run a number ValueError: a coroutine was expected, got 5
+set_event_loop TypeError: loop must be an instance of AbstractEventLoop or None, not 'int'
+new loop False False True
+handles True True
+soon 1
+soon 2 with args
+later 0.05
+later 0.1
+at +0.15
+stopped False
+running True True
+run_until_complete inside RuntimeError: This event loop is already running
+nested run RuntimeError: asyncio.run() cannot be called from a running event loop
+close while running RuntimeError: Cannot close a running event loop
+run_until_complete inside done
+pending result InvalidStateError: Result is not set.
+pending exception InvalidStateError: Exception is not set.
+removed callbacks 1
+set twice InvalidStateError: invalid state
+callbacks ['first', 'second'] 7 True False
+callback after done ['late']
+failed KeyError KeyError: 'k'
+cancel True False CancelledError: why
+handler True
+handler saw [('Exception in callback', 'ZeroDivisionError')]
+coroutine as callback no error
+call_later None TypeError: delay must not be None
+not callable no error
+closed True RuntimeError: Event loop is closed
+call_soon closed RuntimeError: Event loop is closed
+after run(5) RuntimeError: There is no current event loop in thread 'MainThread'.
+set back True
+asyncio.run nothing
+after asyncio.run RuntimeError: There is no current event loop in thread 'MainThread'.
+runner nothing False
+runner closed RuntimeError: Runner is closed

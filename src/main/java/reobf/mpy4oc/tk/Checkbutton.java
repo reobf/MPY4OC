@@ -6,7 +6,7 @@ public final class Checkbutton extends Button {
     int group;
     public Checkbutton(Frame parent, boolean radio) {
         super(parent, "", radio ? Kind.RADIOBUTTON : Kind.CHECKBUTTON);
-        border = 0; textAnchor = TkPack.Anchor.W;
+        border = 0; relief = Relief.FLAT; textAnchor = TkPack.Anchor.W;
     }
     public boolean selected() { return selected; }
     public void selected(boolean value) {

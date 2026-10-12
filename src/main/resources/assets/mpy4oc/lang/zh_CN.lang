@@ -35,7 +35,7 @@ mpy4oc.tk.busy=显示器正忙于向你发送数据,请稍后再试。
 
 # --- 提示文字 --------------------------------------------------------------
 # %1$s = 档位, %2$s = 每 tick 指令预算
-mpy4oc.tip.tier=%1$s 级 \u2014 每 tick %2$s 条指令
+mpy4oc.tip.tier=%1$s 级 — 每 tick %2$s 条指令
 
 mpy4oc.tip.cpu.arch=架构: mpy
 mpy4oc.tip.cpu.desc=运行 MicroPython 字节码。
@@ -54,3 +54,17 @@ mpy4oc.config.title=mpy4oc 设置
 
 mpy4oc.config.sftpPort=SFTP 端口
 mpy4oc.config.sftpPort.tooltip=SFTP/SSH 服务器端口。\n0 = 自动挑一个空闲端口, -1 = 关闭。
+
+# --- Tk 显示器拼接(扳手)与分辨率对话框 ---
+mpy4oc.tk.notPermitted=你不能调整这块显示器:运行它的电脑没有把你列为用户。
+mpy4oc.tk.merged=显示器已拼接:%s×%s 块,分辨率上限 %s×%s。
+mpy4oc.tk.split=显示器组已拆成单块。
+mpy4oc.tk.merge.no_neighbour=那一侧没有 Tk 显示器。
+mpy4oc.tk.merge.facing=那块显示器朝向不同。
+mpy4oc.tk.merge.unloaded=有部分显示器没有加载。
+mpy4oc.tk.merge.same_group=那块显示器已经在这个组里。
+mpy4oc.tk.merge.shape=拼接后必须是矩形:相接的两边长度要相同并且对齐。
+mpy4oc.tk.merge.too_large=显示器组最大 8×8 块。
+mpy4oc.tk.resolution.title=显示器分辨率
+mpy4oc.tk.resolution.limit=%s×%s 块,上限 %s×%s
+mpy4oc.tk.resolution.max=最大
