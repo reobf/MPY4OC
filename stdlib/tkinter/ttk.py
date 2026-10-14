@@ -1109,7 +1109,7 @@ class Treeview(Widget, tkinter.Widget):
     Return, Left/Right), moves with the arrow keys, scrolls with the wheel, clicks a heading
     (its command) and drags a heading's edge to resize a column. <<TreeviewSelect>>,
     <<TreeviewOpen>> and <<TreeviewClose>> are generated as in Tk. Tag colours (foreground,
-    background) are drawn; images and fonts are recorded only."""
+    background) and item PhotoImages are drawn; heading/tag images and fonts are recorded only."""
     _ttk_class = 'Treeview'
     _takefocus_default = 'ttk::takefocus'
     _state_option_ok = False
@@ -1144,6 +1144,8 @@ class Treeview(Widget, tkinter.Widget):
             options['show'] = _words(options['show'])
         if 'selectmode' in options:
             options['selectmode'] = str(options['selectmode'])
+        if 'showindicator' in options:
+            options['showindicator'] = tkinter._flag(options['showindicator'])
         return options
 
     def configure(self, cnf=None, **kw):
@@ -1182,7 +1184,7 @@ class Treeview(Widget, tkinter.Widget):
             elif key == 'open':
                 options[key] = tkinter._flag(value)
             elif key == 'image':
-                options[key] = '' if value is None else str(value)
+                options[key] = self._image_ref(value)
             elif key == 'text':
                 options[key] = str(value)
             else:
@@ -1208,6 +1210,8 @@ class Treeview(Widget, tkinter.Widget):
                 self._raw_values[item] = list(kw['values']) if not isinstance(kw['values'], str) else tkinter._tcl_split(kw['values'])
             return {}
         text, image, values, is_open, tags = self._tree('item', item)
+        image = self._root._images.get(image)
+        image = image.name if image is not None else ''
         raw = self._raw_values.get(item)
         if raw is None or len(raw) != len(values):
             raw = values

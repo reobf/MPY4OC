@@ -34,6 +34,8 @@ public final class TkDisplayList {
         public final TkRect bounds, clip;
         public final String text;
         public final TkVector vector;
+        public final TkIconDescriptor icon;
+        public int payloadBytes() { return text.getBytes(StandardCharsets.UTF_8).length + (icon == null ? 0 : icon.bytes()); }
 
         public Item(int id, TkWidget.Kind kind, TkRect bounds, TkRect clip, int background, int foreground,
                     int border, int state, int textX, int textY, String text) {
@@ -62,11 +64,23 @@ public final class TkDisplayList {
         public Item(int id, int part, TkWidget.Kind kind, TkRect bounds, TkRect clip, int background, int foreground,
                     int border, int state, int textX, int textY, String text, int caretX, int selectionX, int selectionWidth, TkVector vector, int image,
                     int relief) {
+            this(id, part, kind, bounds, clip, background, foreground, border, state, textX, textY, text, caretX, selectionX, selectionWidth, vector, image, relief, null);
+        }
+        public Item(int id, int part, TkWidget.Kind kind, TkRect bounds, TkRect clip, int background, int foreground,
+                    int border, int state, int textX, int textY, String text, int caretX, int selectionX, int selectionWidth, TkVector vector, int image,
+                    int relief, TkIconDescriptor icon) {
+            boolean iconKind = kind == TkWidget.Kind.ITEMICON || kind == TkWidget.Kind.FLUIDICON;
+            if (iconKind != (icon != null) || iconKind && (icon.fluid != (kind == TkWidget.Kind.FLUIDICON)
+                    || part != 1 || vector != null || image != 0 || border != 0 || relief != 0 || !text.isEmpty()
+                    || caretX != -1 || selectionX != 0 || selectionWidth != 0 || bounds.width != bounds.height || bounds.width > 32768))
+                throw new IllegalArgumentException("invalid icon paint record");
+            this.icon = icon;
             if (relief < 0 || relief > TkRelief.TAB || relief != 0 && vector != null) throw new IllegalArgumentException("invalid paint relief");
             this.relief = relief;
             if ((vector != null) != (kind == TkWidget.Kind.CANVAS && part > 0)) throw new IllegalArgumentException("invalid Canvas paint part");
             boolean imageShape = vector != null && vector.shape == TkVector.Shape.IMAGE;
-            boolean imageLabel = vector == null && part == 0 && (kind == TkWidget.Kind.LABEL || kind == TkWidget.Kind.BUTTON);
+            // Compound widgets (Treeview rows) also paint PhotoImages as label parts.
+            boolean imageLabel = vector == null && (kind == TkWidget.Kind.LABEL || part == 0 && kind == TkWidget.Kind.BUTTON);
             if (image < 0 || imageShape && image == 0 || image != 0 && !(imageShape || imageLabel) || image != 0 && !text.isEmpty())
                 throw new IllegalArgumentException("invalid image paint record");
             this.image = image;
@@ -105,10 +119,10 @@ public final class TkDisplayList {
                     && background == i.background && foreground == i.foreground && border == i.border
                     && state == i.state && textX == i.textX && textY == i.textY && text.equals(i.text) && caretX == i.caretX
                     && selectionX == i.selectionX && selectionWidth == i.selectionWidth && Objects.equals(vector, i.vector) && image == i.image
-                    && relief == i.relief;
+                    && relief == i.relief && Objects.equals(icon, i.icon);
         }
         @Override public int hashCode() {
-            return Objects.hash(id, part, kind, bounds, clip, background, foreground, border, state, textX, textY, text, caretX, selectionX, selectionWidth, vector, image, relief);
+            return Objects.hash(id, part, kind, bounds, clip, background, foreground, border, state, textX, textY, text, caretX, selectionX, selectionWidth, vector, image, relief, icon);
         }
     }
 
@@ -124,7 +138,7 @@ public final class TkDisplayList {
         boolean dropped = false;
         for (java.util.Iterator<Item> it = items.iterator(); it.hasNext();) {
             Item item = it.next();
-            int b = item.text.getBytes(StandardCharsets.UTF_8).length, c = item.vector == null ? 0 : item.vector.count();
+            int b = item.payloadBytes(), c = item.vector == null ? 0 : item.vector.count();
             if (count + 1 > MAX_RECORDS || bytes + b > MAX_PAINT_BYTES || coords + c > TkVector.MAX_TOTAL_COORDS) {
                 it.remove(); dropped = true; continue;
             }
@@ -148,7 +162,7 @@ public final class TkDisplayList {
             int start = layer == 0 ? 0 : layerStarts.get(layer - 1), end = layer == layers - 1 ? items.size() : layerStarts.get(layer);
             for (int i = start; i < end; i++) {
                 Item item = items.get(i);
-                int b = item.text.getBytes(StandardCharsets.UTF_8).length, c = item.vector == null ? 0 : item.vector.count();
+                int b = item.payloadBytes(), c = item.vector == null ? 0 : item.vector.count();
                 if (count + 1 > MAX_RECORDS || bytes + b > MAX_PAINT_BYTES || coords + c > TkVector.MAX_TOTAL_COORDS) { dropped = true; continue; }
                 keep[i] = true; count++; bytes += b; coords += c;
             }
@@ -166,11 +180,11 @@ public final class TkDisplayList {
         int bytes = 0, coords = 0;
         for (Item item : items) {
             if (!ids.add(item.key())) throw new IllegalArgumentException("duplicate paint key");
-            bytes += item.text.getBytes(StandardCharsets.UTF_8).length;
+            bytes += item.payloadBytes();
             if (item.vector != null) coords += item.vector.count();
         }
         if (coords > TkVector.MAX_TOTAL_COORDS) throw new IllegalArgumentException("display coordinate budget exceeded");
-        if (bytes > MAX_PAINT_BYTES) throw new IllegalArgumentException("display text budget exceeded");
+        if (bytes > MAX_PAINT_BYTES) throw new IllegalArgumentException("display text/icon budget exceeded");
         this.items = Collections.unmodifiableList(new ArrayList<>(items));
     }
 

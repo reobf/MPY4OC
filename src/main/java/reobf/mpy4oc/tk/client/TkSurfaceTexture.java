@@ -29,7 +29,7 @@ final class TkSurfaceTexture {
         try {
             OpenGlHelper.setActiveTexture(OpenGlHelper.defaultTexUnit);
             if(buffer==null||buffer.framebufferWidth!=width||buffer.framebufferHeight!=height) {
-                dispose();buffer=new Framebuffer(width,height,false);buffer.setFramebufferFilter(GL11.GL_LINEAR);
+                dispose();buffer=new Framebuffer(width,height,true);buffer.setFramebufferFilter(GL11.GL_LINEAR);
             }
             buffer.bindFramebuffer(true);
             GL11.glDisable(GL11.GL_SCISSOR_TEST);GL11.glDisable(GL11.GL_DEPTH_TEST);GL11.glDepthMask(false);
@@ -51,6 +51,7 @@ final class TkSurfaceTexture {
         if(buffer!=null) {
             // MC's deleteFramebuffer leaks when the user turns fboEnable off after allocation.
             if(buffer.framebufferTexture>=0)net.minecraft.client.renderer.texture.TextureUtil.deleteTexture(buffer.framebufferTexture);
+            if(buffer.depthBuffer>=0)OpenGlHelper.func_153184_g(buffer.depthBuffer);
             if(buffer.framebufferObject>=0)OpenGlHelper.func_153174_h(buffer.framebufferObject);
             buffer=null;
         }

@@ -34,15 +34,23 @@
  * For more details, see https://docs.gradle.org/8.0.1/userguide/java_library_plugin.html#sec:java_library_configurations_graph
  */
 dependencies {
-    api("com.github.GTNewHorizons:NotEnoughItems:2.8.84-GTNH:dev")
-	api("com.github.GTNewHorizons:OpenComputers:1.12.50-GTNH:dev")
+    // Published GTNH releases checked together on 2026-10-12.
+    api("com.github.GTNewHorizons:NotEnoughItems:2.8.159-GTNH:dev")
+    api("com.github.GTNewHorizons:OpenComputers:1.12.64-GTNH:dev")
     shadowImplementation("org.apache.sshd:sshd-sftp:2.13.0")
-     api("com.github.GTNewHorizons:Applied-Energistics-2-Unofficial:rv3-beta-880-GTNH:dev")
-      api(rfg.deobf(fileTree(dir: 'run/libs', include: '*.jar')))
-    // shadowImplementation("org.slf4j:slf4j-simple:1.7.36")
-	//api("com.github.GTNewHorizons:OpenComputers:1.12.22-GTNH:dev")
-	//api("org.apache.sshd:sshd-sftp:2.13.0")
-	//api("at.released.weh:bindings-chicory-emscripten:0.6.0")
-	api("com.github.GTNewHorizons:Angelica:2.1.16:dev")
-	api("com.github.GTNewHorizons:ModularUI2:2.3.92-1.7.10:dev")
+    api("com.github.GTNewHorizons:Applied-Energistics-2-Unofficial:rv3-beta-1082-GTNH:dev")
+    api(rfg.deobf(fileTree(dir: 'run/libs', include: '*.jar')))
+    api("com.github.GTNewHorizons:Angelica:2.2.31:dev")
+    api("com.github.GTNewHorizons:ModularUI2:2.3.92-1.7.10:dev")
+
+    // These mods arrive through the integrations above. Constraints update them
+    // without adding duplicate jars or suppressing their transitive dependencies.
+    constraints {
+        api("com.github.GTNewHorizons:AE2FluidCraft-Rework:1.5.113-gtnh")
+        api("com.github.GTNewHorizons:GTNHLib:0.11.52")
+        api("com.github.GTNewHorizons:GTNHExtLib:1.0.5")
+        api("com.github.GTNewHorizons:CodeChickenCore:1.4.22")
+        api("com.github.GTNewHorizons:waila:1.19.34")
+        api("com.github.GTNewHorizons:Baubles-Expanded:2.2.25-GTNH")
+    }
 }

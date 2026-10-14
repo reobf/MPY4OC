@@ -1,16 +1,8 @@
+#!/usr/bin/env pythonw
 """Progress bars: a determinate bar shared with a scale, and an indeterminate one.
 
 usage: tkprogress
 """
-# From the MPYOS prompt, run as a job; an existing job or a direct Python run stays here.
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None
-if spawn is not None:
-    spawn('tkprogress', args)
-    raise SystemExit
-
 import tkinter as tk
 from tkinter import ttk
 

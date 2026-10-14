@@ -1,3 +1,4 @@
+#!/usr/bin/env pythonw
 """tkedit: a text editor on a Tk display (UTF-8 plain text).
 
 usage: tkedit [file]
@@ -25,28 +26,13 @@ WRAP_NAMES = {'word': 'Wrap at words', 'char': 'Wrap anywhere', 'none': 'No wrap
 HINT = 'Ctrl+S save  Ctrl+F find  Ctrl+G go to line'
 LIMITS = 'the Text limits (262143 characters / 512 KB / 20000 lines)'
 
-try:
-    files, resolve, start_dir = sh.fs, sh.resolve, sh.cwd
-except NameError:  # not run by the MPYOS shell, e.g. python /bin/tkedit.py file
-    import osfs
-    files, resolve, start_dir = osfs.shared_vfs(), osfs._abs, osfs.getcwd()
-    if files is None:
-        raise RuntimeError('tkedit needs MPYOS')
-try:
-    argv = args
-except NameError:
-    try:
-        argv = list(argv)[1:]   # python /bin/tkedit.py file: argv[0] is the script
-    except NameError:
-        argv = []
-argv = [a for a in argv if a != '-w']
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None                # not under the MPYOS shell: run here
-if spawn is not None:           # under the shell's prompt: become a background job
-    spawn('tkedit', argv)
-    raise SystemExit
+import os
+import sys
+import osfs
+files, resolve, start_dir = osfs.shared_vfs(), os.path.abspath, os.getcwd()
+if files is None:
+    raise RuntimeError('tkedit needs MPYOS')
+argv = [a for a in sys.argv[1:] if a != '-w']
 
 
 def points(text):

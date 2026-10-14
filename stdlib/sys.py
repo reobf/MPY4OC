@@ -6,6 +6,18 @@ maxsize = 9223372036854775807
 byteorder = "little"
 path = []
 argv = []
+executable = '/bin/python.py'
+_contexts = {}
+
+
+def _drop_context(program):
+    import _program
+    if not _program.live(program):
+        _contexts.pop(program, None)
+
+
+import _program
+_program._on_end.append(_drop_context)
 
 class __Impl:
     name = "micropython"

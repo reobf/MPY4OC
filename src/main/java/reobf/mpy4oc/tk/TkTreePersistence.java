@@ -72,6 +72,7 @@ public final class TkTreePersistence {
                 if (labelframe.labelWidget != null) n.setInteger("labelwidget", labelframe.labelWidget.id);
             }
             if (w instanceof Label && ((Label) w).image != 0) n.setInteger("image", ((Label) w).image);
+            if (w instanceof TkIcon && ((TkIcon) w).descriptor != null) n.setTag("icon", ((TkIcon) w).descriptor.save());
             if (w instanceof Entry) {
                 Entry e = (Entry) w;
                 n.setInteger("cursor", e.cursor()); n.setInteger("selectionAnchor", e.anchor);
@@ -161,6 +162,8 @@ public final class TkTreePersistence {
                     case PROGRESSBAR: w = new Progressbar(f); break;
                     case SEPARATOR: w = new Separator(f); break;
                     case SIZEGRIP: w = new Sizegrip(f); break;
+                    case ITEMICON: w = new ItemIcon(f); break;
+                    case FLUIDICON: w = new FluidIcon(f); break;
                     case CANVAS: w = new Canvas(f); break;
                     case TEXT: w = new Text(f); break;
                     default: throw new IllegalArgumentException("unknown widget kind");
@@ -190,6 +193,12 @@ public final class TkTreePersistence {
                 options.put("labelanchor", n.getString("labelanchor").toLowerCase(java.util.Locale.ROOT));
             }
             TkOptions.configure(w, options); w.size(n.getInteger("width"), n.getInteger("height"));
+            if (w instanceof TkIcon && n.hasKey("icon")) {
+                if (!n.hasKey("icon", 10)) throw new IllegalArgumentException("invalid saved icon");
+                TkIcon icon = (TkIcon) w;
+                TkIconDescriptor descriptor = TkIconDescriptor.load(w.kind == TkWidget.Kind.FLUIDICON, n.getCompoundTag("icon"));
+                icon.checkDescriptor(descriptor); icon.descriptor(descriptor);
+            }
             TkControlPersistence.load(w, n);
             if (w instanceof Text) ((Text) w).load(n.getCompoundTag("textState"));
             if (w instanceof Canvas) TkCanvasPersistence.load((Canvas) w, n);

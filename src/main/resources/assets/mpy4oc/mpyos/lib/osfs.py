@@ -48,6 +48,8 @@ def install(os_module, vfs):
     os_module.rename = rename
     os_module.stat = stat
     os_module.statvfs = statvfs
+    import _process
+    _process.install(vfs)
 
 
 def shared_vfs():
@@ -101,7 +103,12 @@ def set_cwd(program, path):
 
 def drop_cwd(program):
     """The shell: program has ended."""
-    _cwds.pop(program, None)
+    if _program is None or not _program.live(program):
+        _cwds.pop(program, None)
+
+
+if _program is not None:
+    _program._on_end.append(drop_cwd)
 
 
 # -- queries -----------------------------------------------------------------

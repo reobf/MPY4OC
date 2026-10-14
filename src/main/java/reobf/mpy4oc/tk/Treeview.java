@@ -27,12 +27,13 @@ public final class Treeview extends TkWidget {
         final String id;
         Item parent;
         final List<Item> children = new ArrayList<>();
-        String text = "", image = "";
+        String text = "";
+        int image;
         final List<String> values = new ArrayList<>(), tags = new ArrayList<>();
         boolean open;
         Item(String id) { this.id = id; }
         int bytes() {
-            int n = text.getBytes(StandardCharsets.UTF_8).length + image.length();
+            int n = text.getBytes(StandardCharsets.UTF_8).length;
             for (String v : values) n += v.getBytes(StandardCharsets.UTF_8).length;
             for (String t : tags) n += t.length();
             return n;
@@ -59,6 +60,8 @@ public final class Treeview extends TkWidget {
     int lines = 10;
     String selectmode = "extended";
     boolean showTree = true, showHeadings = true;
+    /** MPY extension for flat file lists: omit the expander and its reserved width. */
+    boolean showIndicator = true;
     final Set<Item> selected = new HashSet<>();
     Item focus;
     int top, scrollX, slack, serial, bytes, xscrollcommand, yscrollcommand, notify;
@@ -148,8 +151,8 @@ public final class Treeview extends TkWidget {
         TkFontMetrics.checkText(text);
         List<String> values = m.containsKey("values") ? strings(m.get("values")) : item.values;
         List<String> tags = m.containsKey("tags") ? strings(m.get("tags")) : item.tags;
-        String image = m.containsKey("image") ? TkOptions.text(m.get("image")) : item.image;
-        if (image.length() > 256) throw new IllegalArgumentException("image name too long");
+        int image = m.containsKey("image") ? TkOptions.integer(m.get("image"), 0, Integer.MAX_VALUE) : item.image;
+        if (image != 0 && tree.ownedImage(image) == null) throw new IllegalArgumentException("image does not exist");
         int before = item.bytes();
         Item probe = new Item("");
         probe.text = text; probe.image = image; probe.values.addAll(values); probe.tags.addAll(tags);
@@ -546,7 +549,10 @@ public final class Treeview extends TkWidget {
                 if (showTree && column == 0) {
                     int left = edges(shown())[0] - scrollX + depth(row) * INDENT;
                     if (x < left) return "";
-                    if (x < left + INDICATOR) return "Treeitem.indicator";
+                    int indicator = showIndicator ? INDICATOR : 0;
+                    if (x < left + indicator) return "Treeitem.indicator";
+                    TkImage image = tree.images.get(rows().get(row).image);
+                    if (image != null && x < left + indicator + 2 + image.width) return "image";
                 }
                 return "text";
             case "cell":
@@ -710,19 +716,30 @@ public final class Treeview extends TkWidget {
             int rowLook = look | (chosen ? TkLook.SELECTED : 0);
             int bg = chosen ? lookColor("background", rowLook, SELECTED) : colors[1] >= 0 ? colors[1] : lookColor("background", rowLook, background);
             int fg = chosen ? lookColor("foreground", rowLook, 0xFFFFFF) : colors[0] >= 0 ? colors[0] : lookColor("foreground", rowLook, foreground);
-            int base = 100 + slot * (columnsShown + 1);
+            int base = 100 + slot * (columnsShown + 2);
             for (int i = 0; i < columnsShown; i++) {
                 Column c = shown.get(i);
                 TkRect cell = new TkRect(x0 + e[i], y, c.width, ROW), clip = cell.intersect(inner);
                 if (clip.empty()) continue;
-                int indent = c == treeColumn ? depth(r) * INDENT + INDICATOR : 0;
+                int indent = c == treeColumn ? depth(r) * INDENT + (showIndicator ? INDICATOR : 0) : 0;
+                TkImage image = c == treeColumn ? tree.images.get(item.image) : null;
+                int imageSpace = image == null ? 0 : image.width + 2;
                 String value = c == treeColumn ? item.text : value(item, c);
-                int room = Math.max(0, c.width - indent - 4);
+                int room = Math.max(0, c.width - indent - imageSpace - 4);
                 String text = TkText.visible(value, 0, room);
-                TkRect space = new TkRect(cell.x + indent, cell.y, Math.max(1, c.width - indent), ROW);
+                TkRect space = new TkRect(cell.x + indent + imageSpace, cell.y, Math.max(1, c.width - indent - imageSpace), ROW);
                 add(out, base + i, Kind.LABEL, cell, clip, text, anchorX(c.anchor, space, TkFontMetrics.width(text)), y + 2, bg, fg, 0, state, TkRelief.FLAT);
+                if (image != null) {
+                    // Keep the image's origin when scrolled/clipped. Oversize images are
+                    // clipped to the fixed-height row, never over the next row or column.
+                    int ix = cell.x + indent + 2, iy = y + (ROW - image.height) / 2;
+                    TkRect box = new TkRect(ix, iy, image.width, image.height);
+                    TkRect visible = box.intersect(clip).intersect(clip());
+                    if (!visible.empty()) out.add(new TkDisplayList.Item(id, base + columnsShown + 1, Kind.LABEL,
+                            box.intersect(bounds), visible, bg, fg, 0, state, ix, iy, "", -1, 0, 0, null, image.id, TkRelief.FLAT));
+                }
             }
-            if (showTree && !item.children.isEmpty()) {
+            if (showTree && showIndicator && !item.children.isEmpty()) {
                 TkRect mark = new TkRect(x0 + e[0] + depth(r) * INDENT, y, INDICATOR, ROW), clip = mark.intersect(inner);
                 if (!clip.empty()) add(out, base + columnsShown, Kind.LABEL, mark, clip, item.open ? "▾" : "▸", mark.x + 4, y + 2, bg, fg, 0, state, TkRelief.FLAT);
             }
@@ -763,7 +780,7 @@ public final class Treeview extends TkWidget {
     /** At most this many paint records, on a display rows text rows tall (TkPaint.maxRecords). */
     int maxRecords(int displayRows) {
         int shown = shown().size();
-        return 1 + shown + Math.min(items.size(), displayRows + 1) * (shown + 1);
+        return 1 + shown + Math.min(items.size(), displayRows + 1) * (shown + 2);
     }
     long maxBytes(int displayRows, int rowBytes) {
         int shown = shown().size();

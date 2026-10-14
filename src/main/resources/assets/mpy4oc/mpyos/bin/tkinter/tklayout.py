@@ -1,13 +1,5 @@
+#!/usr/bin/env pythonw
 """Grid form, removable details, and a relative place overlay on one display."""
-# From the MPYOS prompt, run as a job; an existing job or a direct Python run stays here.
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None
-if spawn is not None:
-    spawn('tklayout', args)
-    raise SystemExit
-
 import tkinter as tk
 
 root = tk.Tk()

@@ -27,7 +27,7 @@ root.mainloop()
 
 没有显示器时 `import tkinter` 仍成功；`Tk()` 抛 `OSError`。`mainloop()` 按游戏 tick 处理信号并让出 VM。长任务应拆成小批次，用 `after(ms, callback)` 续跑；回调里的长循环会延迟同一应用的事件处理。
 
-MPYOS 的 `/bin/tkedit.py` 是一个可以实际使用的文本编辑器（见下文“tkedit 编辑器”）。`/bin/` 还保留示例 `tkdemo.py`（按钮与输入框）、`tkdesktop.py`（桌面、窗口与任务栏）、`tkttk.py`（ttk 控件）、`tkimage.py`（`tkimage 文件路径` 显示图片，不带参数显示一张生成的渐变）、`tklog.py`（列表日志）、`tklayout.py`、`tkcanvas.py` 和 `tktext.py`（编辑器与只读日志）。`tkdemo.py` 用单块显示器即可；`tklog.py`、`tklayout.py`、`tkcanvas.py` 和 `tktext.py` 的窗口加上标题栏和任务栏要 2×2 拼接的显示器组（见下文“多块拼接与分辨率”），显示器太小时它们直接报错说明。已有 MPYOS 安装可只复制需要的示例；应用程序用普通 `import tkinter`。
+MPYOS 的 `/bin/tkinter/tkedit.py` 是一个可以实际使用的文本编辑器（见下文“tkedit 编辑器”）。`/bin/tkinter/` 还保留示例 `tkdemo.py`（按钮与输入框）、`tkdesktop.py`（桌面、窗口与任务栏）、`tkttk.py`（ttk 控件）、`tkimage.py`（`tkimage 文件路径` 显示图片，不带参数显示一张生成的渐变）、`tklog.py`（列表日志）、`tklayout.py`、`tkcanvas.py` 和 `tktext.py`（编辑器与只读日志）。`tkdemo.py` 用单块显示器即可；`tklog.py`、`tklayout.py`、`tkcanvas.py` 和 `tktext.py` 的窗口加上标题栏和任务栏要 2×2 拼接的显示器组（见下文“多块拼接与分辨率”），显示器太小时它们直接报错说明。已有 MPYOS 安装可只复制需要的示例；应用程序用普通 `import tkinter`。
 
 ## 指定显示器
 
@@ -46,7 +46,7 @@ print(root.winfo_screen())
 
 **程序与线程**：在 shell 里运行的每条命令都是一个“程序”，它开的线程（`threading`、`_thread`）、协程（`asyncio`、`micropython.schedule`）、Tk 窗口、`event.listen`/`event.timer` 回调和 `os` 的当前目录都属于它，子线程开的也算。命令结束时，shell 像进程退出那样收尾：先等它的非守护线程跑完（和 CPython 一样；屏幕上会提示，按 Ctrl+C 不再等——这时它的线程收不到 Ctrl+C，留给 shell），再停掉它剩下的线程和协程，关掉它的窗口，删掉它的事件回调。所以 `python 程序.py` 里开的线程不会在程序结束后留在 MPYOS 里继续跑。守护与否和 CPython 一样：新线程默认跟创建它的线程相同（后台命令里直接开的线程算非守护），`_thread.start_new_thread` 开的线程都是守护线程，不会让 shell 等。停止是协作式的：被停止的线程或协程在下一个“等待点”收到 `SystemExit`（`finally` 照常执行），等待点包括 `time.sleep`、`computer.pullSignal`（以及基于它的 `event.pull`、终端读入）、Tk 的 `mainloop`/`update`、`asyncio` 事件循环的每一轮。`asyncio` 和 CPython 3.12 一样：事件循环跑在调用 `asyncio.run()` 的线程里（每个线程一个，旧名 `jasyncio` 是同一个模块）；程序被停止时 `asyncio.run()` 收到 `SystemExit`，关闭事件循环时像 CPython 那样取消剩下的任务，协程在它停着的 `await` 处收到 `CancelledError`（正在 `await asyncio.sleep(...)` 的也马上收到），收尾完 `SystemExit` 再接着往外抛。`SystemExit` 只给一次，`finally` 里还可以再等待、再 `await` 做收尾；收尾超过 2 秒（或把 `SystemExit` 吞掉接着跑）才会在下一个等待点再收到一次。一直在做纯计算、从不经过等待点的线程停不下来，要等它碰到下一个等待点。
 
-**后台运行**：自带的 11 个 Tk 命令（`tkcanvas`、`tkdemo`、`tkdesktop`、`tkedit`、`tkimage`、`tklayout`、`tklog`、`tkprogress`、`tkscroll`、`tktext`、`tkttk`）默认在后台运行，直接输入 `tkdesktop` 或 `tkedit notes.txt` 就会马上返回提示符，窗口一直开着，直到程序自己结束（关窗口、`destroy()`）。显式加 `&` 也只启动一个后台任务。其他命令可在末尾加 `&` 进入后台；用 `python /bin/tkdesktop.py` 直接执行脚本则仍在前台运行。每个程序只管自己的窗口和事件：前台命令结束时不会关掉后台程序的窗口；不指定父窗口创建的控件、`Toplevel()` 落在各自程序的根窗口上；一个程序窗口上的点击、定时器只在这个程序自己的事件循环里执行。后台程序开着窗口时，下一个 `Tk()` 在同一块屏上再开一个窗口。
+**后台运行**：自带的 14 个 Tk 命令（`tkaemon`、`tkcanvas`、`tkdemo`、`tkdesktop`、`tkedit`、`tkexplorer`、`tkimage`、`tklayout`、`tklog`、`tkprogress`、`tkscroll`、`tktaskmgr`、`tktext`、`tkttk`）默认在后台运行，直接输入 `tkdesktop` 或 `tkedit notes.txt` 就会马上返回提示符，窗口一直开着，直到程序自己结束（关窗口、`destroy()`）。显式加 `&` 也只启动一个后台任务。其他命令可在末尾加 `&` 进入后台；用 `python /bin/tkinter/tkdesktop.py` 直接执行脚本则仍在前台运行。每个程序只管自己的窗口和事件：前台命令结束时不会关掉后台程序的窗口；不指定父窗口创建的控件、`Toplevel()` 落在各自程序的根窗口上；一个程序窗口上的点击、定时器只在这个程序自己的事件循环里执行。后台程序开着窗口时，下一个 `Tk()` 在同一块屏上再开一个窗口。
 
 - `jobs` 列出还在运行的后台命令；`kill 编号`（或 `kill %编号`）停止那个命令：关掉它的窗口，它的线程和协程在各自的下一个等待点结束（`mainloop()` 之后的代码不会再执行）。
 - 后台命令不能读键盘（键盘输入留给 shell，读终端会报错，`event.listen` 的按键回调也收不到），也不能在终端上画全屏界面；它 `print` 的内容和出错信息在下一次出现提示符时一起显示（最多保留最近 256 段，更早的会提示丢了多少），结束时显示 `[编号] done ...`（出错时显示错误）。后台命令再启动后台命令时，`[编号]` 也记在它自己的输出里。
@@ -54,9 +54,9 @@ print(root.winfo_screen())
 - 还有后台命令在运行时，`exit`/`reboot` 第一次只提示，再输一次才停掉它们（给它们一秒执行 `finally`）并关机。
 - shell 等待输入时不会取走 Tk 事件（`computer.pullSignal` 在本机有 Tk 窗口时跳过它们，留给 tkinter）。
 
-`sh.run_command(name, args)` 和 `sh.spawn(name, args)` 都接受命令名或脚本路径。裸命令名按 `/bin`、`/usr/bin`、`/home/bin`、当前工作目录的顺序搜索，每个目录先试原文件名，不存在时再补 `.py`。带 `/` 的路径直接按调用程序的 cwd 解析，例如 `sh.spawn('../apps/viewer.py', ['notes.txt'])`；绝对路径也可用。`sh.cwd` 与本程序的 `os.getcwd()` 保持一致，`os.chdir()` 或 `sh.run_command('cd', ['目录'])` 只改变本程序。`spawn` 的 `cwd=` 可指定子任务起始目录，相对值按调用者 cwd 解析，脚本路径再按子任务 cwd 查找。
+`sh.run_command(name, args)` 和 `sh.spawn(name, args)` 都接受命令名或脚本路径。裸命令名按 `/bin`、`/bin/tkinter`、`/usr/bin`、`/home/bin`、当前工作目录的顺序搜索，每个目录先试原文件名，不存在且未写 `.py` / `.mpy` 时依次补这两个后缀。带 `/` 的路径直接按调用程序的 cwd 解析，例如 `sh.spawn('../apps/viewer.py', ['notes.txt'])`；绝对路径也可用。`sh.cwd` 与本程序的 `os.getcwd()` 保持一致，`os.chdir()` 或 `sh.run_command('cd', ['目录'])` 只改变本程序。`spawn` 的 `cwd=` 可指定子任务起始目录，相对值按调用者 cwd 解析，脚本路径再按子任务 cwd 查找。
 
-`os.environ['PATH']` 是冒号分隔的搜索路径（默认 `/bin:/usr/bin:/home/bin:.`）；`sh.path` 是同一变量的兼容入口，任一入口修改后，命令查找、`which` 和 Tab 都立即使用新值。删除或清空 PATH 会禁用裸文件名搜索，内置命令、`./` 和绝对路径仍可用。`sh.command_path(name)` 返回命中的绝对路径或 `None`，`sh.find_command(name)` 保留返回源码的接口。shell 执行脚本时注入 `args`、`tty`、`sh`，以及绝对路径 `__file__` 和 `__name__='__main__'`。嵌套 `run_command` 属于调用者程序，`spawn` 创建独立后台程序。
+`os.environ['PATH']` 是冒号分隔的搜索路径（默认 `/bin:/bin/tkinter:/usr/bin:/home/bin:.`）；`sh.path` 是同一变量的兼容入口，任一入口修改后，命令查找、`which` 和 Tab 都立即使用新值。删除或清空 PATH 会禁用裸文件名搜索，内置命令、`./` 和绝对路径仍可用。`sh.command_path(name)` 返回命中的绝对路径或 `None`，`sh.find_command(name)` 返回源码文本或 `.mpy` 的原始字节。shell 执行脚本时注入 `args`、`tty`、`sh`，以及绝对路径 `__file__` 和 `__name__='__main__'`。嵌套 `run_command` 属于调用者程序，`spawn` 创建独立后台程序。
 
 环境变量接口冻结在 `os` 模块中：`os.getenv(key, default=None)`，以及 `os.environ` 的读写、删除、遍历、`keys/values/items/get/update/setdefault/pop/popitem/clear/copy` 和 `dict(os.environ)`。键和值均为字符串，键区分大小写，空键、含 `=` 的键和 NUL 字符不能写入。环境属于游戏内的 OC 电脑，不读取运行 Minecraft 的 Java/Windows 主机环境；未启动 MPYOS 的裸程序初始环境为空。这里未实现 `putenv/unsetenv/environb`，通过映射修改变量。环境随 VM 存档恢复。
 
@@ -65,7 +65,7 @@ shell 启动前台命令或 `spawn` 时复制调用者环境，程序内部的�
 ```python
 import os
 
-os.environ['PATH'] = '/home/apps:/bin:/usr/bin:/home/bin:.'
+os.environ['PATH'] = '/home/apps:/bin:/bin/tkinter:/usr/bin:/home/bin:.'
 os.environ['APP_MODE'] = 'demo'
 print(os.getenv('APP_MODE', 'normal'))
 job = sh.spawn('viewer', ['notes.txt'])
@@ -73,9 +73,155 @@ job = sh.spawn('viewer', ['notes.txt'])
 
 以上示例放在由 shell 直接执行的脚本里，`viewer` 及其线程可读取 `APP_MODE`，独立运行的其他程序不受影响。
 
-后台任务管理来自新版 `/lib/shell.py`，Tk 命令的默认后台启动逻辑在各自的 `/bin/tk*.py` 中：已经安装到硬盘的 MPYOS 需要从 LiveCD 复制新的 `/lib/shell.py`、`/bin/which.py` 和相应脚本（或重新 `install`）才会有，之后重启 OC 电脑。
+后台生命周期由冻结标准库 `_process` 统一管理，shell 和 `subprocess` 使用同一运行层。Tk 命令通过第一行 `#!/usr/bin/env pythonw` 声明默认后台，不再自己调用 `sh.spawn`。已有系统需更新模组 JAR，从新 LiveCD 更新 `/lib/shell.py`、`/lib/osfs.py`、`/bin/which.py`、`/bin/python.py`、`/bin/python3.py`、`/bin/py.py`、新增 `/bin/pythonw.py` 及 `/bin/tkinter/tk*.py`，然后重启 OC 电脑。
+
+Tk 命令位于 `/bin/tkinter/`，已加入默认 PATH，裸命令名与 Tab 补全保持可用。旧硬盘需更新 `/lib/shell.py` 并迁移原 `/bin/tk*.py`；不要在 `/bin` 留旧副本，否则会先执行旧版本。自定义 PATH 需自行加入新目录。
+
+### 标准程序启动接口
+
+应用代码可以完全不依赖 `sh`：路径使用 `os.getcwd()`、`os.chdir()`、`os.path.abspath()`，环境使用 `os.environ` / `os.getenv()`，参数读取 `sys.argv`。`sys.argv` 是真正的列表，第 0 项是脚本的绝对路径，后面是用户参数；修改、重新赋值、`from sys import argv` 和 `getattr/setattr` 均按当前程序访问。子线程共用本程序的 argv；另一程序有独立列表。argv、cwd、环境和后台程序随 VM 一同存档。
+
+```python
+import os
+import sys
+import subprocess
+
+print(sys.argv[1:])
+child = subprocess.Popen(['pythonw', 'viewer.py', 'notes.txt'], cwd='/home')
+print(child.pid)
+# poll() returns None while running; wait() blocks until it exits.
+result = subprocess.run([sys.executable, '/home/check.py'], check=True)
+print(result.returncode)
+```
+
+- `Popen(args, cwd=None, env=None)` 立即返回，启动者退出后子程序继续运行；`run` / `call` / `check_call` 等待子程序退出。字符串 `args` 作为单个程序名，多个参数要传列表；不会按 shell 语法拆字符串。
+- `cwd` 相对调用者 cwd，显式脚本路径相对新 cwd；裸命令按子程序 `env['PATH']` 搜索，逐目录尝试原名、`.py`、`.mpy`。已明确写 `.py` / `.mpy` 时不再补后缀；找到文件后编译或运行失败不会改试另一个候选。`env` 不指定时复制父环境，指定时整体替换。参数中的相对文件名保持原样，由程序解析。
+- `python 文件` 前台运行；`pythonw 文件` 后台运行且不能读取终端。两者的文件参数按 cwd 精确解析，不搜索 PATH、不补扩展名。仅大小写敏感的 `.mpy` 后缀加载兼容的 v6 字节码（拒绝 native）；其他文件永远按源码编译，不探测文件头，也不在失败后改用另一种格式。字节码使用 `pythonw` 或 `&` 指定后台运行。Tk 源码命令默认后台，显式 `python /bin/tkinter/tkedit.py` 则忽略第一行后台声明。`pythonw ... &` 仍只创建一个程序。这里将 `pythonw` 定义为后台启动入口；CPython Windows 的同名程序本身只代表无控制台解释器，并不普遍承诺 shell 立即返回。
+- `Popen` 支持 `pid`、`poll()`、`wait(timeout=None)`、`returncode`、`terminate()`、`kill()`、`send_signal(9或15)`、上下文管理器，以及无管道的 `communicate()`。正常退出码 0，`sys.exit(n)` 返回 n，未捕获异常返回 1；终止/kill 的返回码为 -15/-9。`pid` 是 VM 内程序编号，shell 的 `jobs/kill` 使用另一套作业编号，不是主机 PID。
+- `run(..., check=True)` 和 `check_call` 在非零退出时抛 `CalledProcessError`；`wait(timeout=...)` 超时抛 `TimeoutExpired`，保留运行中的子程序；`run/call` 超时会请求停止它。退出清理仍按协作调度执行，可能在后续 tick 完成。文件缺失在创建时抛 `FileNotFoundError`，不会登记一个隐藏任务。
+- 所有子程序共用该 OC 电脑的 VM 和已导入模块，只有程序身份、argv、cwd、环境及所属资源隔离。正常退出等非守护线程，再停止其余任务并清理窗口/回调；独立子程序不属于父程序的线程。`terminate/kill` 都是协作停止，不能强制中断没有等待/轮询点的纯计算循环。
+- 当前没有 stdin/stdout/stderr 管道或重定向、`capture_output`、`shell=True`、原生执行文件、`-c/-m` 和平台专属创建选项；不支持的 subprocess 选项明确抛 `NotImplementedError`。普通子程序继承终端，`pythonw` 使用后台终端视图。`CompletedProcess.stdout/stderr` 为 `None`。旧 `args/argv/sh/tty` 注入仍兼容，但新应用可仅使用标准模块。
+
+也支持完整的 `os.spawn*` 函数族，无需 `sh`：
+
+```python
+import os
+
+code = os.spawnv(os.P_WAIT, '/home/check.py', ['check', 'notes.txt'])
+pid = os.spawnlp(os.P_NOWAIT, 'python', 'python', '/home/app.py', 'notes.txt')
+print(pid)
+finished, status = os.waitpid(pid, 0)
+print(os.waitstatus_to_exitcode(status))
+```
+
+| 接口 | 参数形式 | 搜索 PATH | 子程序环境 |
+|---|---|---|---|
+| `spawnv(mode, path, argv)` | list / tuple | 否 | 继承副本 |
+| `spawnve(mode, path, argv, env)` | list / tuple | 否 | env 整体替换 |
+| `spawnvp(mode, file, argv)` | list / tuple | 是 | 继承副本 |
+| `spawnvpe(mode, file, argv, env)` | list / tuple | 是 | env 整体替换 |
+| `spawnl(mode, path, arg0, ...)` | 逐个参数 | 否 | 继承副本 |
+| `spawnle(mode, path, arg0, ..., env)` | 逐个参数，最后为 env | 否 | env 整体替换 |
+| `spawnlp(mode, file, arg0, ...)` | 逐个参数 | 是 | 继承副本 |
+| `spawnlpe(mode, file, arg0, ..., env)` | 逐个参数，最后为 env | 是 | env 整体替换 |
+
+- `P_WAIT` 等待程序和退出清理完成，返回退出码；即使启动 `pythonw` 也等待。`P_NOWAIT` / `P_NOWAITO` 立即返回独立子程序的虚拟 PID，并使用 MPYOS 后台终端视图，不能读取键盘。两种模式都登记程序和独立 runner 线程，不会把子程序挂在父程序的线程生命周期里。
+- `argv` 必须包含非空 `argv[0]`，它是调用者提供的程序名，不用于定位文件。直接运行脚本时保留该值，`__file__` 则为脚本绝对路径。通过 `python/pythonw` 启动时，解释器按通常规则将目标脚本路径放在脚本的 `sys.argv[0]`，且只创建一个程序。
+- 不带 `p` 时按 cwd 精确解析文件名，不补扩展名、不搜索 PATH。带 `p` 时使用子环境的 PATH，沿用 MPYOS 逐目录尝试原名、`.py`、`.mpy` 的简写规则；含 `/` 的名字直接按 cwd 解析。仅 `os.spawn*p*` 遵循以下规则：空 PATH 项表示 cwd（包括 `PATH=''`），缺少 PATH 时使用 `os.defpath`（`/bin:/bin/tkinter:/usr/bin`）。shell / subprocess 的原有 PATH 规则不变。
+- 启动时复制 cwd、argv 和环境；`e` 版本的 env 必须是字符串键值映射。参数类型、NUL、环境变量名及模式错误在创建前报错。找不到或读不到可执行脚本时，按 Unix spawn 语义创建一个退出码为 127 的子程序；普通未捕获异常或脚本编译错误为 1。正常退出码取低 8 位，终止为 -9 / -15。
+- `os.getpid()` / `os.getppid()` 返回虚拟程序 PID / 父 PID；交互式 shell 为 0，同程序的线程共享 PID。它们也能查询 shell / subprocess 启动的程序。`os.kill(pid, 0)` 检查身份是否存在，`os.kill(pid, 9或15)` 协作停止该虚拟程序；PID 与 shell 的作业编号不同，不访问主机进程。
+- `os.waitpid(pid, 0)` 等待并领取一次退出状态；`pid=-1` 等待任一直接子程序。`os.WNOHANG` 不等待，尚未结束时返回 `(0, 0)`；没有可等待的子程序或状态已领取时抛 `ChildProcessError`。返回的 status 是 Unix 编码状态，使用 `os.waitstatus_to_exitcode(status)` 转换；它与 `P_WAIT` 直接返回的退出码不同。
+- `waitpid` 在此仅收集本程序用 `os.spawn*` 启动的子程序，`subprocess` 的等待仍使用 `Popen.wait()`。未领取的退出记录只保留父 PID 和状态，支持存档恢复；父程序结束时清除其记录，仍运行的子程序转为父 PID 0，之后自动回收。根 shell 仍存活时，调用者需领取退出状态，避免一直累积记录。
+- 不支持进程组、`P_OVERLAY`、`P_DETACH` 或其他信号。`kill(9)` 与 `kill(15)` 都需要程序到达等待/轮询点；没有主机进程隔离，也不能强制打断纯计算循环。新增接口在模组 JAR 内，升级 JAR 后重启 OC 电脑生效（已有标准程序运行层的硬盘无需为本次新增接口复制脚本）。
+
+参考：[Python subprocess](https://docs.python.org/3/library/subprocess.html)、[Python os.spawn](https://docs.python.org/3/library/os.html#os.spawnl)、[Windows pythonw](https://docs.python.org/3/using/windows.html)。
 
 任何玩家都能打开 GUI 观看；只有占用该显示器的电脑允许交互的玩家（`computer.addUser` 名单，与 OC 屏幕和键盘相同）才能点击、输入和复制。由玩家引起的事件按 OC 的 `computer.checked_signal` 投递，每台电脑各自按自己的名单过滤。
+
+## tkexplorer：文件浏览器
+
+运行 `tkexplorer [目录或文件]`，默认后台打开，省略参数时浏览当前工作目录。传入文件则打开其父目录并选中它；浏览不会改变 shell 的 cwd。
+
+文件名前显示 16×16 像素图标：文件夹为经典黄色文件袋，`.py` / `.pyw` 为蓝黄蛇形图标，`.lua` 为带 Lua 字样的蓝色图标，其他文件为折角文档。扩展名不区分大小写；每个窗口复用四张 PhotoImage，刷新与翻页不重复分配图像。
+
+浏览器隐藏树形展开箭头及其 16 像素占位，图标从单元格左边 2 像素处开始绘制。行图标使用最近邻采样，GUI 放大后保持像素边缘；普通 Label/Button 照片仍使用平滑采样。
+
+- `<` / `>` 后退、前进，`Up` 返回上级；地址栏支持绝对路径或相对当前浏览目录的路径。`Refresh` 重新读取目录并扫描挂载磁盘，根目录显示 `/mnt`。
+- 非根目录的列表首项为 `..`，双击、Enter 或 Open 返回上一级并选中刚离开的目录。它不受隐藏文件、筛选、排序和分页影响，不计入文件数，也不可重命名或删除；根目录不显示。
+- 目录排在文件前面，点击 Name 切换名称排序。显示文件类型、大小；Hidden 显示隐藏文件，Filter / Apply 按名称筛选。每页最多 100 项，Prev / Next 翻页，刷新和排序保留所选文件。
+- 双击或 Open 进入目录；文件交给独立后台 `tkedit` 打开。不会执行 Python 文件；文本格式和大小限制沿用 tkedit。关闭浏览器不会关闭已经打开的编辑器。
+- File + / Folder + 新建空文件或文件夹，Rename 重命名，Delete 确认后永久删除文件或空文件夹。已有同名目标不会被覆盖；非空目录不会递归删除。挂载点不可重命名或删除，只读目录禁用修改按钮。
+- 快捷键：文件列表中 Enter 打开、Backspace 上级、F2 重命名、Delete 删除；F5 刷新、Ctrl+L 选中地址栏。磁盘满、路径失效或磁盘断开时显示错误；重新接回磁盘后可以 Refresh。
+
+首版没有复制/剪切/粘贴、递归删除、拖放或文件类型关联设置。界面文字为英文。升级服务端与客户端 JAR 后将新 LiveCD 的 `/bin/tkinter/tkexplorer.py` 复制到已有硬盘，并重启 OC 电脑以载入 Tk 的更新。
+
+## 终端中断
+
+在 OC 终端运行前台程序时，Ctrl+C 在 `time.sleep`（包括 `sleep(0)`）、事件等待、显式 yield、线程 join、Tk / asyncio 轮询等协作点抛出 `KeyboardInterrupt`。普通 Ctrl+C 不会打断完全没有协作点的计算循环；Ctrl+Alt+C 另外在 VM 循环回跳、函数/方法调用和执行恢复处检查，可打断 `while True: pass`。
+
+中断交给当前前台程序的主执行线程；嵌套的前台子程序优先，后台程序及其子程序不会抢终端中断。同程序的工作线程不会代收。异常可以用 `except KeyboardInterrupt` 捕获，`finally` 正常运行；一次按键只投递一次，长按重复事件不会反复打断清理。未捕获时前台程序返回 130，并协作停止所属线程。REPL 显示 `KeyboardInterrupt` 后继续接受输入。
+
+Ctrl+Alt+C 仍然是 Python 异常，不是强杀：被用户代码捕获后可以继续运行，长时间 Java/组件调用要等返回，`machine.disable_irq()` 期间延迟到恢复 IRQ 后检查。待处理中断随 VM 存档保存，程序结束时清除。Tk 编辑控件内的 Ctrl+C 仍用于复制；这两个中断快捷键来自 OC 终端键盘。
+
+升级模组后需要关闭并重新启动 OC 电脑，让新冻结模块生效；只读档会继续执行存档内的旧代码。已安装到硬盘的系统还需更新 `/bin/python.py`、`/bin/python3.py`、`/bin/py.py`，才能获得 REPL 中断后继续输入的处理。
+
+## tktaskmgr：程序与 ops 监视器
+
+在 shell 输入 `tktaskmgr`，默认后台打开。每秒刷新 PID、命令行、ops/s、Share %、线程数、状态和累计 ops；点击表头排序，再次点击反转。刷新保留选择，窄屏使用底部横向滚动条查看其余列，选中项下方显示父 PID、前台/后台和精确累计数。
+
+选择程序后点击 **End process** 请求停止该程序及所属线程，并释放它的窗口/回调。状态变为 Stopping，清理完成后从列表移除；独立子程序继续运行。PID 0（shell/系统）和任务管理器自身的结束按钮禁用，自身使用窗口关闭按钮退出。停止仍是协作式：sleep、Tk 更新、事件等待等轮询点响应，没有轮询的纯计算循环会一直显示 Stopping。
+
+- ops 是 VM 实际分派的字节码指令数；程序的主执行流、子线程、同程序 asyncio 工作及内嵌 Python 回调合计。异常指令和挂起后重试的调用也计数。Java 组件内部工作和等待时间不折算成 ops。
+- `ops/s` 是两次采样间指令增量除以 `computer.uptime()` 的增量。`Share %` 是同一时段本程序 ops / 整台 VM ops，表示指令执行份额，**不是服务器真实 CPU 使用率或 TPS 耗时**。任务管理器自身的刷新消耗也计入。
+- PID 0 的 Shell / system 行包含根执行流和未归属独立程序的线程。Active 表示程序尚存活，包含等待中的程序；Stopping 表示已请求停止；Finishing 表示正在收尾。
+- 首次采样显示 `--`，之后显示速率。采样期间退出程序的指令仍计入 VM 总量，因此当前行的份额之和可能小于 100%。累计数随存档恢复；退出程序的 VM 计数表项被清理，历史总量只保留整数，不保留线程或应用对象。
+- 更新 JAR 并重启 OC 电脑；已有 MPYOS 硬盘从新 LiveCD 复制 `/bin/tkinter/tktaskmgr.py`。本次新增统计接口在冻结模块里，已有标准程序运行层的硬盘无需更新其他系统脚本。旧格式存档可以读取，但使用新增统计功能应重启电脑以载入新的冻结模块。
+
+脚本也可读取诊断快照（MPYOS 扩展，并非 CPython 标准 API）：
+
+```python
+import _process
+
+data = _process.snapshot()
+print(data['total_ops'])
+for process in data['processes']:
+    print(process['pid'], process['command'], process['ops'], process['threads'])
+```
+
+快照为独立字典，不会清零计数或暴露可修改的作业对象。`_process.ProcessMonitor().sample(computer.uptime())` 可增量采样；保留同一个 monitor 实例用于后续采样，各窗口互不重置计数。
+
+## tkaemon：AE 合成 CPU 监视器
+
+`tkaemon [ME组件地址或唯一前缀]` 默认后台启动，可在单块 Tk 显示器上使用。OC Adapter 须贴着 AE 的 ME Controller 或 ME Interface，并与 OC 电脑连接。顶部选择组件，`CPUs` 页选择 CPU。默认打开 `Tasks` 页：每种物品／流体使用原生 ItemIcon / FluidIcon 卡片，显示名称、数量和分段状态条，绿色为 D~（观测期间完成约数）、橙色为 A（正在制作）、灰色为 W（等待制作）。流体数量单位是 mB；卡片数量缩写为 k/M/G，点击卡片可在底部查看当前筛选的数量（All 为剩余量，Done~ 为完成约数）。
+
+筛选器有 All / Crafting / Waiting / Done~ / Stored。一个物品可以同时有等待、制作和已完成数量，因此会出现在多个筛选中。Stored 单独展示 CPU 当前库存，不计为已完成。卡片数随可用高度调整，每页最多 8 张，使用 `<` / `>` 或鼠标滚轮翻页；刷新保留当前页及所选物品，复用控件。观测历史最多保留 512 种，超出时提示；总体进度仍统计全部清单。
+
+**D~ 是估计值，不是 AE 提供的完成记录**：同一种物品的 Active + Pending 数量下降时，累计减少量；Pending 转到 Active 不增加完成量，任务合并增加待制作量时不抹掉已经观测到的完成量。物品按名称、metadata 和可用的 NBT/tag 区分，流体与同名物品分开。CPU 空闲既可能是完成也可能是取消，因此显示 `Idle: finished or cancelled`，并清空上一任务的卡片，不把未完成部分自动补成成功。切换 CPU、Rescan、Active/Pending 读取失败、断线或观测到不同最终产物时重新计数。OC 不提供任意 CPU 的任务 ID 和原子快照，漏采期间取消后重开同种产物的任务无法可靠区分；中途打开也不会补出历史完成量。
+
+所选 CPU 每秒读取一次，其他 CPU 每次最多检查 4 个，轮转更新。CPU userdata 保持复用；新建、拆除或重组 CPU 后点 `Rescan` 更新 CPU 清单。每 5 秒发现组件变化，断线后清空旧数据并重试，重新连接后重新计数；没有 AE 网络时窗口保留，显示连接说明。只读监视，不请求或取消合成。
+
+数据来自当前依赖 [OpenComputers 1.12.64-GTNH 的 NetworkControl](https://github.com/GTNewHorizons/OpenComputers/blob/1.12.64-GTNH/src/main/scala/li/cil/oc/integration/appeng/NetworkControl.scala)：`getCpus`、CPU 的 `isBusy/activeItems/pendingItems/storedItems/finalOutput`。进度照 AE 自己的算法（`CraftingCPUCluster.prepareStepCount`：剩余量为 ACTIVE 与 PENDING 清单数量之和，起点取任务开始时的这个和，合并进来的任务把新增量加到起点上，产物送回网络时扣减）：OC 的 `activeItems`/`pendingItems` 用的是同一个 `getModernListOfItem`，所以剩余量 = 两张清单的数量之和，起点 = 首次观测到的和，剩余量上升时起点加上增量，界面用 **~百分比 seen** 标记从开始观测起的进度。OC 没有暴露 AE 的 `getStartItemCount`，中途打开时只能从打开那一刻算起。`finalOutput` 只用来显示合成目标，它要求 CPU 多方块中有 Crafting Monitor；它的数量是“最终产物尚未交付的数量”，只在成品送回网络时才减少（单件产物整个任务里一直是 1），不能当进度用，这是改用清单计算的原因。切换 CPU、重新扫描、观测到空闲/错误时重新计数；Idle 无法区分完成或取消。清单读不到时使用不定量忙碌条，显示 API 返回的原因。
+
+已有系统从新 LiveCD 复制 `/bin/tkinter/tkaemon.py`、`/lib/aemon.py`，并更新模组 JAR。`python /bin/tkinter/tkaemon.py` 可前台运行。
+
+## 原生物品与流体图标（MPY4OC 扩展）
+
+`tk.ItemIcon` 与 `tk.FluidIcon` 是本模组扩展，供任意 Tk 程序使用；客户端绘制游戏本身的物品图标、Forge 流体材质及染色，GUI 和方块表面共用绘制路径。
+
+```python
+import tkinter as tk
+
+root = tk.Tk()
+item = tk.ItemIcon(root, item={'name': 'minecraft:iron_ingot', 'damage': 0}, width=32, height=32)
+item.pack(side=tk.LEFT)
+fluid = tk.FluidIcon(root, fluid={'name': 'water'}, width=32, height=32)
+fluid.pack(side=tk.LEFT)
+root.mainloop()
+```
+
+描述表可直接使用 OC 返回的物品/流体表。ItemIcon 使用 `name`、`damage`（默认 0，可取 0..65535）和可选的 `nbt`（SNBT compound 字符串）；FluidIcon 只使用 `name`。数量、标签及 OC 的压缩 `tag` 字段不参与图标绘制，数量可另用 Label 显示。`configure(item=None)` / `configure(fluid=None)` 清空图标；`width/height` 是内容像素，默认 24，图标在内容区内保持正方形，普通布局、背景、边框、anchor、鼠标绑定均可用。无效资源或客户端渲染失败显示缺失图标，不读取或修改实际库存。
+
+名称最多 256 UTF-8 字节；物品 NBT 最多 4096 UTF-8 字节、嵌套深度 16；整棵控件树的图标描述预算 64 KiB。超限或格式错误会报错，不替换已有图标。控件描述和显示记录随存档保存。
 
 ## 桌面与窗口
 
@@ -113,7 +259,7 @@ top.protocol('WM_DELETE_WINDOW', lambda: print('点了 ×'))   # 不设时 × �
 - **限制**：窗口总在桌面上，拖动、改大小或 `geometry` 都会把窗口夹在屏内，标题栏不会被拖到任务栏下面，至少留 24 像素标题栏可以抓。标题栏至少要放下按钮再加 24 像素，很窄的窗口也有地方拖。销毁一个控件时，以它（或它的子控件）为 master 的 Toplevel 一起销毁。一块屏最多 32 个窗口（所有程序合计），所有窗口共用这块屏的控件和绘制预算（见“输入、世界表面与限制”）：程序的调用超出时报错；玩家操作造成的超出先丢最下层窗口的内容（任务栏总是保留）。拖动和改大小按游戏 tick 更新（每秒 20 次），重内容窗口拖动时更费带宽。
 - 同一块屏上的窗口都属于同一台电脑；另一台电脑指定这块屏的地址 `Tk()` 会接管整块屏。
 
-MPYOS 的 `/bin/tkdesktop.py` 是一个示例：它自己的窗口上有开新窗口的按钮，另外开一个带计数器的窗口、一个不能改大小的窗口、一个 Canvas 随窗口大小重画的图表窗口。
+MPYOS 的 `/bin/tkinter/tkdesktop.py` 是一个示例：它自己的窗口上有开新窗口的按钮，另外开一个带计数器的窗口、一个不能改大小的窗口、一个 Canvas 随窗口大小重画的图表窗口。
 
 ## 多块拼接与分辨率
 
@@ -211,7 +357,9 @@ tree.bind('<<TreeviewSelect>>', lambda e: print(tree.selection()))
 ```
 
 - 方法与返回值同 CPython 3.12 + Tk 8.6：`insert`（自动 id 为 `I001`、`I002`……十六进制）、`item`、`delete`、`detach`、`move`/`reattach`、`get_children`、`set_children`、`parent`、`index`、`next`、`prev`、`exists`、`focus`、`selection` 与 `selection_set/add/remove/toggle`、`column`、`heading`、`set`、`see`、`bbox`、`identify`（`region`/`row`/`column`/`element`）、`tag_configure`、`tag_has`、`tag_bind`、`xview`/`yview`；选项 `columns`、`displaycolumns`、`height`（行数）、`selectmode`（`extended`/`browse`/`none`）、`show`（`tree`、`headings`）、`xscrollcommand`/`yscrollcommand`、`padding`。报错文字也一样（`Item x not found`、`Cannot insert a as descendant of b`、`Invalid column index q` 等）。
-- 外观照 default 主题：标题行 19 像素、每行 20 像素、每层缩进 20 像素，默认列宽 200；控件变宽变窄时列宽按 Tk 的算法伸缩（`stretch` 为假的列不动，不能小于 `minwidth`）。标签的 `foreground`、`background` 会画出来，`image`、`font` 只记录。
+- 外观照 default 主题：标题行 19 像素、每行 20 像素、每层缩进 20 像素，默认列宽 200；控件变宽变窄时列宽按 Tk 的算法伸缩（`stretch` 为假的列不动，不能小于 `minwidth`）。标签的 `foreground`、`background` 会画出来。
+- 行的 `insert(..., image=photo)` / `item(iid, image=photo)` 支持同一窗口的 PhotoImage 对象或名称，在树列的文字前绘制，随选择、滚动、存档恢复。推荐 16×16；大图按固定行高和列边界裁剪，隐藏树列时不画。`image=''` 清除图标；删除图片后引用它的行继续显示文字。标题/标签的 `image`、状态图片列表与字体尚不绘制。
+- MPY 扩展 `showindicator=False` 隐藏展开箭头及其占位，适用于平面文件列表；默认 True 保持普通树形布局，子级缩进仍然保留。此选项随存档保存。
 - 玩家：点一行选中它（`extended` 下 Ctrl 加减、Shift 从焦点项到这一项按树的顺序全选，收起的子项也算）；点行首的 ▸/▾ 或双击展开收起；上下左右键按 Tk 的规则移动和展开收起，Return、空格展开收起，PageUp/PageDown 翻页；滚轮滚一行；点标题执行它的 `command`；拖标题之间的分隔线改列宽。选择变化发 `<<TreeviewSelect>>`（排队，程序改选择也发），展开收起发 `<<TreeviewOpen>>`/`<<TreeviewClose>>`。
 - `tag_bind(标签, 事件, 函数)`：事件发生在带这个标签的行上时调用（先于控件自己的绑定）。
 
@@ -345,7 +493,7 @@ ttk.Frame(root, padding='3 3 12 12')
 - **样式决定外观**：ttk 控件按自己的样式（`style=`，没设时是类名，Scale、Scrollbar、Progressbar 带 `Horizontal.`/`Vertical.` 前缀）在当前主题里取颜色、relief、边框宽度、padding、anchor 和按钮最小宽度（TButton 的 `width -9`）来画，随状态变化：鼠标移到按钮上变 `active`（default 主题变亮），按下时 relief 变 sunken，禁用时文字变灰，选中的复选框填 `indicatorcolor`，Notebook 的标签、Treeview 的选中行和标题、Progressbar 的进度条和槽、Scale 和 Scrollbar 的槽、Entry/Combobox/Spinbox 的 `fieldbackground` 和箭头颜色都取自样式。`style.configure`/`map`/`theme_use` 之后在已排队的事件处理完时整体重画。程序在控件上直接设的 `background`、`foreground`、`relief`、`padding` 等优先于样式。颜色可以写 `'#rgb'`、`'#rrggbb'` 或 Tk 8.6 的颜色名（不分大小写，如 `'SteelBlue'`、`'grey50'`；带空格的写法如 `'alice blue'` 不认）。限制：字体只有一种，`font` 只记录；各主题元素自己的形状（clam 的平面边框与渐变、alt 的复选框形状等）没有另画，只换颜色和 relief；Entry 类控件的 padding 不跟样式变（保持经典尺寸），选中文字的颜色固定。
 - **控件齐了**：CPython 3.12 `tkinter.ttk` 的全部控件都可用（Menubutton、OptionMenu 见上文“菜单”，Panedwindow、LabeledScale 见上文）。
 
-MPYOS 的 `/bin/tkttk.py` 是一个示例，用 Notebook 分成四页：`Widgets` 页有 ttk 按钮（单击计数，双击显示在顶部）、复选/单选、带变量跟踪的 Scale 和 Progressbar、分隔线和一个带 Sizegrip 的窗口；`Borders` 页有六种 relief、ttk 和经典两种 Labelframe，以及可以用方向键移动圆点的 Canvas（`takefocus=1`）；`Inputs` 页有只读 Combobox、Spinbox、只能输入数字的 Entry、显示成 `*` 的 Entry 和切换主题的下拉框；`Tree` 页是带滚动条的文件夹 Treeview，点 Size 标题按大小排序。窗口标题跟着 `<<NotebookTabChanged>>` 变；单块显示器放得下。
+MPYOS 的 `/bin/tkinter/tkttk.py` 是一个示例，用 Notebook 分成四页：`Widgets` 页有 ttk 按钮（单击计数，双击显示在顶部）、复选/单选、带变量跟踪的 Scale 和 Progressbar、分隔线和一个带 Sizegrip 的窗口；`Borders` 页有六种 relief、ttk 和经典两种 Labelframe，以及可以用方向键移动圆点的 Canvas（`takefocus=1`）；`Inputs` 页有只读 Combobox、Spinbox、只能输入数字的 Entry、显示成 `*` 的 Entry 和切换主题的下拉框；`Tree` 页是带滚动条的文件夹 Treeview，点 Size 标题按大小排序。窗口标题跟着 `<<NotebookTabChanged>>` 变；单块显示器放得下。
 
 ## 图片
 

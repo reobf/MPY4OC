@@ -66,6 +66,7 @@ public class MpyArchitecture implements Architecture {
     private final Machine machine;
 
     private Vm vm;
+    private final KeyboardInterruptInput interruptInput = new KeyboardInterruptInput();
     private HostRegistry hosts;
 
     /** Soft memory ceiling for the sandbox, in bytes. This is a rough figure, not
@@ -397,6 +398,7 @@ public class MpyArchitecture implements Architecture {
      */
     @Override
     public boolean initialize() {
+        interruptInput.clear();
         vm = null;
         initialized = false;
         ended = false;
@@ -408,6 +410,7 @@ public class MpyArchitecture implements Architecture {
 
     @Override
     public void close() {
+        interruptInput.clear();
         vm = null;
         hosts = null;
         initialized = false;
@@ -723,6 +726,7 @@ public class MpyArchitecture implements Architecture {
 
     @Override
     public void load(NBTTagCompound nbt) {
+        interruptInput.clear();
         initialized = nbt.getBoolean("initialized");
         ended = nbt.getBoolean("ended");
         bootId = nbt.getString("bootId");
@@ -1204,9 +1208,12 @@ public class MpyArchitecture implements Architecture {
             "    # which would make time.sleep(1) return instantly in a game OS.",
             "    import _program",
             "    _d = computer.uptime() + ms / 1000",
-            "    while computer.uptime() < _d:",
+            "    while True:",
             "        _program.check()",
             "        computer._yield_tick()",
+            "        _program.check()",
+            "        if computer.uptime() >= _d:",
+            "            return",
             "",
             "def _mpy_eeprom():",
             "    for _addr in component.list('eeprom'):",
@@ -1812,7 +1819,9 @@ public class MpyArchitecture implements Architecture {
                 directCache.clear();
             }
             for (Object a : s.args()) parts.add(toPy(a));
-            list.items.add(new PyObj.Tuple(parts.toArray()));
+            PyObj.Tuple event = new PyObj.Tuple(parts.toArray());
+            if (interruptInput.accept(event, vm)) continue;
+            list.items.add(event);
             if (list.items.size() > 256) list.items.remove(0);   // bounded queue
         }
     }

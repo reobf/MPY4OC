@@ -9,7 +9,7 @@ final class TkControlOptions {
         if (w instanceof Entry && Arrays.asList("show", "justify", "validate", "notify").contains(key)) return true;
         if (w instanceof Spinbox && Arrays.asList("from", "to", "increment", "values", "wrap", "format", "delegate").contains(key)) return true;
         if (w instanceof Combobox && Arrays.asList("values", "postcommand").contains(key)) return true;
-        if (w instanceof Treeview && Arrays.asList("columns", "displaycolumns", "selectmode", "show", "xscrollcommand", "yscrollcommand", "notify").contains(key)) return true;
+        if (w instanceof Treeview && Arrays.asList("columns", "displaycolumns", "selectmode", "show", "showindicator", "xscrollcommand", "yscrollcommand", "notify").contains(key)) return true;
         if (w instanceof Text && Arrays.asList("wrap", "xscrollcommand", "yscrollcommand", "undo", "autoseparators", "maxundo", "notify",
                 "inactiveselectbackground", "insertbackground").contains(key)) return true;
         if (w instanceof Label && !(w instanceof Entry) && key.equals("wraplength")) return true;
@@ -230,6 +230,7 @@ final class TkControlOptions {
         if (!Arrays.asList("none", "browse", "extended").contains(mode))
             throw new IllegalArgumentException("bad selectmode \"" + mode + "\": must be none, browse, or extended");
         boolean tree = t.showTree, headings = t.showHeadings;
+        boolean showIndicator = m.containsKey("showindicator") ? TkOptions.bool(m.get("showindicator")) : t.showIndicator;
         if (m.containsKey("show")) {
             tree = headings = false;
             for (String part : values(m.get("show"))) {
@@ -252,6 +253,7 @@ final class TkControlOptions {
             if (display != null) t.displayColumns(display);
             boolean relayout = lines != t.lines || showTree != t.showTree || showHeadings != t.showHeadings;
             t.lines = lines; t.selectmode = mode; t.showTree = showTree; t.showHeadings = showHeadings;
+            t.showIndicator = showIndicator;
             t.xscrollcommand = xc; t.yscrollcommand = yc; t.notify = notify;
             t.tree.changed(relayout);
         };
@@ -320,6 +322,7 @@ final class TkControlOptions {
                     Object[] ids = new Object[t.display.size()]; for (int i = 0; i < ids.length; i++) ids[i] = t.display.get(i).id; return ids;
                 }
                 case "selectmode": return t.selectmode;
+                case "showindicator": return t.showIndicator;
                 case "show": { java.util.List<Object> s = new java.util.ArrayList<>(); if (t.showTree) s.add("tree"); if (t.showHeadings) s.add("headings"); return s.toArray(); }
                 case "xscrollcommand": return t.xscrollcommand;
                 case "yscrollcommand": return t.yscrollcommand;

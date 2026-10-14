@@ -8,6 +8,7 @@ import java.util.Map;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 import net.minecraft.client.renderer.texture.TextureUtil;
+import org.lwjgl.opengl.GL11;
 import reobf.mpy4oc.tk.TkImageCodec;
 import reobf.mpy4oc.tk.TkScene;
 import reobf.mpy4oc.tk.net.TkPackets;
@@ -25,7 +26,16 @@ final class TkImageCache {
     static final class Texture {
         final int texture, width, height;
         final long version;
+        private boolean pixelated;
         Texture(int texture, int width, int height, long version) { this.texture = texture; this.width = width; this.height = height; this.version = version; }
+        /** Called after binding. The same PhotoImage may be used by a row icon and a photo widget. */
+        void sampling(boolean pixelated) {
+            if (this.pixelated == pixelated) return;
+            int filter = pixelated ? GL11.GL_NEAREST : GL11.GL_LINEAR;
+            GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, filter);
+            GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, filter);
+            this.pixelated = pixelated;
+        }
     }
 
     private final Map<Integer, Texture> textures = new HashMap<>();

@@ -24,6 +24,7 @@ _waited = []         # programs the shell waits for (their threads leave Ctrl+C 
 _threads = []        # live threading.Thread objects (threading registers and drops them)
 _delivered = {}      # task (None: the main frame) -> [program, when] of its last SystemExit
 _on_end = []         # called with a program when it is over (asyncio drops its current loops)
+_foreground = []     # VM-owned [program, task, namespace, pending level, yielded] scopes
 _GRACE = 2
 
 
@@ -49,13 +50,7 @@ def current():
 
 def set_current(program):
     """Make the caller's task (or the main frame) run for program from now on."""
-    task = _here()
-    if task is None:
-        _main[0] = program
-    elif program is None:
-        _tasks.pop(task, None)
-    else:
-        _tasks[task] = program
+    __program_set(program)
 
 
 def adopt(coro):
@@ -67,8 +62,10 @@ def adopt(coro):
 
 def forget(task):
     """A thread (a VM task) ended."""
-    _tasks.pop(task, None)
+    program = __program_forget(task)
     _delivered.pop(task, None)
+    if program in _stopping and not live(program):
+        ended(program)
 
 
 def live(program):
@@ -128,7 +125,8 @@ def exit_due(task):
 
 
 def check():
-    """A poll point: SystemExit if the caller's program was asked to stop."""
+    """A poll point for foreground KeyboardInterrupt and program shutdown."""
+    __program_interrupt_check()
     if _stopping and exit_due(_here()):
         raise SystemExit
 

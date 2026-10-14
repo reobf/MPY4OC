@@ -30,6 +30,7 @@ class MpyosReplTest {
         final PyModule tty = new PyModule("tty", "<test>", null);
         final PyModule sh = new PyModule("sh", "<test>", null);
         int readIndex;
+        String setup = "";
 
         Session(String... lines) {
             tty.ns.put("read", (HostFunction) args -> {
@@ -51,7 +52,7 @@ class MpyosReplTest {
         }
 
         Vm run() throws Exception {
-            String source = Files.readString(BIN.resolve("python.py"), StandardCharsets.UTF_8);
+            String source = setup + Files.readString(BIN.resolve("python.py"), StandardCharsets.UTF_8);
             MpyModule module = MpyLoader.load(MpyCross.compile(source, "python.py"), new QstrPool());
             Vm vm = new Vm(module, globals);
             vm.setCompiler((text, filename, mode) -> MpyCross.compile(text, filename));
@@ -152,11 +153,19 @@ class MpyosReplTest {
     @Test
     void fileModeStillReceivesArgvAndDoesNotReadFromTerminal() throws Exception {
         Session session = new Session();
-        session.globals.put("args", new PyObj.PyList(new ArrayList<>(List.of("hello.py", "world"))));
-        session.sh.ns.put("resolve", (HostFunction) args -> "/home/" + args[0]);
-        PyModule fs = new PyModule("fs", "<test>", null);
-        fs.ns.put("read_file", (HostFunction) args -> "def greet():\n    print('Hello ' + argv[1])\ngreet()\n");
-        session.sh.ns.put("fs", fs);
+        session.setup = """
+                import sys, os, _process
+                class Files:
+                    def is_directory(self, path):
+                        return path == '/home'
+                    def exists(self, path):
+                        return path in ('/home', '/home/hello.py')
+                    def read_file(self, path):
+                        return "import sys\\nassert sys.argv == argv\\ndef greet():\\n    print('Hello ' + sys.argv[1])\\ngreet()\\n"
+                os.getcwd = lambda: '/home'
+                _process.install(Files())
+                sys.argv = ['/bin/python.py', 'hello.py', 'world']
+                """;
         session.run();
         assertEquals(List.of("Hello world"), session.output);
         assertTrue(session.prompts.isEmpty());

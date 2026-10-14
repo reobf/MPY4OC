@@ -125,6 +125,18 @@ public final class Vm {
      *  executing; ops() reads stepRemaining, ops_share() reads shareRemaining. */
     private int shareRemaining;
     private int stepRemaining;
+    // One primitive increment per dispatched opcode. Attribute batches only at
+    // task/program boundaries or a stats read, never by looking up every opcode.
+    private long executedOps, accountedOps, retiredOps;
+    private static final int OPS_SNAPSHOT_TAG = 0x4f505331; // optional trailing OPS1 section
+    private static final class ProgramOps {
+        final Object program;
+        long count;
+        boolean retired;
+        ProgramOps(Object program) { this.program = program; }
+    }
+    private final Map<Object, ProgramOps> programOps = new HashMap<>();
+    private ProgramOps accountingProgram;
     private int raiseIp;        // start ip of the executing instruction (C: code_state->ip)
     private int raiseSp;        // stack pointer at the start of the executing instruction
     private Limits limits = new Limits();
@@ -137,6 +149,166 @@ public final class Vm {
     private ModuleFinder moduleFinder;                       // the virtual filesystem
     final java.util.List<String> importRoots = new ArrayList<>(java.util.List.of("")); // "" always
     final Map<String, PyModule> loadedModules = new HashMap<>();          // dotted name -> module
+
+    private void registerModule(String name, PyModule module) {
+        loadedModules.put(name, module);
+        if (name.equals("sys")) module.program = this::currentProgram;
+    }
+
+    /** Same identity as _program.current(), without running Python during attribute lookup. */
+    private Object currentProgram() {
+        PyModule owner = loadedModules.get("_program");
+        if (owner == null) return PyObj.NONE;
+        if (drivingTask != null) {
+            Object tasks = owner.ns.get("_tasks");
+            return tasks instanceof PyObj.PyDict
+                    ? ((PyObj.PyDict) tasks).map.getOrDefault(drivingTask.coro, PyObj.NONE) : PyObj.NONE;
+        }
+        Object main = owner.ns.get("_main");
+        return main instanceof PyObj.PyList && !((PyObj.PyList) main).items.isEmpty()
+                ? ((PyObj.PyList) main).items.get(0) : PyObj.NONE;
+    }
+
+    // The scopes live in _program so their task/namespace identities and pending
+    // requests share the snapshot's object graph. Only this fast-path cache is transient.
+    private PyObj.PyList pendingInterrupt;
+
+    private List<Object> foregroundScopes() {
+        PyModule owner = loadedModules.get("_program");
+        Object scopes = owner == null ? null : owner.ns.get("_foreground");
+        return scopes instanceof PyObj.PyList ? ((PyObj.PyList) scopes).items : Collections.emptyList();
+    }
+
+    private void refreshInterrupt() {
+        pendingInterrupt = null;
+        for (Object value : foregroundScopes()) {
+            PyObj.PyList scope = (PyObj.PyList) value;
+            if ((Long) scope.items.get(3) != 0) pendingInterrupt = scope;
+        }
+    }
+
+    /** Called between VM steps by the input driver. Returns false at the shell prompt.
+     *  Repeated requests coalesce; a strong request upgrades an ordinary one. */
+    public boolean requestKeyboardInterrupt(boolean strong) {
+        List<Object> scopes = foregroundScopes();
+        if (scopes.isEmpty()) return false;
+        PyObj.PyList scope = (PyObj.PyList) scopes.get(scopes.size() - 1);
+        scope.items.set(3, Math.max((Long) scope.items.get(3), strong ? 2L : 1L));
+        pendingInterrupt = scope;
+        // A foreground runner may be parked in a native scheduler sleep.
+        for (AsyncTask task : asyncTasks) if (task.coro == scope.items.get(1)) task.sleepRemainingMs = 0;
+        return true;
+    }
+
+    private boolean ownsForeground(PyObj.PyList scope) {
+        return scope.items.get(1) == (drivingTask == null ? PyObj.NONE : drivingTask.coro)
+                && scope.items.get(0).equals(currentProgram());
+    }
+
+    private boolean inForegroundCode(PyObj.PyList scope, boolean cooperative) {
+        Object namespace = scope.items.get(2);
+        PyModule runtime = loadedModules.get("_process");
+        for (Frame frame = current; frame != null; frame = frame.caller) {
+            if (frame.execGlobals instanceof DictGlobals && ((DictGlobals) frame.execGlobals).dict == namespace) return true;
+            // Never inject a strong interrupt halfway through process registration,
+            // context switching or teardown. Explicit polling waits remain interruptible.
+            if (!cooperative && runtime != null && frame.code.module == runtime.code) return false;
+            if (frame == asyncTaskRoot) break;
+        }
+        return false;
+    }
+
+    private void interruptPoint(boolean cooperative) {
+        PyObj.PyList scope = pendingInterrupt;
+        if (scope == null || irqDepth != 0 || !ownsForeground(scope)
+                || (!cooperative && (Long) scope.items.get(3) < 2)
+                || !inForegroundCode(scope, cooperative)) return;
+        scope.items.set(3, 0L); // consume BEFORE raising, so except/finally may sleep safely
+        refreshInterrupt();
+        throw new PyException("KeyboardInterrupt", "", new Object[0]);
+    }
+
+    private void foregroundYield() {
+        interruptPoint(true);
+        for (Object value : foregroundScopes()) {
+            PyObj.PyList scope = (PyObj.PyList) value;
+            if (ownsForeground(scope) && inForegroundCode(scope, true)) scope.items.set(4, true);
+        }
+    }
+
+    private void foregroundResume() {
+        for (Object value : foregroundScopes()) {
+            PyObj.PyList scope = (PyObj.PyList) value;
+            if (ownsForeground(scope) && Boolean.TRUE.equals(scope.items.get(4))) {
+                scope.items.set(4, false);
+                interruptPoint(true);
+            }
+        }
+        interruptPoint(false);
+    }
+
+    private void accountProgramOps() {
+        long used = executedOps - accountedOps;
+        if (used != 0) {
+            if (accountingProgram == null || accountingProgram.retired) retiredOps += used;
+            else accountingProgram.count += used;
+            accountedOps = executedOps;
+        }
+    }
+
+    private void selectAccountingProgram() {
+        accountProgramOps();
+        Object program = currentProgram();
+        accountingProgram = programOps.computeIfAbsent(program, ProgramOps::new);
+    }
+
+    /** Atomic detached counters. Counts opcode dispatches, including inline Python
+     *  callbacks, raising instructions and parked calls retried by the host. Does
+     *  not measure Java/component execution time or allocate per instruction. */
+    public PyObj.PyDict programOpsSnapshot() {
+        accountProgramOps();
+        PyObj.PyDict counts = new PyObj.PyDict(), result = new PyObj.PyDict();
+        for (Map.Entry<Object, ProgramOps> entry : programOps.entrySet())
+            counts.map.put(entry.getKey(), entry.getValue().count);
+        result.map.put("total", executedOps);
+        result.map.put("retired", retiredOps);
+        result.map.put("programs", counts);
+        return result;
+    }
+
+    private void dropProgramOps(Object program) {
+        accountProgramOps();
+        if (program == PyObj.NONE) return; // the shell/system bucket lives with the VM
+        ProgramOps removed = programOps.remove(program);
+        if (removed != null) {
+            retiredOps += removed.count;
+            removed.retired = true; // an in-flight cleanup must not resurrect its record
+        }
+    }
+
+    /** _program.set_current must change identity and accounting in the same opcode:
+     *  a Python dictionary write followed by a notification can be preempted. */
+    private void setCurrentProgram(Object program) {
+        PyModule owner = loadedModules.get("_program");
+        if (owner == null) throw new PyException("RuntimeError", "_program is not loaded");
+        if (program != PyObj.NONE && !(program instanceof String))
+            throw PyException.typeError("program identity must be a string or None");
+        if (drivingTask == null) ((PyObj.PyList) owner.ns.get("_main")).items.set(0, program);
+        else {
+            Map<Object, Object> tasks = ((PyObj.PyDict) owner.ns.get("_tasks")).map;
+            if (program == PyObj.NONE) tasks.remove(drivingTask.coro);
+            else tasks.put(drivingTask.coro, program);
+        }
+        selectAccountingProgram();
+    }
+
+    private Object forgetProgramTask(Object task) {
+        PyModule owner = loadedModules.get("_program");
+        Map<Object, Object> tasks = ((PyObj.PyDict) owner.ns.get("_tasks")).map;
+        Object program = tasks.remove(task);
+        if (drivingTask != null && drivingTask.coro == task) selectAccountingProgram();
+        return program == null ? PyObj.NONE : program;
+    }
     private final java.util.IdentityHashMap<MpyModule, PyModule> byCode = new java.util.IdentityHashMap<>();
     String mainRoot = "";           // package identity of the main module
     String mainDotted = "__main__"; // (path-derived when started via startPath)
@@ -173,7 +345,8 @@ public final class Vm {
                 handledException != null ? handledException : PyObj.NONE);
         this.globals.putIfAbsent("__tb_format", (HostFunction) a -> {
             if (!(a[0] instanceof PyExc.Instance)) throw PyException.typeError("expected an exception instance");
-            return PyExc.formatTraceback((PyExc.Instance) a[0]);
+            PyExc.Instance exc = (PyExc.Instance) a[0];
+            return PyExc.formatTraceback(exc, null, stringify(exc, false));
         });
         // remember which names are builtins so globals()/locals() can hide them
         // (__name__ and __file__ are user-visible module attributes, so keep them).
@@ -870,6 +1043,18 @@ public final class Vm {
                     out.writeInt(0);   // no separate chain: suspended at coro top or at a yield
                 }
             }
+            // Append rather than change the existing layout: older snapshots have
+            // no section and restore with fresh counters. Counter keys share the
+            // snapshot identity space with _program and _process.
+            accountProgramOps();
+            out.writeInt(OPS_SNAPSHOT_TAG);
+            out.writeLong(executedOps);
+            out.writeLong(retiredOps);
+            out.writeInt(programOps.size());
+            for (Map.Entry<Object, ProgramOps> entry : programOps.entrySet()) {
+                w.writeValue(entry.getKey());
+                out.writeLong(entry.getValue().count);
+            }
         } catch (IOException e) {
             throw new RuntimeException(e); // never thrown by ByteArrayOutputStream
         }
@@ -952,7 +1137,7 @@ public final class Vm {
             for (int i = 0; i < lm; i++) {
                 String name = (String) r.readValue();
                 PyModule pm = (PyModule) r.readValue();
-                loadedModules.put(name, pm);
+                registerModule(name, pm);
                 if (pm.code != null) byCode.put(pm.code, pm);
             }
 
@@ -991,6 +1176,23 @@ public final class Vm {
             // resolve the main-frame run() block, if any, to the restored task
             mainWaitingTask = (waitIdx >= 0 && waitIdx < asyncTasks.size())
                               ? asyncTasks.get(waitIdx) : null;
+            refreshInterrupt();
+            programOps.clear();
+            accountingProgram = null;
+            executedOps = accountedOps = retiredOps = 0;
+            if (in.available() != 0) {
+                if (in.readInt() != OPS_SNAPSHOT_TAG) throw new IOException("unknown VM snapshot extension");
+                executedOps = accountedOps = in.readLong();
+                retiredOps = in.readLong();
+                int count = in.readInt();
+                if (count < 0) throw new IOException("invalid ops counter count");
+                for (int i = 0; i < count; i++) {
+                    Object program = r.readValue();
+                    ProgramOps value = new ProgramOps(program);
+                    value.count = in.readLong();
+                    programOps.put(program, value);
+                }
+            }
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -1197,7 +1399,7 @@ public final class Vm {
     private boolean hostPaused = false;
     public boolean consumeHostPaused() { boolean b = hostPaused; hostPaused = false; return b; }
 
-    public void requestYield() { yielding = true; }
+    public void requestYield() { foregroundYield(); yielding = true; }
 
     /** Rewind the current frame to the START of the instruction now executing, so
      *  that after a host-side park (e.g. an async non-direct component call handed
@@ -1256,7 +1458,7 @@ public final class Vm {
      * the single op it runs.
      */
     public HostFunction yieldHost() {
-        return args -> { yielding = true; return PyObj.NONE; };
+        return args -> { requestYield(); return PyObj.NONE; };
     }
 
     // ---- one instruction ----------------------------------------------------
@@ -1273,6 +1475,7 @@ public final class Vm {
      * method re-entry and no per-instruction object allocation.
      */
     private int runLoop(int budget) {
+        selectAccountingProgram();
         Frame f = current;
         byte[] bc = f.bc;
         int remaining = budget;
@@ -1281,6 +1484,8 @@ public final class Vm {
         shareRemaining = remaining;       // this batch's slice, for ops_share()
         yielding = false;   // clear any prior yield request; a fresh batch continues past it
         taskYielded = false;
+
+        boolean resuming = true;
 
         while (remaining > 0 && !finished && !taskYielded) {
             try {
@@ -1312,6 +1517,10 @@ public final class Vm {
                               // placed right after a trailing `raise` must survive)
             raiseSp = f.sp;   // stack pointer at instruction start, so hostPause() can
                               // rewind a CALL that already popped its args to the callable slot
+            if (resuming) {
+                resuming = false;
+                foregroundResume();
+            }
             int ip = f.ip;
             final int op = bc[ip++] & 0xff;
             final int format = Opcodes.format(op);
@@ -1334,7 +1543,14 @@ public final class Vm {
             if ((op & Opcodes.MASK_EXTRA_BYTE) == 0) ip++; // trailing extra byte (unused pre-phase-7)
             f.ip = ip; // advance past the instruction; jumps adjust f.ip below
 
+            if (pendingInterrupt != null && ((arg < 0 && Opcodes.hasSignedOffset(op))
+                    || op == Opcodes.CALL_FUNCTION || op == Opcodes.CALL_METHOD
+                    || op == Opcodes.CALL_FUNCTION_VAR_KW || op == Opcodes.CALL_METHOD_VAR_KW))
+                interruptPoint(false);
+            if (op == Opcodes.YIELD_VALUE || op == Opcodes.YIELD_FROM) interruptPoint(true);
+
             // ---- dispatch one instruction ----
+            executedOps++;
             dispatch:
             {
                 // packed "multi" ranges (hot path)
@@ -1707,7 +1923,7 @@ public final class Vm {
                         }
                         if (obj instanceof PyExc.Instance) { ((PyExc.Instance) obj).userAttrs.put(name, value); break dispatch; }
                         if (obj instanceof PyClass) { ((PyClass) obj).ns.put(name, value); break dispatch; }
-                        if (obj instanceof PyModule) { ((PyModule) obj).ns.put(name, value); break dispatch; }
+                        if (obj instanceof PyModule) { ((PyModule) obj).setAttr(name, value); break dispatch; }
                         if (obj instanceof PyFunction) { ((PyFunction) obj).attrsOrNew().put(name, value); break dispatch; }
                         if (obj instanceof Closure) { ((Closure) obj).fun.attrsOrNew().put(name, value); break dispatch; }
                         throw new PyException("AttributeError", "'" + Methods.typeName(obj)
@@ -1996,7 +2212,7 @@ public final class Vm {
                                     if (hit == null) {
                                         if (i < tparts.length) {
                                             pm = new PyModule(dotted, root, null); // synthetic package
-                                            loadedModules.put(dotted, pm);
+                                            registerModule(dotted, pm);
                                         } else {
                                             throw new PyException("ImportError", "no module named '" + target + "'");
                                         }
@@ -2004,7 +2220,7 @@ public final class Vm {
                                         MpyModule mcode = MpyLoader.load((byte[]) hit[0], new QstrPool());
                                         pm = new PyModule(dotted, root, mcode);
                                         pm.initializing = true;            // until its top-level returns
-                                        loadedModules.put(dotted, pm);     // cache before executing
+                                        registerModule(dotted, pm);     // cache before executing
                                         byCode.put(mcode, pm);
                                         if (parent != null) parent.ns.put(tparts[i - 1], pm);
                                         checkDepth();
@@ -2292,7 +2508,7 @@ public final class Vm {
                                 if (hit == null) {
                                     if (i < tparts.length) {
                                         pm = new PyModule(dotted, root, null); // synthetic package
-                                        loadedModules.put(dotted, pm);
+                                        registerModule(dotted, pm);
                                     } else {
                                         throw new PyException("ImportError", "no module named '" + target + "'");
                                     }
@@ -2300,7 +2516,7 @@ public final class Vm {
                                     MpyModule code = MpyLoader.load((byte[]) hit[0], new QstrPool());
                                     pm = new PyModule(dotted, root, code);
                                     pm.initializing = true;            // until its top-level returns
-                                    loadedModules.put(dotted, pm);     // cache before executing
+                                    registerModule(dotted, pm);     // cache before executing
                                     byCode.put(code, pm);
                                     if (parent != null) parent.ns.put(tparts[i - 1], pm);
                                     checkDepth();
@@ -2331,7 +2547,7 @@ public final class Vm {
                         Object m = f.top();
                         if (!(m instanceof PyModule)) throw PyException.typeError("import from requires a module");
                         PyModule pm = (PyModule) m;
-                        Object v = pm.ns.get(name);
+                        Object v = pm.getAttr(name);
                         if (v != null) { f.push(v); break dispatch; }
                         // submodule fallback: `from pkg import child` where child is a
                         // module file, not an attribute of pkg's __init__
@@ -2350,7 +2566,7 @@ public final class Vm {
                             MpyModule code = MpyLoader.load((byte[]) hit[0], new QstrPool());
                             child = new PyModule(childDotted, pm.root, code);
                             child.initializing = true;                 // until its top-level returns
-                            loadedModules.put(childDotted, child);
+                            registerModule(childDotted, child);
                             byCode.put(code, child);
                             pm.ns.put(name, child);
                             checkDepth();
@@ -2378,14 +2594,14 @@ public final class Vm {
                         if (exported != null) {
                             for (Object n : exported) {
                                 if (!(n instanceof String)) throw PyException.typeError("Item in " + source.name + ".__all__ must be str");
-                                Object v = source.ns.get(n);
+                                Object v = source.getAttr((String) n);
                                 if (v == null) throw new PyException("AttributeError", "module '" + source.name + "' has no attribute '" + n + "'");
                                 dest.put((String) n, v);
                             }
                             break dispatch;
                         }
                         for (Map.Entry<String, Object> e : source.ns.entrySet()) {
-                            if (!e.getKey().startsWith("_")) dest.put(e.getKey(), e.getValue());
+                            if (!e.getKey().startsWith("_")) dest.put(e.getKey(), source.getAttr(e.getKey()));
                         }
                         break dispatch;
                     }
@@ -2474,6 +2690,13 @@ public final class Vm {
                 if (pe.escaped) throw pe;
                 PyExc.Instance inst = pe.instance != null ? pe.instance : PyExc.from(pe);
                 raiseInto(inst, pe);
+            } catch (IndexOutOfBoundsException | ClassCastException | NullPointerException | NegativeArraySizeException bad) {
+                // What malformed bytecode does to the interpreter (an operand past a table, a
+                // stack slot of the wrong kind). Programs may run .mpy files they were given,
+                // so this fails the running program as a Python error instead of taking down
+                // the whole computer. Control flow (HostPause) is none of these and passes on.
+                PyException pe = new PyException("RuntimeError", "invalid bytecode or VM state: " + bad);
+                raiseInto(PyExc.from(pe), pe);
             }
 
             // ---- post-instruction bookkeeping ----
@@ -2669,6 +2892,10 @@ public final class Vm {
     public static final Object COMPILE_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function compile>"; }
     };
+    /** Explicit bytecode loading for MPYOS; compile/exec never sniff file contents. */
+    public static final Object LOAD_MPY_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function __load_mpy>"; }
+    };
     public static final Object EXEC_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function exec>"; }
     };
@@ -2690,6 +2917,27 @@ public final class Vm {
     /** __thread_start(gen): register a generator as a task of the VM's pool (a thread). */
     public static final Object CREATE_TASK_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function create_task>"; }
+    };
+    public static final Object PROGRAM_SET_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _program_set>"; }
+    };
+    public static final Object PROGRAM_FOREGROUND_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _program_foreground>"; }
+    };
+    public static final Object PROGRAM_LEAVE_FOREGROUND_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _program_leave_foreground>"; }
+    };
+    public static final Object PROGRAM_INTERRUPT_CHECK_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _program_interrupt_check>"; }
+    };
+    public static final Object PROGRAM_FORGET_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _program_forget>"; }
+    };
+    public static final Object PROGRAM_OPS_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _program_ops>"; }
+    };
+    public static final Object PROGRAM_DROP_OPS_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _program_drop_ops>"; }
     };
     /** __thread_wait(gen) (once jasyncio.run): register the generator as a task and
      *  BLOCK the main frame until it completes, then return its value (or raise its
@@ -3023,6 +3271,7 @@ public final class Vm {
             // and end the drive batch without finishing the whole VM; the task keeps
             // its frame state and its seat in the scheduler.
             if (drivingTask != null && drivingTask.coro == gen) {
+                foregroundYield();
                 genFrame.caller = null;
                 drivingTask.lastYield = v;
                 taskYielded = true;
@@ -3376,6 +3625,16 @@ public final class Vm {
                 return stringify(inst.nativeValue, useRepr);
             return PyObj.repr(o);   // no __str__/__repr__ -> <X object>
         }
+        if (o instanceof PyExc.Instance && ((PyExc.Instance) o).type.userClass != null) {
+            // A user exception class's own __str__/__repr__ (subprocess.CalledProcessError's
+            // message). BaseException has __str__, so str() never falls back to a user __repr__.
+            Object m = ((PyClass) ((PyExc.Instance) o).type.userClass).lookup(useRepr ? "__repr__" : "__str__");
+            if (m instanceof PyFunction || m instanceof Closure) {
+                Object r = callSync(new BoundPyMethod(m, o), NO_ARGS);
+                if (!(r instanceof String)) throw PyException.typeError((useRepr ? "__repr__" : "__str__") + " returned non-string (type " + net.mpy.runtime.Methods.typeName(r) + ")");
+                return (String) r;
+            }
+        }
         // containers: recurse so element __repr__ is dispatched (repr form inside)
         if (o instanceof PyObj.PyList) return joinSeq(((PyObj.PyList) o).items, "[", "]");
         if (o instanceof PyObj.Tuple) {
@@ -3487,7 +3746,7 @@ public final class Vm {
         // so they're usable as first-class callables (e.g. sorted(key=len)).
         if (callable == LEN_BUILTIN || callable == BOOL_BUILTIN || callable == ALL_BUILTIN || callable == ANY_BUILTIN || callable == REPR_BUILTIN || callable == PRINT_BUILTIN || callable == GLOBALS_BUILTIN || callable == LOCALS_BUILTIN || callable == COMPILE_BUILTIN || callable == EXEC_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN || callable == EVAL_BUILTIN || callable == CREATE_TASK_BUILTIN || callable == RUN_BUILTIN || callable == TEST_AND_SET_BUILTIN || callable == MAKE_SLEEP_BUILTIN || callable == WAKE_BUILTIN || callable == IN_TASK_BUILTIN || callable == CURRENT_CORO_BUILTIN || callable == SLEEP_MS_OF_BUILTIN || callable == BYTEARRAY_BUILTIN || callable == DISABLE_IRQ_BUILTIN || callable == ENABLE_IRQ_BUILTIN || callable == FINISH_DAEMON_BUILTIN || callable == SORTED_BUILTIN || callable == MAP_BUILTIN
                 || callable == FILTER_BUILTIN || callable == DICT_BUILTIN || callable == LIST_BUILTIN
-                || callable == SUM_BUILTIN || callable == FORMAT_BUILTIN || callable == ASCII_BUILTIN) {
+                || callable == SUM_BUILTIN || callable == FORMAT_BUILTIN || callable == ASCII_BUILTIN || callable == LOAD_MPY_BUILTIN) {
             Frame sc = current; boolean sf = finished; boolean smr = mainReturned; Object sr = returnValue;
             boolean sy = yielding; int sri = raiseIp;
             Frame probe = new Frame(current.code);   // scratch frame to receive setTop
@@ -3622,7 +3881,7 @@ public final class Vm {
             return m;
         }
         if (obj instanceof PyModule) {
-            Object v = ((PyModule) obj).ns.get(name);
+            Object v = ((PyModule) obj).getAttr(name);
             if (v == null) {
                 // PEP 562: a module-level __getattr__ is consulted for names not
                 // found in the namespace. The arch uses this to give the component
@@ -3864,6 +4123,50 @@ public final class Vm {
             current.setTop(new PyObj.ByteArray(buf));
             return;
         }
+        if (callable == PROGRAM_SET_BUILTIN) {
+            if (args.length != 1) throw PyException.typeError("_program_set requires one identity");
+            setCurrentProgram(args[0]);
+            current.setTop(PyObj.NONE);
+            return;
+        }
+        if (callable == PROGRAM_FOREGROUND_BUILTIN) {
+            if (args.length != 1 || !(args[0] instanceof PyObj.PyDict))
+                throw PyException.typeError("foreground requires a namespace");
+            PyObj.PyList scope = new PyObj.PyList();
+            Collections.addAll(scope.items, currentProgram(), drivingTask == null ? PyObj.NONE : drivingTask.coro,
+                    args[0], 0L, false);
+            foregroundScopes().add(scope);
+            current.setTop(scope);
+            return;
+        }
+        if (callable == PROGRAM_LEAVE_FOREGROUND_BUILTIN) {
+            if (args.length != 1) throw PyException.typeError("leave_foreground requires a scope");
+            foregroundScopes().removeIf(scope -> scope == args[0]);
+            refreshInterrupt();
+            current.setTop(PyObj.NONE);
+            return;
+        }
+        if (callable == PROGRAM_INTERRUPT_CHECK_BUILTIN) {
+            interruptPoint(true);
+            current.setTop(PyObj.NONE);
+            return;
+        }
+        if (callable == PROGRAM_FORGET_BUILTIN) {
+            if (args.length != 1) throw PyException.typeError("_program_forget requires one task");
+            current.setTop(forgetProgramTask(args[0]));
+            return;
+        }
+        if (callable == PROGRAM_OPS_BUILTIN) {
+            if (args.length != 0) throw PyException.typeError("_program_ops takes no arguments");
+            current.setTop(programOpsSnapshot());
+            return;
+        }
+        if (callable == PROGRAM_DROP_OPS_BUILTIN) {
+            if (args.length != 1) throw PyException.typeError("_program_drop_ops requires one identity");
+            dropProgramOps(args[0]);
+            current.setTop(PyObj.NONE);
+            return;
+        }
         if (callable == DISABLE_IRQ_BUILTIN) {
             if (irqDepth == 0) irqHolder = drivingTask != null ? (Object) drivingTask : MAIN_IRQ_HOLDER;
             current.setTop((long) irqDepth);
@@ -3910,6 +4213,7 @@ public final class Vm {
             return;
         }
         if (callable == RUN_BUILTIN) {
+            interruptPoint(true);
             if (args.length < 1 || !(args[0] instanceof PyGen))
                 throw PyException.typeError("run() requires a coroutine");
             // run() is only meaningful from the top-level (main) frame -- it blocks it.
@@ -3941,6 +4245,22 @@ public final class Vm {
             String fname = args.length > 1 ? asStr(args, 1, "compile") : "<string>";
             String mode = args.length > 2 ? asStr(args, 2, "compile") : "exec";
             current.setTop(compileSource(src, fname, mode));
+            return;
+        }
+        if (callable == LOAD_MPY_BUILTIN) {
+            if (kwNames.length != 0 || args.length < 1 || args.length > 2 || !(args[0] instanceof PyObj.Bytes))
+                throw PyException.typeError("__load_mpy() requires bytes and an optional filename");
+            String filename = args.length > 1 ? asStr(args, 1, "__load_mpy") : "<mpy>";
+            byte[] bytes = ((PyObj.Bytes) args[0]).data;
+            MpyModule loaded;
+            try {
+                loaded = MpyLoader.load(bytes, new QstrPool());
+            } catch (RuntimeException error) {
+                throw PyException.valueError(filename + ": invalid .mpy bytecode: " + error.getMessage());
+            }
+            // Embed before returning: code objects and running frames survive snapshots.
+            embedCell("<mpy:" + cellModules.size() + ">", loaded);
+            current.setTop(new CompiledCode(loaded, bytes, ""));
             return;
         }
         if (callable == EXEC_BUILTIN || callable == EVAL_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN) {

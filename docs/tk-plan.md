@@ -801,5 +801,139 @@ Tk 实测要点：tk_messageBox 是 `.__tk__messagebox`（ttk 控件：bot、top
 - [x] 中英文 README 与 Tk 文档说明接口、作用域、默认 PATH 配置方式。
 - [x] 验证（2026-10-12）：原生 Windows 单独运行 `genStdlib` 重新冻结 34 个模块，74 个定向测试通过；随后 `gradlew.bat build --offline` 成功，593 个测试全过（0 failed / errors / skipped）。最终 JAR 的 shell.py 和冻结 os 字节码与生成源码核对一致。
 
+## 第 34 步：AE 合成监视器与原生资源图标
+
+需求（2026-10-12）：新增默认后台命令 `tkaemon`，监视 AE CPU 合成过程；允许扩展 Tk，渲染原生 item/fluid 图标。
+
+- [x] 对照当前依赖 OpenComputers 1.12.50-GTNH 的 NetworkControl；确认 CPU userdata API 和 finalOutput 对 Crafting Monitor 的要求。
+- [x] `/lib/aemon.py` 数据层：发现 ME Controller/Interface，复用 CPU userdata，读取忙闲、active/pending/stored、最终产物；断线及读取失败不保留旧进度。
+- [x] `/bin/tkaemon.py`：后台启动、网络/CPU 选择、CPUs/Items 页签、原生资源预览、Rescan、周期刷新；显示明确标注的“从首次观测起的最终产物进度”，不宣称整条配方完成率。
+- [x] `tk.ItemIcon` / `tk.FluidIcon`：选项、布局、绘制记录、协议、存档、客户端 GUI 与表面渲染、预算与错误回退。
+- [x] 数据层与实际 MPY/Tk 端到端回归、冻结标准库、整体构建。2026-10-12 原生 Windows `gradlew.bat build --offline` 成功；604 个测试全过（0 failed / errors / skipped），含 3 个 AE 数据层、7 个原生图标和 1 个后台监视器窗口交互回归。
+- [x] 隔离原生 Windows `runServer` / `runClient` 探针：监视器 18 项、最终图标展示 7 项检查全过，截图已人工检查。覆盖 CPU/页签选择、刷新后保留流体选择、缺少 Crafting Monitor、空闲 CPU、原生物品/方块/水/岩浆/缺失图标及世界表面；修复缩放后三维方块法线未归一化导致的偏暗。报告在 `build/tkaemon-client/app-20261012-prepared` 与 `build/tkaemon-client/icons-20261012-lit`。AE 数据使用只读模拟组件，MPY VM、Tk 场景协议、游戏 GUI/表面渲染是真实路径；尚未接真实 ME 网络实测。
+- [x] 最终 JAR 内含两份 MPYOS 新脚本与冻结 Tk/原生图标类；脚本与源码一致。产物：`build/libs/mpy4oc-v0.0.1p7-beta-master+8b13da96f5-dirty.jar`。
+- [x] 中英文 README 与 Tk 文档补充接线、使用、进度含义、图标 API 和旧系统安装文件。
+
+修正（2026-10-12，用户反馈“能拿到合成目标但拿不到进度”）：原进度只看 `finalOutput` 的剩余数量，而 AE2（rv3-beta-1082 的 `CraftingCPUCluster.updateCPU` → `finalOutput.get()`）给监视器的是“最终产物尚未交付的数量”，只在成品送回网络时才减少，单件产物整个任务里一直是 1，进度停在 0%。改为照 AE 合成状态界面的算法（`prepareStepCount`）：剩余量 = `activeItems` + `pendingItems` 数量之和（OC 用的是同一个 `getModernListOfItem`），起点取首次观测值，剩余量上升时起点加上增量；不再需要 Crafting Monitor，`finalOutput` 只用来显示合成目标。MpyosAemonTest 前两个用例和 tkaemon 端到端测试按新语义重写（含“单件产物数量不动、进度照常前进”的回归），中英文 README 与 tkinter.md 同步；完整构建 612 个测试全过。仍未接真实 ME 网络实测。
+
+## 第 35 步：标准程序接口与 pythonw
+
+需求（2026-10-12）：应用不再依赖注入的 `sh`，使用 os / sys / subprocess；由 `pythonw` 实现后台启动。
+
+- [x] 冻结 `_process` 抽出命令定位、程序创建、执行、退出和回收；shell 只负责交互与兼容视图，`osfs.install` 也可独立安装运行层。
+- [x] `subprocess.Popen/run/call/check_call`、退出码、poll/wait/timeout、cwd/env、协作 terminate/kill；非法选项明确拒绝，不调用主机执行文件。
+- [x] `sys.argv` 按程序保存真实列表，支持重新赋值、from import、getattr/setattr、线程共享与 VM 存档恢复；`sys.executable` 指向 `/bin/python.py`。
+- [x] 新增 `/bin/pythonw.py`；12 个 Tk 命令使用 `#!/usr/bin/env pythonw`，去掉应用内 self-spawn；显式 python 保持前台，pythonw 加 & 不重复创建程序。
+- [x] 保留旧 sh 接口和注入变量；Tk 应用及 Python 入口不再调用 sh，tkedit 用 os.path / os.getcwd / sys.argv。
+- [x] 修复程序最终线程结束后上下文的回收，并发创建编号加锁、shell 回收避免把尚未开始的线程当作结束；并发回收和输出缓冲可跨 VM 指令切片安全交错。
+- [x] 新增 7 个实际 VM 回归：路径/环境/参数/退出码、父退出子继续和非守护线程、没有 shell 对象的启动、错误与超时/停止、pythonw/shebang/显式 python、Tk 联合存档恢复、20 个并发子程序身份与回收。
+- [x] 中英文 README 与 Tk 文档说明标准接口子集、共享 VM、协作终止限制、pythonw 与 CPython 的区别及旧系统升级文件。
+- [x] 最终验证（2026-10-12）：原生 Windows 单独运行 `genStdlib` 冻结 36 个模块，`gradlew.bat build --offline` 成功，611 项测试全部通过（0 failed / errors / skipped）。最终 JAR 的 18 份相关 MPYOS 脚本与源码逐字一致；产物 `build/libs/mpy4oc-v0.0.1p7-beta-master+8b13da96f5-dirty.jar`，SHA256 `634c623ec50fd3514e35e58ffeddc073f9f27b9266354e5ccb3206c0b4db2956`。本步未重跑游戏客户端探针；窗口交互与联合存档通过实际 MPY VM/Tk 服务端测试验证。
+
+验收补正（2026-10-12）：`CalledProcessError` / `TimeoutExpired` 的文字改为 CPython 3.12 原文（`Command '%s' returned non-zero exit status N.`，负返回码显示 `<Signals.SIGKILL: 9>`），args 保持 (returncode, cmd)；`CompletedProcess` 补 `__repr__`。顺带修 VM：用户异常子类自定义的 `__str__`/`__repr__` 原先被忽略（str() 直接拼 args），现在 str/repr/print/格式化和 `__tb_format` 都调用它，返回非字符串时报 CPython 的 TypeError。新增 ExceptionStrTest，MpyosProcessTest 补报错文字断言，期望值来自 WSL CPython 3.12。复验：genStdlib 后 build，612 个测试全过。另：工作区同时把依赖升到 OC 1.12.64、AE2 rv3-beta-1082、NEI 2.8.159、Angelica 2.2.31、构建插件 2.0.34，单元测试已在新依赖上通过；第 34 步的游戏探针是在升级前（OC 1.12.50）跑的。
+
+## 第 36 步：tkaemon 图标任务卡片与状态可视化
+
+需求（2026-10-13）：使用物品／流体控件优化 tkaemon，显示未完成、正在制作和已完成工作。
+
+- [x] 默认 Tasks 页，原生 ItemIcon / FluidIcon 卡片，W 等待 / A 制作中 / D~ 观测完成约数；灰、橙、绿分段状态条。All / Crafting / Waiting / Done~ / Stored 筛选，CPU 库存独立展示。
+- [x] 相同物品按 metadata、可用 NBT/tag 合并，流体单独识别；Pending → Active 不记完成，工作量下降累计完成约数，新增批次保留此前完成约数。
+- [x] 空闲、Active/Pending 读取错误、断线、切换 CPU、Rescan 或观测到不同最终产物时清空计数；不将空闲当作任务成功。文档说明漏采、缺少任务 ID 和非原子快照的限制。
+- [x] 根据窗口空间复用每页最多 8 张卡片，翻页／滚轮、刷新保留页面和物品选择；历史最多 512 种，溢出提示，总进度继续统计全部清单。
+- [x] 数据层新增 3 项回归，实际 MPY VM/Tk 后台命令测试覆盖图标、筛选、分页、控件数量、缺少监视器与断线；完整构建 615 项测试通过（0 failed / errors / skipped）。
+- [x] 隔离原生 Windows `runServer` / `runClient` 在新版 GTNH 依赖上均正常启动、连接与退出；最终探针 `build/tkaemon-client/cards-20261013-b` 19 项检查全过，截图已检查。覆盖原生物品／水图标、彩色状态条、筛选、刷新保留选择、Done~ 数量预览、无合成监视器、空闲和方块表面。AE 数据为只读模拟，真实 MPY VM、Tk 协议及游戏渲染；尚未接真实 ME 合成任务验证。
+- [x] 最终 JAR 内 `/bin/tkaemon.py` 与 `/lib/aemon.py` 和源码逐字一致；SHA256 `d4d8529db1d3260cce3d16b22739f83b5dd220a3feec5a5ad62e62e0ee4fc736`。旧硬盘需从新 LiveCD 覆盖两份脚本并重启命令。
+
+## 第 37 步：标准 os.spawn 函数族
+
+需求（2026-10-14）：实现 `os.spawn*`，复用已有虚拟程序运行层。
+
+- [x] 全部 8 个 l/v/p/e 组合；P_WAIT 等待退出码，P_NOWAIT/P_NOWAITO 返回虚拟 PID。参数列表保留 argv[0]，cwd/环境继承副本，显式 env 整体替换；非 p 精确路径，p 使用子环境 PATH 和 MPYOS `.py` 简写。
+- [x] getpid/getppid、waitpid（指定 PID / -1、WNOHANG）、waitstatus_to_exitcode、kill（0/9/15）。只等待直接的 spawn 子程序；状态只领取一次，正常退出按 Unix 低 8 位编码。缺失可执行脚本退出 127，参数错误不创建任务。
+- [x] 等待记录与活动程序分离，完成后释放 runner/帧等引用；父程序退出不结束独立子程序，并清除无人可领取的状态。并发登记/领取/回收加锁，存档保留等待状态。
+- [x] 文档说明 argv[0]、PATH 缺失/空项、信号和进程组限制，以及 spawn 等待与 Popen.wait 的边界。
+- [x] 原生 Windows 单独运行 `genStdlib` 后，`gradlew.bat build --offline` 成功：625 项测试全过（0 failed / errors / skipped），新增 MpyosSpawnTest 10 项。覆盖 8 个入口、PATH/参数/环境、非守护线程、信号与 finally、父子/孤儿程序、并发领取、运行中及已退出状态的存档、阻塞于 P_WAIT 的父程序存档恢复。
+- [x] 核对最终 JAR 的 os / _process 冻结字节码与生成源码一致；产物 `build/libs/mpy4oc-v0.0.1p7-beta-master+8b13da96f5-dirty.jar`，SHA256 `44d54513de5b23aabe9023ebd21aa57b65195395ac3bf5091973e601409da620`，验证记录 `build/spawn-verification.json`。本步未跑游戏内探针；通过实际 MPY 编译器/VM/调度器和模拟磁盘测试验证。
+
+## 第 38 步：tktaskmgr 与按程序统计 ops
+
+需求（2026-10-14）：实现任务管理器，显示各进程 ops 并支持结束进程。
+
+- [x] VM 每条指令一个整数计数，程序/任务切换及读取时批量归属；身份切换与记账原子执行。主线程、子线程、异常、同步内嵌 Python 回调及宿主调用重试均覆盖；计数不是 Java/服务器 CPU 耗时。
+- [x] 追加可选快照字段保存累计数，旧格式仍可读取；程序回收后删除计数表项，历史只留整数。`_process.snapshot()` 返回脱离运行对象的快照，`ProcessMonitor` 支持独立增量采样。
+- [x] 默认后台 `tktaskmgr`，每秒更新 PID/命令/ops/s/Share/线程/状态/累计数，表头排序、横纵滚动、保留选中项。End process 调用 os.kill(pid, 15)，保护 PID 0/自身，收尾期间显示状态。
+- [x] 修复存档恢复中实例先于其类被读取时，类方法命名空间对实例的循环引用恢复成 null 的问题；绑定计时器回调的 self 现在正确保留。
+- [x] 原生 Windows 单独运行 `genStdlib` 后完整构建成功，635 项测试全部通过（0 failed / errors / skipped）。新增回归覆盖指令计数、任务归属、线程合并、独立采样、程序回收、GUI 选择与终止、绑定回调及联合存档恢复。
+- [x] 隔离原生 Windows `runServer` / `runClient` 验证（`taskmgr-20261014-d`）：15 项检查全过、5 张截图已检查，双方正常退出。真实 MPY VM、虚拟程序、OC 内存磁盘与 Tk 网络/渲染，覆盖计算/休眠程序、PID 排序、刷新保留选择、结束指定程序后的线程/finally/窗口清理、其他程序继续、横向滚动及方块表面；窄屏详情将精确 ops 独立一行显示。
+- [x] 最终 JAR 的 `_process` / `_program` / `os` 冻结内容与生成源码一致，`/bin/tktaskmgr.py` 与源码及游戏探针加载版本一致。产物 `build/libs/mpy4oc-v0.0.1p7-beta-master+8b13da96f5-dirty.jar`，SHA256 `b5740794e652ccd5455555f5175425e1ce7ed555e4007f9a4b5eaec79c377583`；验证记录 `build/taskmgr-verification.json`。已有硬盘更新 JAR 后复制新 LiveCD 的 `/bin/tktaskmgr.py`，重启 OC 电脑载入统计接口。
+
+## 第 39 步：前台 KeyboardInterrupt 与两档终端快捷键
+
+需求（2026-10-14）：Ctrl+C 在 sleep/yield 等协作点响应；Ctrl+Alt+C 加循环回跳、调用和恢复检查点。
+
+- [x] OC 输入层按键盘跟踪左右 Ctrl/Alt，识别 Ctrl+C / Ctrl+Alt+C，合并待处理请求并过滤长按重复；Tk 输入保持原有行为。
+- [x] VM 中断针对前台程序和执行任务身份，普通请求只在协作点交付，强请求加循环回跳、四类调用及恢复检查。IRQ 关闭期间延迟，交付前清除请求，经普通异常机制执行 except/finally。
+- [x] 前台作用域和待处理中断使用已有 Python 快照对象图，恢复后重建快速检查缓存；程序启动/退出的内部管理代码避开强中断，结束时清除作用域。
+- [x] sleep(0) 也检查并让出执行；程序主线程 join 改为可中断轮询。未捕获中断退出码 130，所属线程按原协作退出机制清理。后台父程序同步启动的子程序保持后台归属。
+- [x] python/python3/py 的 REPL 捕获输入和执行阶段的 KeyboardInterrupt，清空未完成输入后继续接受命令；更新中英文 README 与终端中断说明。
+- [x] 新增 14 项回归，使用实际编译器、VM、调度器、冻结模块、MPYOS 及 OC drainSignals 路径。覆盖纯计算/调用/yield、sleep(0)/长睡眠/事件等待、join、asyncio、IRQ、嵌套前台子程序及后台隔离、长按、finally、REPL 和待处理中断的存档恢复。
+- [x] 原生 Windows 单独运行 `genStdlib` 后完整构建通过：649 项测试，0 failed / errors / skipped。本步未启动游戏客户端/服务器；OC 输入路径使用模拟 Signal 队列，磁盘与终端为测试替身。
+- [x] 最终 JAR 的 `_process` / `_program` / `threading` 冻结内容、三份 REPL 脚本与源码一致，新类符合 Java 8。产物 `build/libs/mpy4oc-v0.0.1p7-beta-master+8b13da96f5-dirty.jar`，SHA256 `a22c343777fd57d72e7721daba1247bcf27c1d4467ac8dbbec9d7faa228dcffe`；记录 `build/interrupt-verification.json`。
+
+## 第 40 步：tkexplorer 文件浏览器
+
+需求（2026-10-14）：添加 Tk 文件浏览器。
+
+- [x] 默认后台命令 `tkexplorer [目录或文件]`，路径栏、前进/后退/上级、挂载目录、隐藏文件、名称筛选、目录优先排序、文件大小和每页 100 项。
+- [x] 双击或 Open 使用独立后台 tkedit 打开文件，参数按列表传递，支持含空格/引号的路径；浏览不修改 shell cwd，关闭浏览器不结束编辑器。
+- [x] 新建文件/文件夹、重命名、确认删除；拒绝覆盖同名目标与非空目录删除，保护挂载点，只读禁用修改，磁盘断开后可刷新恢复。
+- [x] 修复存档测试暴露的 Tk after_idle 竞争：计时器 ID 与含 idle 标志的完整条目原子登记，避免另一任务在 after_idle 返回前消费条目造成 KeyError；并发测试验证唯一 ID 与 idle/普通计时器区别。
+- [x] 新增 7 项回归，覆盖实际 MPY VM、标准程序接口、真实 explorer/tkedit 和 Tk 服务端；磁盘操作边界、分页稳定性、后台生命周期及联合存档恢复。
+- [x] 原生 Windows 单独运行 `genStdlib` 后完整构建通过：656 项测试，0 failed / errors / skipped。补充单块屏幕工具栏布局断言，所有操作按钮完整可见。
+- [x] 隔离 `runServer` / `runClient` 验证（`explorer-20261014-b`）：23 项检查全过，8 张截图已检查，双方正常退出。真实 MPY VM、MPYOS 程序、OC 内存磁盘与 Tk 网络/输入/渲染，覆盖选中目录、Open/Up 导航、新建文件夹、取消/确认删除、真实 tkedit 内容及方块表面。探针等待选中状态同步后再点击按钮。
+- [x] 最终 JAR 的 `/bin/tkexplorer.py` 与源码、游戏探针加载版本一致，冻结 tkinter 与生成源码一致。产物 `build/libs/mpy4oc-v0.0.1p7-beta-master+8b13da96f5-dirty.jar`，SHA256 `a3b507cdd786f4cde5e757c4de51e17845481ecd76a5fac540968edcbd29ecf3`；记录 `build/explorer-verification.json`。已有硬盘更新 JAR 后复制新 LiveCD 的 `/bin/tkexplorer.py`，重启 OC 电脑载入计时器修复。
+
+## 第 41 步：tkexplorer 文件类型图标
+
+- [x] 文件夹、Python（`.py` / `.pyw`）、Lua 和普通文档四种透明 16×16 图标；扩展名不区分大小写，窗口内复用，刷新与翻页不增加图像数。
+- [x] Treeview 行 PhotoImage 接入 Python、服务端绘制及 NBT，支持裁剪、点击选择、删除图像清理与旧存档缺图兼容；沿用图像传输和方块表面渲染。
+- [x] 单独 `genStdlib` 后完整构建通过，659 项测试全部通过；新增 3 项图标回归，并加强现有分页及联合存档测试。覆盖程序图像归属、裁剪与点击、删除/缺图、分类与图像复用。
+- [x] 隔离 `runServer` / `runClient`（`explorer-icons-20261014-a`）：24 项检查通过，双方正常退出。首页、选中行及新建目录三张关键截图已检查，四类图标清晰，透明背景保留选中高亮。
+- [x] JAR 中浏览器脚本和冻结 ttk 内容与源码一致；验证记录 `build/explorer-icons-verification.json`，JAR SHA256 `448f79d14a54bef9a45d162e17640f526837a2b177d8e74f95994b5872115aaa`。更新服务端与客户端 JAR、复制新 `/bin/tkexplorer.py` 并重启 OC 电脑。
+
+## 第 42 步：浏览器图标靠左与清晰采样
+
+- [x] `showindicator=False` 取消 Treeview 展开箭头及其 16 像素占位，explorer 启用；默认树形布局与旧存档保持原行为。
+- [x] 行图标的纹理使用最近邻采样，普通 Label/Button 照片保留平滑采样；同一图片在两种用途间切换时更新过滤方式。
+- [x] 单独 `genStdlib` 后完整构建通过：660 项测试，0 failed / errors / skipped。新增平面列表回归，验证图标靠左、没有不可见箭头热区、选择、保存与旧存档默认值；浏览器测试断言实际图标坐标。
+- [x] 隔离 `runServer` / `runClient`（`explorer-sharp-20261014-a`）26 项检查通过，双方正常退出。读取实际 GPU 纹理 MIN/MAG_FILTER 确认为 GL_NEAREST，点击图标可选择并打开目录；首页和选中截图已检查，像素边缘清晰。
+- [x] 最终 JAR 脚本与冻结 ttk 校验通过，记录 `build/explorer-sharp-verification.json`，JAR SHA256 `e8226a96740437ea79290230e16e4247125835184511ea79a3d8daa230512d81`。更新两端 JAR 和 `/bin/tkexplorer.py`，重启 OC 电脑。
+
+## 第 43 步：浏览器上级目录项
+
+- [x] 非根目录首行显示带文件夹图标的 `..`，双击、Enter 或 Open 返回上级并选中刚离开的目录；复用导航历史。根目录不显示。
+- [x] 该项独立于文件列表，不受筛选、隐藏文件、排序和分页影响，不计入文件数；禁止重命名和删除，只读目录仍可向上导航。
+- [x] 新增上级目录回归，并补充分页断言；完整构建通过，661 项测试全部通过。
+- [x] 隔离 `runServer` / `runClient`（`explorer-parent-20261014-a`）27 项检查通过，实际双击 `..` 返回上级，两端正常退出；首页和子目录截图已检查。
+- [x] 最终 JAR 的浏览器脚本与源码和游戏加载版本一致，记录 `build/explorer-parent-verification.json`；JAR SHA256 `97165e43ee89b3cbb87763e8105e6aadd607564f8ab8d080975a7c2c1ee03071`。已有硬盘复制新的 `/bin/tkexplorer.py` 即可获得本步功能。
+
+## 第 44 步：直接执行 .mpy 字节码
+
+- [x] `python` / `pythonw`、shell、`os.spawn*`、subprocess 统一按最终文件名决定格式：仅 `.mpy` 读取原始字节并加载兼容的 v6 字节码，其他后缀及无后缀永远按源码编译，不嗅探或失败回退。
+- [x] PATH 逐目录尝试精确名称、`.py`、`.mpy`；显式后缀不叠加，现有目录不可执行，找到源码后失败不改试字节码。Tab 合并同名源码/字节码候选，路径参数保留完整后缀。
+- [x] VM 显式加载接口复用 code 对象与 sandbox 执行、进程生命周期和存档嵌入；格式错误、版本不兼容和 native 字节码返回 Python 错误。
+- [x] 新增 5 项实际编译器/VM/调度器回归，覆盖前后台、PID/argv/cwd、各种启动入口、后缀及优先级、错误和存档恢复；32 项相关测试通过。
+- [x] 单独 `genStdlib` 后完整构建成功，666 项测试全部通过；JAR 内 `_process` 冻结内容、shell 脚本与 Java 8 加载接口已核对。记录 `build/mpy-launch-verification.json`，JAR SHA256 `638091ad9562fe60d50888cff50e4c9699583c271a567a3e8cd31bf3d0134f2a`。本步未运行游戏探针；已有系统更新 JAR、`/lib/shell.py` 并重启 OC 电脑。
+
+验收补正（2026-10-15）：加载阶段的格式错误已转成 Python 错误，但加载器接受、执行时才出错的字节码（操作数越过常量表、栈槽类型不对）会在 VM 里抛出 Java 的越界/类型转换/空指针异常，原先只有 PyException 被转换，其余异常穿出 step() 由架构层 crash，整台 OC 电脑及其上所有程序一起停。现在指令循环把 IndexOutOfBounds、ClassCast、NullPointer、NegativeArraySize 转成 `RuntimeError: invalid bytecode or VM state: ...` 走正常异常机制，只让出错的程序失败；HostPause 等控制流不受影响。新增 MalformedBytecodeTest（改坏 LOAD_CONST_OBJ 操作数，except 能接住、程序继续执行）。复验：genStdlib 后完整构建 667 项测试全过。
+
+## 第 45 步：Tk 命令集中到 /bin/tkinter
+
+- [x] 将全部 14 个自带 Tk 命令原样迁移到 `/bin/tkinter/`，脚本内容和默认后台行为不变。安装器原有递归复制会包含该目录。
+- [x] shell 默认 PATH 为 `/bin:/bin/tkinter:/usr/bin:/home/bin:.`；`os.spawn*p*` 缺少 PATH 时使用的 `os.defpath` 同步加入新目录。保留用户自定义 PATH，裸命令名、which 和 Tab 沿用统一搜索机制。
+- [x] 更新测试夹具和中英文说明，验证新目录的命令查找、参数路径补全、spawn 默认路径及自定义 PATH 不被扩展；实际 VM/Tk 测试覆盖全部自带命令启动、窗口及后台生命周期。
+- [x] 单独 `genStdlib` 后完整构建通过，666 项测试全部通过，0 failed / errors / skipped。核对最终 JAR 的 14 个新路径与迁移前脚本逐字一致、无旧路径副本、shell 和冻结 os 与源码一致；本步未运行游戏探针。
+- [x] 验证记录 `build/tk-directory-verification.json`，JAR SHA256 `2f1e3a8f41789d678152dc2a5900149658bde3a1bb653c0db90eebe4d53eeb24`。已有硬盘更新 `/lib/shell.py`、迁移 Tk 脚本并重启；避免在 `/bin` 留旧副本，自定义 PATH 需自行加入 `/bin/tkinter`。
+
 ## 后续可选
 - Toplevel 多屏实测。

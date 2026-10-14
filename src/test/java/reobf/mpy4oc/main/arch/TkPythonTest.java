@@ -704,26 +704,26 @@ class TkPythonTest {
         // A 520x320 window with its title bar and the taskbar: a 2x2 display.
         Host host=new Host();host.tiles.put("screen-a",reobf.mpy4oc.tk.TkTestGroups.joined(2,2));
         host.reg("uptime",args -> { host.time += .01; return host.time; });
-        String demo=Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkcanvas.py"));
+        String demo=Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter/tkcanvas.py"));
         host.start(demo.replace("root.mainloop()","armed = True\nwhile frames < 3:\n    root.update()\npassed = True\n"));
         host.runUntil("armed");host.time=1;host.runUntil("passed");
     }
 
     @Test void scrollAndProgressDemosRunThroughPython() throws Exception {
         Host scroll=new Host();scroll.tiles.put("screen-a",new TileTkDisplay());
-        String demo=Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkscroll.py"));
+        String demo=Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter/tkscroll.py"));
         scroll.start(demo.replace("root.mainloop()","c.xview_moveto(0.5)\nc.yview_scroll(2, 'pages')\nwhile xs.get()[0] < 0.4 or ys.get()[0] == 0:\n    root.update()\npassed = True\n"));
         scroll.runUntil("passed");assertEquals(Boolean.TRUE,scroll.vm.globals.get("passed"),"the scrollbars followed the canvas");
         Host progress=new Host();progress.tiles.put("screen-a",new TileTkDisplay());
         progress.reg("uptime",args -> { progress.time += .01; return progress.time; });
-        demo=Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkprogress.py"));
+        demo=Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter/tkprogress.py"));
         progress.start(demo.replace("root.mainloop()","bar.step(10)\nassert value.get() == 40.0, value.get()\ntoggle()\nwhile spin['value'] < 3:\n    root.update()\ntoggle()\npassed = True\n"));
         progress.runUntil("passed");assertEquals(Boolean.TRUE,progress.vm.globals.get("passed"),"the indeterminate bar ran on its timer");
     }
 
     @Test void desktopDemoRunsThroughPython() throws Exception {
         Host host = new Host(); TileTkDisplay tile = new TileTkDisplay(); host.tiles.put("screen-a", tile);
-        String demo = Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkdesktop.py"));
+        String demo = Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter/tkdesktop.py"));
         host.start(demo.replace("root.mainloop()", String.join("\n",
                 "windows = [w for w in root._widgets.values() if w._window and w is not root]",
                 "assert len(windows) == 3 and windows[1].resizable() == (0, 0)",
@@ -736,7 +736,7 @@ class TkPythonTest {
 
     @Test void ttkDemoRunsThroughPython() throws Exception {
         Host host = new Host(); TileTkDisplay tile = new TileTkDisplay(); host.tiles.put("screen-a", tile);
-        String demo = Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkttk.py"));
+        String demo = Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter/tkttk.py"));
         host.start(demo.replace("root.mainloop()", String.join("\n",
                 "level.set(0.75)", "assert shown.cget('text') == '0.75' and bar['value'] == 0.75",
                 "assert check.state() == ('alternate',) and button.winfo_class() == 'TButton'",
@@ -1473,12 +1473,12 @@ class TkPythonTest {
      * A Host running the real MPYOS shell.py (with the real fs, osfs and event libraries and the
      * architecture's pullSignal) over an in-memory /bin, with threads given a share of each step.
      */
-    private static Host shellHost(String program, TileTkDisplay... displays) throws Exception {
+    static Host shellHost(String program, TileTkDisplay... displays) throws Exception {
         Host host = new Host(); host.stepBudget = 300; host.bootstrap = true;
         char name = 'a';
         for (TileTkDisplay display : displays) host.tiles.put("screen-" + name++, display);
         Map<String, byte[]> modules = new HashMap<>();
-        for (String lib : new String[] {"shell", "fs", "osfs", "ospath", "event"})
+        for (String lib : new String[] {"shell", "fs", "osfs", "ospath", "event", "aemon"})
             modules.put(lib, MpyCross.compile(Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/lib/" + lib + ".py")), lib + ".py"));
         host.start(String.join("\n",
                 "import tkinter as tk",
@@ -1488,15 +1488,26 @@ class TkPythonTest {
                 "    def __init__(self):",
                 "        self.files = {}",
                 "        self.dirs = ['/', '/home']",
+                "        self.mounts = {}",
+                "    def _route(self, path):",
+                "        return self, path",
+                "    def is_readonly(self):",
+                "        return False",
+                "    def size(self, path):",
+                "        return len(self.read_bytes(path) or b'')",
+                "    def list(self, path):",
+                "        prefix = path.rstrip('/') + '/'",
+                "        return [p[len(prefix):] + ('/' if p in self.dirs else '') for p in list(self.files) + self.dirs if p != path and p.startswith(prefix) and '/' not in p[len(prefix):]]",
                 "    def exists(self, path):",
                 "        return path in self.files or path in self.dirs",
                 "    def is_directory(self, path):",
                 "        return path in self.dirs",
                 "    def read_file(self, path):",
-                "        return self.files.get(path)",
+                "        data = self.files.get(path)",
+                "        return data.decode('utf-8') if isinstance(data, bytes) else data",
                 "    def read_bytes(self, path):",
                 "        data = self.files.get(path)",
-                "        return None if data is None else data.encode('utf-8')",
+                "        return data.encode('utf-8') if isinstance(data, str) else data",
                 "    def refresh(self):",
                 "        pass",
                 "FAKE_VFS = FakeVfs()",
@@ -1543,7 +1554,7 @@ class TkPythonTest {
         Host host = shellHost(String.join("\n",
                 "FAKE_VFS.files['/bin/gui.py'] = \"import tkinter as tk\\nroot = tk.Tk()\\ntk.Label(root, text='job').pack()\\nroot.mainloop()\\n\"",
                 "FAKE_VFS.files['/bin/bad.py'] = \"raise ValueError('boom')\\n\"",
-                "FAKE_VFS.files['/bin/tkedit.py'] = TKEDIT",
+                "FAKE_VFS.files['/bin/tkinter/tkedit.py'] = TKEDIT",
                 "FAKE_VFS.files['/home/notes.txt'] = 'hello\\n'",
                 // A background GUI job: the prompt comes back at once; its window opens on the free display.
                 "assert sh.spawn('gui', []) == 1 and tty.out[-1] == '[1] gui'",
@@ -1584,7 +1595,7 @@ class TkPythonTest {
                 "sh._report_jobs()",
                 // The old -w is accepted; started as a job (`tkedit &`) it runs in that job, not in another one.
                 "sh.run_command('tkedit', ['-w', '/home/notes.txt'])",
-                "assert tty.out[-1] == '[4] tkedit /home/notes.txt' and len(sh.jobs) == 1",
+                "assert tty.out[-1] == '[4] tkedit -w /home/notes.txt' and len(sh.jobs) == 1",
                 "sh.spawn('tkedit', ['/home/notes.txt'])",
                 "wait(lambda: len(tk._roots) == 2 and all(r._token for r in tk._roots.values()))",
                 "assert [j['id'] for j in sh.jobs] == [4, 5], 'no third job'",
@@ -1593,14 +1604,14 @@ class TkPythonTest {
                 "wait(lambda: sh.jobs[0]['done'] and sh.jobs[1]['done'])",
                 "assert not tk._roots",
                 "passed = True", ""), a, b);
-        host.vm.globals.put("TKEDIT", Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkedit.py")));
+        host.vm.globals.put("TKEDIT", Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter/tkedit.py")));
         host.runUntil("passed");
         assertTrue(a.application().tokens().isEmpty(), "every program let screen-a go");
         assertEquals("other-computer", b.application().owner(), "screen-b stayed the other computer's");
     }
 
     @Test void bundledTkCommandsDefaultToBackgroundWithoutSpawningTwice() throws Exception {
-        Path bin = Path.of("src/main/resources/assets/mpy4oc/mpyos/bin");
+        Path bin = Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter");
         List<Path> commands;
         try (var files = Files.list(bin)) {
             commands = files.filter(p -> p.getFileName().toString().matches("tk.*\\.py")).sorted().toList();
@@ -1609,7 +1620,7 @@ class TkPythonTest {
         for (Path command : commands) {
             TileTkDisplay display = TkTestGroups.joined(2, 2);
             Host host = shellHost("""
-                    FAKE_VFS.files['/bin/' + COMMAND + '.py'] = SOURCE
+                    FAKE_VFS.files['/bin/tkinter/' + COMMAND + '.py'] = SOURCE
                     for explicit_background in (False, True):
                         SHARED.clear()
                         if explicit_background:
@@ -1637,8 +1648,10 @@ class TkPythonTest {
             host.vm.globals.put("COMMAND", filename.substring(0, filename.length() - 3));
             // Observe completion of real widget setup without replacing the demo's event loop.
             String source = Files.readString(command);
-            assertTrue(source.contains("root.mainloop()"), filename);
-            host.vm.globals.put("SOURCE", source.replace("root.mainloop()", "SHARED['root'] = root\nroot.mainloop()"));
+            var loop = java.util.regex.Pattern.compile("(?m)^([a-zA-Z_][\\w.]*)\\.mainloop\\(\\)$").matcher(source);
+            assertTrue(loop.find(), filename);
+            host.vm.globals.put("SOURCE", loop.replaceFirst(java.util.regex.Matcher.quoteReplacement(
+                    "SHARED['root'] = " + loop.group(1) + "\n" + loop.group())));
             try {
                 host.runUntil("passed");
                 assertTrue(display.application().tokens().isEmpty(), filename);
@@ -1648,7 +1661,131 @@ class TkPythonTest {
         }
     }
 
-    /** A command's threads do not outlive it: non-daemon ones are waited for (Ctrl+C stops them), the rest stopped. */
+    /** The real monitor command on one display, with a simulated read-only AE component. */
+    @Test void aeMonitorDisplaysProgressIconsAndRecoversFromDisconnection() throws Exception {
+        TileTkDisplay display = new TileTkDisplay();
+        Host host = shellHost("""
+                class Cpu:
+                    def __init__(self, busy):
+                        self.busy = busy
+                        self.output = {'name': 'minecraft:iron_ingot', 'damage': 0, 'label': 'Iron ingot', 'size': 1}
+                        self.active = [{'name': 'minecraft:iron_ingot', 'label': 'Iron ingot', 'size': 4}]
+                        self.pending = [{'name': 'water', 'label': 'Water', 'amount': 8000}]
+                    def isBusy(self):
+                        return self.busy
+                    def activeItems(self):
+                        return self.active
+                    def pendingItems(self):
+                        return self.pending
+                    def storedItems(self):
+                        return []
+                    def finalOutput(self):
+                        return self.output
+                class Components:
+                    def __init__(self):
+                        self.names = {'test-ae': 'me_controller'}
+                        self.cpus = [Cpu(True), Cpu(False)]
+                        self.reads = 0
+                    def list(self, kind):
+                        return {k: v for k, v in self.names.items() if v == kind}
+                    def proxy(self, addr):
+                        return self
+                    def getCpus(self):
+                        self.reads += 1
+                        return [{'name': 'CPU ' + str(i + 1), 'storage': 16384, 'coprocessors': 2, 'busy': cpu.busy, 'cpu': cpu} for i, cpu in enumerate(self.cpus)]
+                component = Components()
+                FAKE_VFS.files['/bin/tkinter/tkaemon.py'] = SOURCE
+                sh.run_command('tkaemon', [])
+                wait(lambda: 'ui' in SHARED or sh.jobs[0]['done'])
+                assert not sh.jobs[0]['done'], sh.jobs[0]['error']
+                ui = SHARED['ui']
+                root = ui['root']
+                assert root._owner == sh.jobs[0]['program']
+                assert len(ui['cpu_list'].get_children()) == 2
+                assert ui['last_sample'][0]['progress'] == 0
+                assert ui['item_icon'].winfo_ismapped()
+                def repoll():
+                    root.after_cancel(ui['timer'][0])
+                    ui['refresh']()
+                # Half the work below a single final output done: the output still says 1.
+                component.cpus[0].pending[0]['amount'] = 3998
+                repoll()
+                assert ui['last_sample'][0]['progress'] == 50 and ui['last_sample'][0]['output']['size'] == 1
+                assert '50.0%' in ui['progress_label'].cget('text')
+                assert next(r for r in ui['last_sample'][0]['tasks'] if r['stack']['name'] == 'water')['done'] == 4002
+                assert component.reads == 1, 'normal refresh reuses CPU userdata'
+                ui['book'].select(ui['details'])
+                ui['category'].current(2)
+                ui['draw_details']()
+                assert ui['cards'][0].record['pending'] == 3998
+                assert ui['cards'][0].fluid.winfo_ismapped()
+                assert '4k' in ui['cards'][0].counts.cget('text')
+                ui['cards'][0].choose()
+                assert ui['fluid_icon'].winfo_ismapped() and not ui['item_icon'].winfo_ismapped()
+                assert '3998 mB' in ui['caption'].cget('text')
+                root.update_idletasks()
+                for name in ('network', 'rescan', 'book', 'progress_label', 'progress', 'preview', 'status', 'card_area'):
+                    widget = ui[name]
+                    assert widget.winfo_ismapped(), name
+                    assert widget.winfo_height() > 0, name
+                    assert widget.winfo_rooty() >= root.winfo_rooty(), name
+                    assert widget.winfo_rooty() + widget.winfo_height() <= root.winfo_rooty() + root.winfo_height(), (name, widget.winfo_rooty(), widget.winfo_height(), root.winfo_height())
+                component.cpus[0].output = (None, 'No crafting monitor')
+                repoll()
+                assert ui['last_sample'][0]['progress'] == 50 and not ui['progress_running'][0], 'progress needs no Crafting Monitor'
+                assert 'No crafting monitor' in ui['status'].cget('text')
+                ui['category'].current(3)
+                ui['draw_details']()
+                assert ui['cards'][0].record['done'] == 4002 and ui['cards'][0].fluid.winfo_ismapped()
+                ui['cards'][0].choose()
+                assert 'D~ 4002 mB' in ui['caption'].cget('text'), 'preview must show the selected completed amount'
+                # Large jobs page through reusable native icon cards instead of growing the widget tree.
+                component.cpus[0].active = [{'name': 'test:item' + str(i), 'label': 'Item %02d' % i, 'size': i + 1} for i in range(20)]
+                ui['category'].current(0)
+                repoll()
+                first = ui['cards'][0].record['key']
+                ui['turn_page'](1)
+                assert ui['page'][0] == 1 and ui['cards'][0].record['key'] != first
+                widget_count = len(root._widgets)
+                for unused in range(3):
+                    repoll()
+                assert len(root._widgets) == widget_count and ui['page'][0] == 1
+                component.cpus[0].pending = (None, 'grid unavailable')
+                repoll()
+                assert ui['last_sample'][0]['progress'] is None and ui['progress_running'][0]
+                assert 'grid unavailable' in ui['status'].cget('text')
+                ui['cpu_list'].selection_set('1')
+                ui['choose_cpu']()
+                repoll()
+                assert ui['last_sample'][0]['busy'] is False and not ui['progress_running'][0]
+                assert all(c.record is None for c in ui['cards'])
+                assert 'Idle' in ui['progress_label'].cget('text')
+                component.names = {}
+                ui['discover'](True)
+                assert ui['model'].address is None and ui['cpu_list'].get_children() == ()
+                assert ui['last_sample'][0] is None
+                component.names = {'test-ae': 'me_controller'}
+                ui['discover'](True)
+                repoll()
+                assert ui['model'].address == 'test-ae' and len(ui['cpu_list'].get_children()) == 2
+                ui['close']()
+                wait(lambda: sh.jobs[0]['done'])
+                assert sh.jobs[0]['error'] is None, sh.jobs[0]['error']
+                assert root._callbacks == {} and not tk._roots
+                passed = True
+                """, display);
+        String source = Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter/tkaemon.py"));
+        // exec_sandbox stores command bindings in its overlay; globals() exposes the host namespace.
+        String[] names = {"root", "cpu_list", "last_sample", "item_icon", "timer", "refresh", "progress_label",
+                "book", "details", "category", "draw_details", "cards", "card_area", "turn_page", "page", "fluid_icon", "caption",
+                "network", "rescan", "summary", "progress", "preview", "status", "progress_running", "choose_cpu",
+                "discover", "model", "close"};
+        String bindings = java.util.Arrays.stream(names).map(name -> "'" + name + "': " + name).collect(java.util.stream.Collectors.joining(", "));
+        host.vm.globals.put("SOURCE", source.replace("root.mainloop()", "SHARED['ui'] = {" + bindings + "}\nroot.mainloop()"));
+        host.runUntil("passed");
+        assertTrue(display.application().tokens().isEmpty());
+    }
+
     @Test void aCommandsThreadsEndWithIt() throws Exception {
         Host host = shellHost(String.join("\n",
                 "FAKE_VFS.files['/bin/leak.py'] = '''",
@@ -2006,13 +2143,14 @@ class TkPythonTest {
                 FAKE_VFS.files['/bin/bgloop.py'] = '''
                 import time
                 try:
+                    SHARED['started'] = True
                     while True:
                         time.sleep(1)
                 finally:
                     SHARED['cleaned'] = True
                 '''
                 sh.spawn('bgloop', [])
-                wait(lambda: _program.live(sh.jobs[-1]['program']) == 1)
+                wait(lambda: SHARED.get('started'))
                 sh.run_command('exit', [])
                 assert tty.out[-1] == 'there are running jobs (see jobs); exit again to stop them' and sh.running, tty.out[-1]
                 assert 'shutdown' not in SHARED
@@ -2143,7 +2281,7 @@ class TkPythonTest {
                 FAKE_VFS.files['/bin/nested.py'] = "assert os.getenv('MARK') == 'foreground'\\nos.environ['MARK'] = 'nested'"
                 sh.run_command('parent', [])
                 assert os.getenv('MARK') == 'root' and os.getenv('THREAD') is None
-                assert sh.path == '/bin:/usr/bin:/home/bin:.'
+                assert sh.path == '/bin:/bin/tkinter:/usr/bin:/home/bin:.'
                 assert len(sh.jobs) == 2, tty.out
                 os.environ['MARK'] = 'root-after-launch'
                 SHARED['go'] = True
@@ -2332,7 +2470,7 @@ class TkPythonTest {
         host.runUntil("passed");
     }
 
-    /** /bin/tkedit.py against an in-memory MPYOS shell: files, find/replace, dialogs, shortcuts. */
+    /** /bin/tkinter/tkedit.py against an in-memory MPYOS shell: files, find/replace, dialogs, shortcuts. */
     @Test void tkeditEditsFilesThroughPython() throws Exception {
         Host host = new Host(); TileTkDisplay tile = new TileTkDisplay(); host.tiles.put("screen-a", tile);
         String shell = """
@@ -2388,7 +2526,10 @@ class TkPythonTest {
                                 parts.append(part)
                         return '/' + '/'.join(parts)
                 sh = FakeShell()
-                args = ['a.txt']
+                import os, osfs, sys
+                osfs.install(os, sh.fs)
+                os.chdir('/home')
+                sys.argv = ['/bin/tkinter/tkedit.py', 'a.txt']
                 """;
         String checks = """
                 def find(win, kind, label=None):
@@ -2635,9 +2776,13 @@ class TkPythonTest {
                 assert not root._alive
                 passed = True
                 """;
-        String source = Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkedit.py"));
+        String source = Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter/tkedit.py"));
         assertTrue(source.contains("root.mainloop()"));
         host.start(shell + source.replace("root.mainloop()", checks));
+        Map<String, byte[]> editorModules = new HashMap<>();
+        for (String lib : new String[] {"fs", "osfs", "ospath"})
+            editorModules.put(lib, MpyCross.compile(Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/lib/" + lib + ".py")), lib + ".py"));
+        host.vm.setModuleFinder(editorModules::get);
         host.runUntil("armed");
         String token = token(tile);
         int callback = ((Number) host.vm.globals.get("key_callback")).intValue();
@@ -3899,7 +4044,7 @@ class TkPythonTest {
     @Test void textEditorDemoFeedsReadOnlyLogAndSnapshotsEditor() throws Exception {
         Host host=new Host();TileTkDisplay tile=reobf.mpy4oc.tk.TkTestGroups.joined(2,2);host.tiles.put("screen-a",tile);
         host.reg("uptime",args->{host.time+=.01;return host.time;});
-        String demo=Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tktext.py"));
+        String demo=Files.readString(Path.of("src/main/resources/assets/mpy4oc/mpyos/bin/tkinter/tktext.py"));
         host.start(demo.replace("root.mainloop()","while log_count < 1000:\n    root.update()\nassert log['state'] == tk.DISABLED\nassert log.index('end-1c') == '1001.0'\nsnapshot()\nassert status['text'].startswith('Snapshot taken')\nclear_log()\nassert log.get('1.0', tk.END) == '\\n'\npassed = True\n"));
         host.runUntil("passed");
     }

@@ -1,13 +1,5 @@
+#!/usr/bin/env pythonw
 """Ten-thousand-row Listbox demo. Controls and rows are shared by all viewers."""
-# From the MPYOS prompt, run as a job; an existing job or a direct Python run stays here.
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None
-if spawn is not None:
-    spawn('tklog', args)
-    raise SystemExit
-
 import tkinter as tk
 
 root = tk.Tk()

@@ -21,10 +21,11 @@ init.py calls run(tty, boot_fs).
 import fs
 import os
 import _program
+import _process
+import sys
 
 _BUILTINS = ("cd", "exit", "shutdown", "reboot", "help", "jobs", "kill")
-_DEFAULT_PATH = "/bin:/usr/bin:/home/bin:."  # OpenOS boot/02_os.lua
-_OUTPUT_LIMIT = 256     # chunks of background output kept for the next prompt
+_DEFAULT_PATH = "/bin:/bin/tkinter:/usr/bin:/home/bin:."  # OpenOS order with bundled Tk commands.
 
 
 def _set_cwd(program, path):
@@ -36,14 +37,6 @@ def _set_cwd(program, path):
         pass            # a stripped image without osfs: os keeps no directory
 
 
-def _drop_cwd(program):
-    try:
-        import osfs
-        osfs.drop_cwd(program)
-    except Exception:
-        pass
-
-
 def _drop_callbacks(program):
     # The event listeners and timers program registered (see event).
     try:
@@ -51,51 +44,6 @@ def _drop_callbacks(program):
         event.drop(program)
     except Exception:
         pass
-
-
-class _JobTty:
-    """The terminal as a background job sees it. Its output is kept and shown before the
-    next prompt (written straight away it would land on the line being typed); it cannot
-    read the keyboard or draw on the screen -- the shell in front owns both."""
-
-    def __init__(self, shell, job):
-        self._shell = shell
-        self._job = job
-
-    def write(self, text):
-        shell = self._shell
-        shell._job_output.append(str(text))
-        if len(shell._job_output) > _OUTPUT_LIMIT:
-            # A chatty job with nobody at the prompt keeps only its latest output.
-            try:
-                shell._job_output.pop(0)
-                shell._job_dropped += 1
-            except IndexError:
-                pass
-
-    def print(self, *parts, **kw):
-        self.write(kw.get("sep", " ").join([str(p) for p in parts]) + kw.get("end", "\n"))
-
-    def write_color(self, text, rgb=None):
-        self.write(text)
-
-    def print_color(self, text, rgb=None, end="\n"):
-        self.write(str(text) + end)
-
-    def size(self):
-        return self._shell.tty.size()
-
-    def read(self, *args):
-        raise OSError("a background job cannot read the terminal")
-
-    def _screen(self, *args):
-        raise OSError("a background job cannot draw on the terminal")
-
-    clear = set_cursor = get_cursor = draw_cursor_cell = _screen
-
-    @property
-    def gpu(self):
-        self._screen()
 
 
 class _ShellEnvironment:
@@ -163,13 +111,6 @@ class _ProgramShell(_ShellEnvironment):
         _set_cwd(self._program, target)
 
 
-class _JobShell(_ProgramShell):
-    background = True
-
-    def __init__(self, shell, job, cwd):
-        _ProgramShell.__init__(self, shell, job["program"], cwd, _JobTty(shell, job))
-
-
 class Shell(_ShellEnvironment):
     background = False   # commands run here hold the prompt until they end
 
@@ -188,16 +129,16 @@ class Shell(_ShellEnvironment):
         self._env.setdefault('PATH', _DEFAULT_PATH)
         self.history = []
         self.running = True
-        self.jobs = []          # background commands: {id, line, program, thread, done, error}
-        self._next_job = 0
-        self._next_command = 0
-        self._job_output = []   # what background jobs printed, shown before the next prompt
-        self._job_dropped = 0   # ... and how much of it did not fit (_OUTPUT_LIMIT)
+        self._runtime = _process.install(self.fs, tty)
+        self._runtime.context = self._context
+        self.jobs = self._runtime.jobs
         self._exit_warned = False
-        # Commands' inner functions resolve globals against the MAIN module (a VM
-        # scoping rule -- see run_command), so the context must be planted there.
-        # init.py passes its globals() in; they are the main namespace.
         self.g = main_globals if main_globals is not None else globals()
+
+    def _context(self, job, cwd, tty):
+        view = _ProgramShell(self, job['program'], cwd, tty)
+        view.background = job['background']
+        return view
 
     # -- paths --
     def resolve(self, path):
@@ -211,31 +152,15 @@ class Shell(_ShellEnvironment):
     # -- command lookup --
     def command_path(self, name, cwd=None, path=None):
         """Resolve a command like OpenOS: explicit paths use cwd; bare names use path.
-        Try the exact filename first, then .py; an existing directory is not executable."""
-        name = name.replace("\\", "/")
-        if not name or name.endswith("/") or name in (".", ".."):
-            return None
-        cwd = self.cwd if cwd is None else cwd
-        path = self.path if path is None else path
-        if "/" in name:
-            candidates = [fs.normalize(name) if name.startswith("/") else fs.join(cwd, name)]
-        else:
-            candidates = []
-            for directory in path.split(":"):
-                if directory:
-                    base = directory if directory.startswith("/") else fs.join(cwd, directory)
-                    candidates.append(fs.join(base, name))
-        for candidate in candidates:
-            if not self.fs.exists(candidate) and not candidate.endswith(".py"):
-                candidate += ".py"
-            if self.fs.exists(candidate) and not self.fs.is_directory(candidate):
-                return candidate
-        return None
+        Try the exact filename first, then .py and .mpy; a directory is not executable."""
+        return _process.command_path(self.fs, name, self.cwd if cwd is None else cwd, self.path if path is None else path)
 
     def find_command(self, name, cwd=None, path=None):
-        """The source of a resolved command, or None (kept for callers reading commands)."""
+        """Resolved command contents (str source or bytes for .mpy), or None."""
         filename = self.command_path(name, cwd, path)
-        return None if filename is None else self.fs.read_file(filename)
+        if filename is None:
+            return None
+        return self.fs.read_bytes(filename) if filename.endswith('.mpy') else self.fs.read_file(filename)
 
     def _complete(self, text, pos):
         start, end, partial, words = _completion_token(text, pos)
@@ -253,10 +178,10 @@ class Shell(_ShellEnvironment):
                     continue
                 try:
                     for entry in self.fs.list(self.resolve(directory)):
-                        # Bare .py commands omit the extension; extensionless scripts keep it.
+                        # Source and bytecode commands share one bare-name completion.
                         if entry.endswith("/") or (entry.startswith(".") and not partial.startswith(".")):
                             continue
-                        name = entry[:-3] if entry.endswith(".py") else entry
+                        name = entry[:-3] if entry.endswith('.py') else entry[:-4] if entry.endswith('.mpy') else entry
                         if name not in names:
                             names.append(name)
                 except Exception:
@@ -329,30 +254,24 @@ class Shell(_ShellEnvironment):
         if _program.current() is not None:
             # Called from inside a running command (or job): part of that program.
             return self._run_nested(name, args, self, self.tty)
-        environment = self._env.copy()
-        src = self._source(name, path=environment.get('PATH', ''))
-        if src is None:
+        prepared = self._prepare(name, args, self.cwd, self._env.copy(), self.tty)
+        if prepared is None:
             return
-        # Each command runs in its own sandbox namespace: args/tty/sh are injected
-        # there, functions the command defines keep that namespace as their scope
-        # (so they see args/tty/sh too), and reads of component/computer/the libs
-        # fall through to the system globals. Nothing the command defines leaks
-        # back into the shell, so no save/restore of main globals is needed.
-        self._next_command += 1
-        program = "cmd:" + str(self._next_command)
-        os._inherit_environment(program, environment)
-        _set_cwd(program, self.cwd)         # its os.chdir moves only itself
-        view = _ProgramShell(self, program, self.cwd, self.tty)
-        _program.set_current(program)      # its threads and windows belong to it
+        if prepared['windowed']:
+            return self._spawn(prepared, name, args, self.tty)
+        job = self._runtime.foreground(prepared, self.tty)
+        if job['error'] is not None:
+            self.tty.print(name + ': ' + job['error'])
+        return job['returncode']
+
+    def _prepare(self, name, args, cwd, environment, tty):
         try:
-            exec_sandbox(compile(src[1], src[0], 'exec'), {"args": args, "tty": self.tty, "sh": view, "__file__": src[0], "__name__": "__main__"})
-        except SystemExit:
-            pass
-        except Exception as e:
-            self.tty.print(name + ": " + str(e))
-        finally:
-            _program.set_current(None)
-            self._end_program(program, True)
+            return self._runtime.prepare([name] + list(args), cwd, environment)
+        except FileNotFoundError:
+            tty.print(name + ': command not found')
+        except Exception as error:
+            tty.print(name + ': ' + str(error))
+        return None
 
     def _builtin(self, name, args, view, tty):
         # The commands that live in the shell itself; False if name is not one. view is the
@@ -385,134 +304,67 @@ class Shell(_ShellEnvironment):
             tty.print("there are running jobs (see jobs); " + name + " again to stop them")
             return
         for job in running:
-            _program.stop(job["program"])
-            self._release_owned(job["program"])
+            self._runtime.terminate(job)
         deadline = computer.uptime() + 1
         while [job for job in running if not job["done"]] and computer.uptime() < deadline:
             computer._yield_tick()
         self.running = False
         computer.shutdown(name == "reboot")
 
-    def _source(self, name, tty=None, cwd=None, path=None):
-        try:
-            filename = self.command_path(name, cwd, path)
-            src = None if filename is None else self.fs.read_file(filename)
-        except Exception as e:     # unreadable, e.g. not UTF-8: report it, keep the shell
-            (tty or self.tty).print(name + ": " + str(e))
-            return None
-        if src is None:
-            (tty or self.tty).print(name + ": command not found")
-        return None if src is None else (filename, src)
-
     def _run_nested(self, name, args, sh, tty):
-        # A command run by a command: part of the caller's program, which cleans up for it.
-        src = self._source(name, tty, sh.cwd, sh.path)
-        if src is None:
+        # Legacy sh calls share the caller's program. subprocess creates a child.
+        prepared = self._prepare(name, args, sh.cwd, sh._env.copy(), tty)
+        if prepared is None:
             return
+        if prepared['windowed']:
+            return self._spawn(prepared, name, args, tty)
+        previous = sys.argv
+        sys.argv = list(prepared['args'])
         try:
-            exec_sandbox(compile(src[1], src[0], 'exec'), {"args": args, "tty": tty, "sh": sh, "__file__": src[0], "__name__": "__main__"})
+            exec_sandbox(_process.load_code(prepared), {'args': sys.argv[1:], 'argv': sys.argv, 'tty': tty, 'sh': sh, '__file__': prepared['filename'], '__name__': '__main__'})
         except SystemExit as stop:
             if _program.stopping():
-                raise stop          # the caller's program was stopped: it stops too
-        except Exception as e:
-            tty.print(name + ": " + str(e))
+                raise stop
+        except Exception as error:
+            tty.print(name + ': ' + str(error))
+        finally:
+            sys.argv = previous
 
-    # -- programs ending --
-    def _end_program(self, program, interactive):
-        # What a process exit does: wait for its non-daemon threads (CPython waits too),
-        # then stop whatever else it left running (daemon threads, coroutines), close its
-        # windows and drop its listeners. A stopped task ends at its next poll point (see
-        # _program). A killed job does not wait.
-        if _program.threads(program, False):
-            if interactive:
-                self.tty.print("(waiting for " + str(len(_program.threads(program, False))) +
-                               " thread(s); Ctrl+C stops them)")
-            _program._waited.append(program)     # its threads leave Ctrl+C to us
-            while _program.threads(program, False):
-                if interactive:
-                    if self._ctrl_c():
-                        break
-                elif _program.stopping(program):
-                    break
-                computer._yield_tick()
-        _program.stop(program)
-        self._release_owned(program)
-        _drop_callbacks(program)
-        _drop_cwd(program)
-        _program.ended(program)
-
-    def _ctrl_c(self):
-        # Take a Ctrl+C from the keyboard queue; leave every other signal where it is. Other
-        # tasks take signals from the same list meanwhile: scan a copy, remove by value.
-        queue = computer._signals
-        for signal in list(queue):
-            if len(signal) > 2 and signal[0] == "key_down" and signal[2] == 3:
-                try:
-                    queue.remove(signal)
-                except ValueError:
-                    continue        # taken meanwhile
-                self.tty.print("^C")
-                return True
-        return False
-
-    # -- background jobs --
     def spawn(self, name, args, cwd=None, tty=None, path=None):
-        """Run a command or Python path in the background (what `name args &` does); returns the
-        job number, or None if there is no such command. tkedit uses this. tty: where
-        to report (a job starting another reports to its own output)."""
+        """Compatibility API: launch a background program and return its job number."""
         tty = tty or self.tty
         cwd = self.cwd if cwd is None else self.resolve(cwd)
         environment = os.environ.copy()
         if path is not None:
             environment['PATH'] = path
-        src = self._source(name, tty, cwd, environment.get('PATH', ''))
-        if src is None:
-            return None
-        import threading
-        self._next_job += 1
-        program = "job:" + str(self._next_job)
-        job = {"id": self._next_job, "line": " ".join([name] + list(args)), "program": program,
-               "thread": None, "done": False, "error": None}
-        os._inherit_environment(program, environment)
-        view = _JobShell(self, job, cwd)
-        _set_cwd(program, view.cwd)
+        prepared = self._prepare(name, args, cwd, environment, tty)
+        if prepared is not None:
+            return self._spawn(prepared, name, args, tty)
+        return None
 
-        def run():
-            _program.set_current(program)     # this thread and what it starts run for the job
-            try:
-                exec_sandbox(compile(src[1], src[0], 'exec'), {"args": list(args), "tty": view.tty, "sh": view, "__file__": src[0], "__name__": "__main__"})
-            except SystemExit:
-                pass
-            except Exception as e:
-                job["error"] = str(e)
-            finally:
-                # The job's non-daemon threads keep it running, as a process; then the rest stops.
-                self._end_program(program, False)
-                job["done"] = True
-
-        _program._background.append(program)   # it does not get the keyboard
-        thread = threading.Thread(target=run, name=job["line"], daemon=True)
-        thread._program_main = True              # threads it starts are not daemons by default
-        job["thread"] = thread
-        self.jobs.append(job)
-        thread.start()
-        tty.print("[" + str(job["id"]) + "] " + job["line"])
-        return job["id"]
+    def _spawn(self, prepared, name, args, tty):
+        job = self._runtime.spawn(prepared, True, True, ' '.join([name] + list(args)))
+        tty.print('[' + str(job['id']) + '] ' + job['line'])
+        return job['id']
 
     def _report_jobs(self):
         # Before a prompt, as bash does: what background jobs printed, and which have ended.
-        dropped, self._job_dropped = self._job_dropped, 0
+        dropped, self._runtime._job_dropped = self._runtime._job_dropped, 0
         if dropped:
             self.tty.print("(" + str(dropped) + " earlier lines of background output dropped)")
-        output, self._job_output = self._job_output, []
+        output, self._runtime._job_output = self._runtime._job_output, []
         for text in output:
             self.tty.write(text)
         for job in list(self.jobs):
-            if job["done"] or not job["thread"].is_alive():
+            if job["done"]:
                 line = "[" + str(job["id"]) + "] "
-                self.tty.print(line + ("done  " + job["line"] if job["error"] is None
-                                       else job["line"] + ": " + job["error"]))
-                self.jobs.remove(job)
+                if job['announce']:
+                    self.tty.print(line + ("done  " + job["line"] if job["error"] is None
+                                           else job["line"] + ": " + job["error"]))
+                try:
+                    self.jobs.remove(job)
+                except ValueError:
+                    pass  # subprocess reaped its completed child meanwhile
         for program in list(_program._stopping):
             # A stopped program's thread may have opened a window or a listener after its
             # clean-up (it stops at its next poll point); close them, and forget the program
@@ -531,17 +383,12 @@ class Shell(_ShellEnvironment):
             if str(job["id"]) == number:
                 if not job["done"]:
                     # Its tasks end at their next poll point; its windows close now.
-                    _program.stop(job["program"])
-                    self._release_owned(job["program"])
+                    self._runtime.terminate(job)
                 return
         tty.print("kill: no such job: " + args[0])
 
     def _release_owned(self, program):
-        # Close the windows one program opened; how many there were.
-        try:
-            return computer._tk_release_owned(program)
-        except Exception:
-            return 0
+        return _process.release(program)
 
     def _cd(self, args):
         target = self.resolve(args[0]) if args else "/"
@@ -578,7 +425,11 @@ class Shell(_ShellEnvironment):
                 continue
             self.history.append(line)
             background = line.endswith("&")
-            parts = _split(line[:-1] if background else line)
+            try:
+                parts = _split(line[:-1] if background else line)
+            except ValueError as error:
+                self.tty.print('shell: ' + str(error))
+                continue
             if not parts:
                 continue
             if parts[0] not in ("exit", "shutdown", "reboot"):
@@ -631,28 +482,7 @@ def _completion_quote(value, quote):
 
 
 def _split(line):
-    """Split a command line into words. Double and single quotes group words;
-    no escapes, no globbing -- a shell for a floppy, not bash."""
-    out = []
-    cur = ""
-    quote = None
-    for ch in line:
-        if quote is not None:
-            if ch == quote:
-                quote = None
-            else:
-                cur += ch
-        elif ch == '"' or ch == "'":
-            quote = ch
-        elif ch == " " or ch == "\t":
-            if cur:
-                out.append(cur)
-                cur = ""
-        else:
-            cur += ch
-    if cur:
-        out.append(cur)
-    return out
+    return _process.split(line)
 
 
 def run(tty, boot_fs_addr, main_globals=None):

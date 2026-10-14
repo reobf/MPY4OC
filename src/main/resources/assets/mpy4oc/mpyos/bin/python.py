@@ -1,6 +1,7 @@
+# MPYOS interpreter: python
 # python -- run a Python file, or start an interactive session.
 #
-#   python <file> [args...]   run the file; its own args are in the `argv` list
+#   python <file> [args...]   run the file; its arguments are in sys.argv[1:]
 #   python                    interactive REPL: eval prints the value, else exec
 #
 # Both run in a fresh sandbox namespace: reads fall through to the system globals
@@ -13,20 +14,11 @@
 # Compound statements end with a blank line. Unclosed brackets, triple-quoted
 # strings and explicit backslash continuations also show the continuation prompt.
 
-if args:
-    # --- run a file ---
-    path = sh.resolve(args[0])
-    src = sh.fs.read_file(path)
-    if src is None:
-        tty.print("python: no such file: " + path)
-    else:
-        sandbox = {"argv": [path] + list(args[1:])}
-        try:
-            exec_sandbox(src, sandbox)
-        except SystemExit:
-            pass
-        except Exception as _e:
-            tty.print("python: " + str(_e))
+import sys
+import _process
+
+if sys.argv[1:]:
+    _process.python(sys.argv[1:])
 else:
     # --- interactive REPL ---
     tty.print("Python (mpyos). 'exit' to leave. Blank line ends a block.")
@@ -47,7 +39,7 @@ else:
     def _resolve(name):
         # Resolve exactly the way execution would: evaluate the dotted path in the
         # sandbox (falls through to the system globals). Membership tests against
-        # sh.g don't work for injected globals like component/computer -- they live
+        # globals() don't work for injected globals like component/computer -- they live
         # in the VM globals, reachable only via name-lookup fall-through.
         try:
             return eval_sandbox(name, sandbox)
@@ -66,10 +58,10 @@ else:
             for k in list(sandbox.keys()):
                 if k.startswith(partial) and k not in seen:
                     seen.append(k)
-            for k in list(sh.g.keys()):
+            for k in list(globals().keys()):
                 if k.startswith(partial) and k not in seen:
                     seen.append(k)
-            # injected globals and common builtins are not literal keys of sh.g
+            # injected globals and common builtins are not literal keys of globals()
             # (they live in the VM globals, reached via fall-through), so offer
             # them explicitly
             for k in ("component", "computer", "print", "len", "dir", "range",
@@ -178,32 +170,35 @@ else:
 
     pending = []
     while True:
-        line = tty.read("... " if pending else ">>> ", history, _complete)
-        if line is None:
-            if pending:
-                pending = []
-                tty.print("KeyboardInterrupt")
-                continue
-            break
-        stripped = line.strip()
-        if not pending and not stripped:
-            continue
-        if not pending and (stripped == "exit" or stripped == "exit()"):
-            break
-        if line:
-            history.append(line)
-        # Keep indentation and whitespace inside string literals intact.
-        pending.append(line)
-        source = "\n".join(pending)
-        if _input_open(source) or (stripped and _is_block(source)):
-            continue
-        pending = []
         try:
+            line = tty.read("... " if pending else ">>> ", history, _complete)
+            if line is None:
+                if pending:
+                    pending = []
+                    tty.print("KeyboardInterrupt")
+                    continue
+                break
+            stripped = line.strip()
+            if not pending and not stripped:
+                continue
+            if not pending and (stripped == "exit" or stripped == "exit()"):
+                break
+            if line:
+                history.append(line)
+            # Keep indentation and whitespace inside string literals intact.
+            pending.append(line)
+            source = "\n".join(pending)
+            if _input_open(source) or (stripped and _is_block(source)):
+                continue
+            pending = []
             try:
                 _r = eval_sandbox(source, sandbox)
                 if _r is not None:
                     tty.print(repr(_r))
             except SyntaxError:
                 exec_sandbox(source, sandbox)
+        except KeyboardInterrupt:
+            pending = []
+            tty.print("KeyboardInterrupt")
         except Exception as _e:
             tty.print("error: " + str(_e))

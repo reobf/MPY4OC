@@ -1,3 +1,4 @@
+#!/usr/bin/env pythonw
 """ttk widgets: a menubar (File, Theme) over a notebook with four pages. Widgets: themed buttons,
 check and radio buttons, a 0..1 scale followed by a variable trace, a window with a sizegrip,
 double clicks. Borders: the six reliefs, a ttk and a classic labelframe, and a canvas moved with
@@ -9,15 +10,6 @@ F10 opens the menubar from the keyboard.
 
 usage: tkttk
 """
-# From the MPYOS prompt, run as a job; an existing job or a direct Python run stays here.
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None
-if spawn is not None:
-    spawn('tkttk', args)
-    raise SystemExit
-
 import tkinter as tk
 from tkinter import ttk
 

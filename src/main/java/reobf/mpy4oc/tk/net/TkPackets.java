@@ -325,6 +325,14 @@ public final class TkPackets {
             }
             out.writeInt(item.image);
             out.writeByte(item.relief);
+            // Only appended icon kinds have this suffix; older records retain their byte layout.
+            if (item.icon != null) {
+                writeString(out, item.icon.name, reobf.mpy4oc.tk.TkIconDescriptor.MAX_NAME_BYTES);
+                if (!item.icon.fluid) {
+                    out.writeShort(item.icon.damage);
+                    writeString(out, item.icon.nbt, reobf.mpy4oc.tk.TkIconDescriptor.MAX_NBT_BYTES);
+                }
+            }
         }
     }
 
@@ -351,8 +359,20 @@ public final class TkPackets {
                 vector = new TkVector(TkVector.Shape.values()[shape], points, fill, outline, stroke);
             }
             int image = in.readInt(), relief = in.readUnsignedByte();
+            TkWidget.Kind widgetKind = TkWidget.Kind.values()[kind];
+            reobf.mpy4oc.tk.TkIconDescriptor icon = null;
+            if (widgetKind == TkWidget.Kind.ITEMICON || widgetKind == TkWidget.Kind.FLUIDICON) {
+                boolean fluid = widgetKind == TkWidget.Kind.FLUIDICON;
+                String name = readString(in, Math.min(reobf.mpy4oc.tk.TkIconDescriptor.MAX_NAME_BYTES, TkDisplayList.MAX_PAINT_BYTES - bytes));
+                bytes += name.getBytes(StandardCharsets.UTF_8).length + 4;
+                int damage = fluid ? 0 : in.readUnsignedShort();
+                String nbt = fluid ? "" : readString(in, Math.min(reobf.mpy4oc.tk.TkIconDescriptor.MAX_NBT_BYTES, TkDisplayList.MAX_PAINT_BYTES - bytes));
+                bytes += nbt.getBytes(StandardCharsets.UTF_8).length;
+                if (bytes > TkDisplayList.MAX_PAINT_BYTES) throw new IllegalArgumentException("icon paint budget exceeded");
+                icon = new reobf.mpy4oc.tk.TkIconDescriptor(fluid, name, damage, nbt);
+            }
             items.add(new TkDisplayList.Item(id, part, TkWidget.Kind.values()[kind], bounds, clip,
-                    background, foreground, border, state, textX, textY, text, caretX, selectionX, selectionWidth, vector, image, relief));
+                    background, foreground, border, state, textX, textY, text, caretX, selectionX, selectionWidth, vector, image, relief, icon));
         }
         return new TkDisplayList(items);
     }

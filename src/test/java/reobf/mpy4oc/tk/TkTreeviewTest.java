@@ -129,6 +129,83 @@ class TkTreeviewTest {
         assertTrue(tree.render().items.stream().allMatch(i -> i.kind != TkWidget.Kind.TREEVIEW), "older record kinds only");
     }
 
+    @Test void rowImagesAreClippedSelectableAndRestoredWithTheirPixels() {
+        TkTree tree = new TkTree(); tree.resize(180, 160);
+        Treeview t = new Treeview(tree.root()); t.pack();
+        t.configureColumn(t.treeColumn, options("width", 260, "minwidth", 260));
+        TkImage image = tree.addImage(16, 16, new int[256]);
+        image.put(new int[][] {{0xF5C744}}, 0, 0, 16, 16);
+        for (int i = 0; i < 20; i++) t.insert(t.root, Integer.MAX_VALUE, "r" + i, options("text", "row" + i, "image", image.id));
+        var records = tree.render().items.stream().filter(i -> i.id == t.id).toList();
+        var icon = records.stream().filter(i -> i.image != 0).findFirst().orElseThrow();
+        var label = records.stream().filter(i -> i.text.equals("row0")).findFirst().orElseThrow();
+        assertEquals(16, icon.bounds.width);
+        assertTrue(label.textX >= icon.textX + 16 + 2);
+        assertTrue(records.size() <= t.maxRecords(12));
+        assertEquals(records.size(), records.stream().map(i -> i.part).distinct().count());
+        assertEquals("image", t.identify("element", icon.textX - t.bounds.x + 2, icon.textY - t.bounds.y + 2));
+        click(tree, t, icon.textX - t.bounds.x + 2, icon.textY - t.bounds.y + 2, 0);
+        assertEquals(List.of("r0"), ids(t.selection()));
+        assertEquals(Treeview.SELECTED, tree.render().items.stream().filter(i -> i.image != 0).findFirst().orElseThrow().background);
+        TkTreeviewApi.call(t, "xview", new Object[] {"moveto", .1d});
+        icon = tree.render().items.stream().filter(i -> i.image != 0).findFirst().orElseThrow();
+        assertTrue(icon.textX < icon.clip.x, "horizontal scrolling clips without moving the image origin");
+        var saved = TkTreePersistence.save(tree);
+        TkTree restored = TkTreePersistence.load(saved, 180, 160, () -> {});
+        assertEquals(image.pixel(0, 0), restored.images.get(image.id).pixel(0, 0));
+        assertTrue(restored.render().items.stream().anyMatch(i -> i.image == image.id));
+        restored.deleteImage(image.id);
+        assertTrue(restored.render().items.stream().noneMatch(i -> i.image != 0));
+        assertEquals(0, ((Treeview) restored.get(t.id)).item("r19").image, "off-screen references are cleared too");
+        saved.removeTag("images");
+        TkTree missing = TkTreePersistence.load(saved, 180, 160, () -> {});
+        assertEquals(20, ((Treeview) missing.get(t.id)).items.size(), "missing images must not lose the file list");
+    }
+
+    @Test void rowImagesRejectOtherProgramsAndStayWithinTheirRow() {
+        TkTree tree = new TkTree(); tree.resize(320, 240);
+        tree.caller = 1;
+        TkImage image = tree.addImage(32, 40, new int[1280]);
+        Treeview t = new Treeview(tree.root()); t.pack();
+        t.insert(t.root, 0, "row", options("text", "large", "image", image.id));
+        tree.caller = 2;
+        assertThrows(IllegalArgumentException.class, () -> t.setOptions(t.item("row"), options("image", image.id, "text", "changed")));
+        assertEquals("large", t.item("row").text);
+        tree.caller = 0;
+        var icon = tree.render().items.stream().filter(i -> i.image != 0).findFirst().orElseThrow();
+        var label = tree.render().items.stream().filter(i -> i.text.equals("large")).findFirst().orElseThrow();
+        assertEquals(Treeview.ROW, icon.clip.height);
+        assertTrue(icon.clip.y >= label.bounds.y && icon.clip.y + icon.clip.height <= label.bounds.y + label.bounds.height);
+        t.setOptions(t.item("row"), options("image", 0)); tree.changed(false);
+        assertTrue(tree.render().items.stream().noneMatch(i -> i.image != 0));
+    }
+
+    @Test void flatListOmitsExpanderSpaceButKeepsSelectionAndSavedSetting() {
+        TkTree tree = new TkTree(); tree.resize(320, 240);
+        Treeview t = new Treeview(tree.root()); t.pack();
+        TkImage image = tree.addImage(16, 16, new int[256]);
+        t.insert(t.root, 0, "folder", options("text", "folder", "image", image.id));
+        t.insert(t.item("folder"), 0, "child", options("text", "child"));
+        TkOptions.configure(t, options("showindicator", false));
+        var icon = tree.render().items.stream().filter(i -> i.image != 0).findFirst().orElseThrow();
+        var label = tree.render().items.stream().filter(i -> i.text.equals("folder")).findFirst().orElseThrow();
+        assertEquals(label.bounds.x + 2, icon.textX, "only the cell's normal two-pixel padding remains");
+        assertTrue(tree.render().items.stream().noneMatch(i -> i.text.equals("▸")));
+        assertEquals("image", t.identify("element", icon.textX - t.bounds.x + 1, icon.textY - t.bounds.y + 1));
+        click(tree, t, icon.textX - t.bounds.x + 1, icon.textY - t.bounds.y + 1, 0);
+        assertEquals(List.of("folder"), ids(t.selection()));
+        assertFalse(t.item("folder").open, "clicking the icon must not hit an invisible expander");
+        var saved = TkTreePersistence.save(tree);
+        TkTree copy = TkTreePersistence.load(saved, 320, 240, () -> {});
+        assertFalse(((Treeview) copy.get(t.id)).showIndicator);
+        TkOptions.configure(t, options("showindicator", true));
+        var expanded = tree.render().items.stream().filter(i -> i.image != 0).findFirst().orElseThrow();
+        assertEquals(icon.textX + Treeview.INDICATOR, expanded.textX, "normal Treeviews keep their expander space");
+        var nodes = saved.getTagList("nodes", 10);
+        for (int i = 0; i < nodes.tagCount(); i++) nodes.getCompoundTagAt(i).removeTag("showIndicator");
+        assertTrue(((Treeview) TkTreePersistence.load(saved, 320, 240, () -> {}).get(t.id)).showIndicator, "old saves retain the normal layout");
+    }
+
     @Test void anchorsPlaceTheText() {
         TkTree tree = new TkTree(); tree.resize(640, 480);
         Treeview t = new Treeview(tree.root()); t.pack();

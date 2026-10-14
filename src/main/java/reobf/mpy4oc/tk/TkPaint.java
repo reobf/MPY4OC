@@ -6,6 +6,17 @@ import java.util.List;
 final class TkPaint {
     private TkPaint() {}
     static boolean special(TkWidget w, boolean focused, List<TkDisplayList.Item> out) {
+        if (w instanceof TkIcon) {
+            TkIcon icon = (TkIcon) w;
+            int state = (focused ? TkDisplayList.FOCUSED : 0) | (!w.tree.available(w) ? TkDisplayList.DISABLED : 0);
+            int bg = w.lookColor("background", w.background);
+            relief(out, w, 0, TkWidget.Kind.FRAME, w.bounds, bg, w.border, w.lookRelief("relief", w.relief).code(), state);
+            TkRect box = icon.iconBox(), clip = box.intersect(w.clip);
+            if (icon.descriptor != null && !clip.empty())
+                out.add(new TkDisplayList.Item(w.id, 1, w.kind, box, clip, bg, w.foreground, 0, state,
+                        box.x, box.y, "", -1, 0, 0, null, 0, 0, icon.descriptor));
+            return true;
+        }
         if (w instanceof Notebook) {
             // The background, the page's raised border, then the tabs: raised, open at the bottom. The
             // selected one has the notebook's colour and reaches 1 px down over the border, so that it
@@ -167,6 +178,7 @@ final class TkPaint {
      * taskbar button, the rows a Listbox or Text can show, every Canvas item and Notebook tab.
      */
     static int maxRecords(TkWidget w, int rows) {
+        if (w instanceof TkIcon) return ((TkIcon) w).descriptor == null ? 1 : 2;
         if (TkWindow.is(w)) {
             // Its client area; edge, title and three buttons; the four resize hints; its taskbar button; its menubar.
             Menu bar = TkWindow.menubar((Frame) w);
@@ -192,6 +204,7 @@ final class TkPaint {
 
     /** At most how many bytes of text {@code w}'s records can carry (see maxRecords); one row shows at most {@code rowBytes}. */
     static long maxBytes(TkWidget w, int rows, int rowBytes) {
+        if (w instanceof TkIcon) return ((TkIcon) w).descriptor == null ? 0 : ((TkIcon) w).descriptor.bytes();
         if (w instanceof Listbox) { Listbox list = (Listbox) w; return Math.min(list.bytes, (long) Math.min(list.size(), rows) * rowBytes); }
         if (w instanceof Text) return ((Text) w).maxBytes(rows);
         if (w instanceof Treeview) return ((Treeview) w).maxBytes(rows, rowBytes);

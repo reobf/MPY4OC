@@ -19,9 +19,10 @@ class MpyosShellTest {
             import fs, shell, term, event
             class Disk:
                 def __init__(self):
-                    self.entries = ['tkdesktop.py', 'tkdemo.py', 'python.py', 'help.py', 'data.txt', 'ignored.py/']
+                    self.entries = ['tkinter/', 'python.py', 'help.py', 'data.txt', 'ignored.py/']
                     self.directories = {
                         '/': ['bin/', 'home/', 'mnt/'],
+                        '/bin/tkinter': ['tkdesktop.py', 'tkdemo.py'],
                         '/home': ['scripts/', 'script.py', 'scrape.py', 'readme.txt', '.hidden/', '.secret.py', 'space dir/', 'space draft.py', 'space data.py'],
                         '/home/scripts': ['run.py'],
                         '/home/space dir': ['inside.py', 'inventory.py'],
@@ -100,6 +101,8 @@ class MpyosShellTest {
                 assert sh._complete('  pyt file.py', 5) == [('  python file.py', 8, 'python')]
                 assert sh._complete('python file.py', 3) == [('python file.py', 6, 'python')]
                 assert [c[2] for c in sh._complete('tkd', 3)] == ['tkdemo', 'tkdesktop']
+                assert sh.command_path('tkdemo') == '/bin/tkinter/tkdemo.py'
+                assert sh._complete('python /bin/tkinter/tkd', 22)[0][2] == 'tkdemo.py'
                 assert [c[2] for c in sh._complete('', 0)] == ['cd', 'data.txt', 'exit', 'help', 'jobs', 'kill', 'python', 'reboot', 'shutdown', 'tkdemo', 'tkdesktop']
                 assert sh._complete('nothing', 7) == []
                 assert sh._complete('python pyt', 10) == []
@@ -252,7 +255,9 @@ class MpyosShellTest {
                 disk.files['/home/tkdemo.py'] = 'local'
                 assert sh.command_path('tkdemo') == '/home/tkdemo.py'
                 sh.path = '/bin'
-                assert sh.command_path('tkdemo') == '/bin/tkdemo.py'
+                assert sh.command_path('tkdemo') is None, 'custom PATH is not automatically extended'
+                sh.path = '/bin:/bin/tkinter'
+                assert sh.command_path('tkdemo') == '/bin/tkinter/tkdemo.py'
                 assert sh.command_path('same') is None
                 passed = True
                 """);
@@ -261,7 +266,7 @@ class MpyosShellTest {
     @Test void environmentPathImmediatelyControlsLookupAndTab() throws Exception {
         run("""
                 import os
-                assert os.getenv('PATH') == '/bin:/usr/bin:/home/bin:.'
+                assert os.getenv('PATH') == '/bin:/bin/tkinter:/usr/bin:/home/bin:.'
                 sh.cwd = '/home'
                 os.environ['PATH'] = '.'
                 assert sh.path == '.'

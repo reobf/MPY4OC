@@ -1,13 +1,5 @@
+#!/usr/bin/env pythonw
 """Canvas dashboard: 10 Hz needle + 80-point history, shared by all viewers."""
-# From the MPYOS prompt, run as a job; an existing job or a direct Python run stays here.
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None
-if spawn is not None:
-    spawn('tkcanvas', args)
-    raise SystemExit
-
 import tkinter as tk
 import math
 

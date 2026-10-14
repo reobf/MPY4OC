@@ -1263,9 +1263,7 @@ class Widget:
         self._root._delete_command(name)
 
     def after_idle(self, func, *args):
-        name = self.after(0, func, *args)
-        self._root._timers[name] = self._root._timers[name] + (True,)   # idle: update_idletasks runs it
-        return name
+        return self._queue_timer(computer.uptime(), func, args, True)
 
     def winfo_class(self):
         return self._tk_class
@@ -1422,15 +1420,26 @@ class Widget:
             while computer.uptime() < deadline:
                 computer._yield_tick()
             return None
+        return self._queue_timer(deadline, func, args, False)
+
+    def _queue_timer(self, deadline, func, args, idle):
         if not callable(func):
             raise TypeError('after callback must be callable')
         global _next_timer
         # Ids are unique across windows: a Toplevel is a separate root here, and an id
         # passed to another window's after_cancel must not cancel an unrelated timer.
-        _next_timer += 1
-        name = 'after#' + str(_next_timer)
-        self._root._timers[name] = (deadline, self, func, args)
-        return name
+        # Publish the COMPLETE timer atomically: another task's mainloop may run it
+        # (even destroy its window) before after_idle returns to the calling task.
+        irq = __machine_disable_irq()
+        try:
+            if not self._alive:
+                raise ValueError('widget was destroyed')
+            _next_timer += 1
+            name = 'after#' + str(_next_timer)
+            self._root._timers[name] = (deadline, self, func, args, idle)
+            return name
+        finally:
+            __machine_enable_irq(irq)
 
     def after_cancel(self, name):
         for root in list(_roots.values()):
@@ -2048,6 +2057,66 @@ class LabelFrame(Frame):
 class Label(Widget):
     def __init__(self, master=None, cnf=None, **kw):
         self._init(master, 'label', cnf, kw)
+
+
+class _ResourceIcon(Widget):
+    def __init__(self, master=None, cnf=None, **kw):
+        self._init(master, self._kind, cnf, kw)
+
+    def configure(self, cnf=None, **kw):
+        options = _options(cnf, kw)
+        key = self._descriptor_option
+        if key in options:
+            value = options[key]
+            if value is None:
+                options[key] = ''  # Explicit clear survives OC's table conversion.
+            else:
+                if not isinstance(value, dict):
+                    raise TypeError(key + ' must be a descriptor dict or None')
+                name = value.get('name')
+                if not isinstance(name, str) or not name or len(name) > 256 or len(name.encode('utf-8')) > 256:
+                    raise ValueError('icon name must be a nonempty string of at most 256 UTF-8 bytes')
+                descriptor = {'name': name}
+                if key == 'item':
+                    damage = value.get('damage', 0)
+                    if isinstance(damage, bool) or not isinstance(damage, int) or not 0 <= damage <= 65535:
+                        raise ValueError('item damage must be an integer in 0..65535')
+                    descriptor['damage'] = damage
+                    nbt = value.get('nbt')
+                    if nbt is not None:
+                        if not isinstance(nbt, str) or len(nbt) > 4096 or len(nbt.encode('utf-8')) > 4096:
+                            raise ValueError('item nbt must be a compound string of at most 4096 UTF-8 bytes')
+                        descriptor['nbt'] = nbt
+                # Do not transmit quantities, labels, compressed OC tags or other unrelated fields.
+                options[key] = descriptor
+        return Widget.configure(self, options)
+
+    config = configure
+
+
+class ItemIcon(_ResourceIcon):
+    """Minecraft icon: item={'name': 'minecraft:stone', 'damage': 0, 'nbt': '{...}' }.
+
+    nbt is an optional Minecraft 1.7 SNBT tag compound (4096 UTF-8 bytes, depth 16).
+    width/height are content pixels, default 24; 0 selects 24. The icon fits a square
+    inside the padding/border and follows anchor. item=None clears it. Extra OC map
+    fields, including size, label and compressed tag, are ignored. No inventory is
+    accessed. Unknown resources or failing client renderers show a missing icon.
+    """
+    _kind = 'itemicon'
+    _descriptor_option = 'item'
+    _tk_class = 'ItemIcon'
+
+
+class FluidIcon(_ResourceIcon):
+    """Forge still-fluid icon: fluid={'name': 'water'}; fluid=None clears it.
+
+    Uses the registered fluid texture and tint. amount/label and other map fields
+    are ignored. Pixel sizing, layout and bindings work as for ItemIcon.
+    """
+    _kind = 'fluidicon'
+    _descriptor_option = 'fluid'
+    _tk_class = 'FluidIcon'
 
 
 class Button(Widget):

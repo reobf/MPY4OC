@@ -104,6 +104,7 @@ public final class Builtins {
         globals.putIfAbsent("globals", Vm.GLOBALS_BUILTIN);
         globals.putIfAbsent("locals", Vm.LOCALS_BUILTIN);
         globals.putIfAbsent("compile", Vm.COMPILE_BUILTIN);
+        globals.putIfAbsent("__load_mpy", Vm.LOAD_MPY_BUILTIN);
         globals.putIfAbsent("exec", Vm.EXEC_BUILTIN);
         globals.putIfAbsent("exec_sandbox", Vm.EXEC_SANDBOX_BUILTIN);
         globals.putIfAbsent("eval_sandbox", Vm.EVAL_SANDBOX_BUILTIN);
@@ -124,6 +125,13 @@ public final class Builtins {
         globals.putIfAbsent("__thread_current", Vm.CURRENT_CORO_BUILTIN);
         globals.putIfAbsent("__thread_wait", Vm.RUN_BUILTIN);
         globals.putIfAbsent("__thread_sleep", Vm.MAKE_SLEEP_BUILTIN);
+        globals.putIfAbsent("__program_set", Vm.PROGRAM_SET_BUILTIN);
+        globals.putIfAbsent("__program_foreground", Vm.PROGRAM_FOREGROUND_BUILTIN);
+        globals.putIfAbsent("__program_leave_foreground", Vm.PROGRAM_LEAVE_FOREGROUND_BUILTIN);
+        globals.putIfAbsent("__program_interrupt_check", Vm.PROGRAM_INTERRUPT_CHECK_BUILTIN);
+        globals.putIfAbsent("__program_forget", Vm.PROGRAM_FORGET_BUILTIN);
+        globals.putIfAbsent("__program_ops", Vm.PROGRAM_OPS_BUILTIN);
+        globals.putIfAbsent("__program_drop_ops", Vm.PROGRAM_DROP_OPS_BUILTIN);
         // asyncio.iscoroutinefunction: an async def compiles to a generator function, which
         // the code's scope flags tell (a plain generator function is one too, as in MicroPython).
         globals.putIfAbsent("__is_generator_function", (HostFunction) a -> a.length == 1 && a[0] instanceof PyFunction
@@ -149,12 +157,14 @@ public final class Builtins {
             return r;
         });
         globals.putIfAbsent("setattr", (HostFunction) a -> {
+            if (a[0] instanceof PyModule) { ((PyModule) a[0]).setAttr((String) a[1], a[2]); return PyObj.NONE; }
             if (a[0] instanceof PyInstance) { ((PyInstance) a[0]).attrs.put((String) a[1], a[2]); return PyObj.NONE; }
             if (a[0] instanceof PyFunction) { ((PyFunction) a[0]).attrsOrNew().put((String) a[1], a[2]); return PyObj.NONE; }
             if (a[0] instanceof Closure) { ((Closure) a[0]).fun.attrsOrNew().put((String) a[1], a[2]); return PyObj.NONE; }
             throw PyException.typeError("can't set attribute on " + StdLib.typeName(a[0]));
         });
         globals.putIfAbsent("delattr", (HostFunction) a -> {
+            if (a[0] instanceof PyModule) { ((PyModule) a[0]).setAttr((String) a[1], null); return PyObj.NONE; }
             if (a[0] instanceof PyInstance) {
                 if (((PyInstance) a[0]).attrs.remove((String) a[1]) == null)
                     throw new PyException("AttributeError", "'" + ((PyInstance) a[0]).cls.name
@@ -427,7 +437,7 @@ public final class Builtins {
             return m;
         }
         if (obj instanceof PyModule) {
-            Object v = ((PyModule) obj).ns.get(name);
+            Object v = ((PyModule) obj).getAttr(name);
             if (v == null && !"__getattr__".equals(name)) {
                 // PEP 562 fallback (see Vm.loadAttr). Host-function hooks (like the
                 // arch's component primaries) can be invoked directly here; a

@@ -1,18 +1,10 @@
+#!/usr/bin/env pythonw
 """Windows on the shared desktop: drag a title bar to move and an edge or corner to resize.
 
 The title bar buttons minimize, maximize (or double-click the title) and close; the
 taskbar at the bottom lists every window on the display, other programs' too, and brings
 minimized ones back. This program's own window opens the others.
 """
-# From the MPYOS prompt, run as a job; an existing job or a direct Python run stays here.
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None
-if spawn is not None:
-    spawn('tkdesktop', args)
-    raise SystemExit
-
 import tkinter as tk
 
 root = tk.Tk()

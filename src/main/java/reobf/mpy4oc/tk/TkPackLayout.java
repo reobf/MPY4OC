@@ -55,6 +55,9 @@ final class TkPackLayout {
                 w = widget.width > 0 ? widget.width : w;
                 h = widget.height > 0 ? widget.height : h;
             }
+        } else if (widget instanceof TkIcon) {
+            w = (widget.width == 0 ? 24 : widget.width) + widget.insetWidth();
+            h = (widget.height == 0 ? 24 : widget.height) + widget.insetHeight();
         } else if (widget instanceof Text) {
             Text text = (Text) widget;
             w = text.columns * 8 + text.insetWidth();

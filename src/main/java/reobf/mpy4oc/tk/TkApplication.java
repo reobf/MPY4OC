@@ -132,6 +132,8 @@ public final class TkApplication {
                     case "progressbar": w = new Progressbar(frame); break;
                     case "separator": w = new Separator(frame); break;
                     case "sizegrip": w = new Sizegrip(frame); break;
+                    case "itemicon": w = new ItemIcon(frame); break;
+                    case "fluidicon": w = new FluidIcon(frame); break;
                     case "canvas": w = new Canvas(frame); break;
                     case "text": w = new Text(frame); break;
                 default: throw new IllegalArgumentException("unsupported widget: " + kind);
@@ -251,6 +253,10 @@ public final class TkApplication {
         catch (NumberFormatException invalid) { throw new IllegalArgumentException("invalid Entry index: " + value); }
     }
     private Object cget(TkWidget w, String option) {
+        if (w instanceof TkIcon && ((TkIcon) w).option().equals(option)) {
+            TkIconDescriptor descriptor = ((TkIcon) w).descriptor;
+            return descriptor == null ? null : descriptor.options();
+        }
         switch (option) {
             case "text": return w.text();
             case "background": return w.background;

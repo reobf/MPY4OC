@@ -1345,6 +1345,8 @@ public final class TkTree {
         for (TkWidget w : widgets.values()) {
             if (w instanceof Label && ((Label) w).image == id) ((Label) w).image = 0;
             else if (w instanceof Canvas) ((Canvas) w).items.replaceAll((key, item) -> item.image == id ? item.withImage(0) : item);
+            else if (w instanceof Treeview) for (Treeview.Item item : ((Treeview) w).items.values())
+                if (item.image == id) item.image = 0;
         }
         changed(true);
     }

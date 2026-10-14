@@ -31,7 +31,7 @@ final class TkTreeviewPersistence {
             i.setString("id", item.id);
             // A detached subtree's top has no parent.
             if (item.parent != null) i.setString("parent", item.parent.id);
-            i.setString("text", item.text); i.setString("image", item.image);
+            i.setString("text", item.text); i.setInteger("imageId", item.image);
             i.setTag("values", strings(item.values)); i.setTag("tags", strings(item.tags));
             i.setBoolean("open", item.open);
             items.appendTag(i);
@@ -51,6 +51,7 @@ final class TkTreeviewPersistence {
         if (t.display != null) { List<String> ids = new ArrayList<>(); for (Treeview.Column c : t.display) ids.add(c.id); n.setTag("treeDisplay", strings(ids)); }
         n.setInteger("treeLines", t.lines); n.setString("selectmode", t.selectmode);
         n.setBoolean("showTree", t.showTree); n.setBoolean("showHeadings", t.showHeadings);
+        n.setBoolean("showIndicator", t.showIndicator);
         List<String> selected = new ArrayList<>(); for (Treeview.Item i : t.selected) selected.add(i.id);
         n.setTag("treeSelected", strings(selected));
         if (t.focus != null) n.setString("treeFocus", t.focus.id);
@@ -89,7 +90,11 @@ final class TkTreeviewPersistence {
         for (int i = 0; i < items.tagCount(); i++) {
             NBTTagCompound it = items.getCompoundTagAt(i);
             Map<String, Object> m = new HashMap<>();
-            m.put("text", it.getString("text")); m.put("image", it.getString("image"));
+            m.put("text", it.getString("text"));
+            // Older saves had a recorded-only image name. Missing image files leave
+            // the row usable, just as missing Label/Canvas images do.
+            int image = it.getInteger("imageId");
+            m.put("image", t.tree.images.containsKey(image) ? image : 0);
             m.put("values", strings(it, "values").toArray()); m.put("tags", strings(it, "tags").toArray()); m.put("open", it.getBoolean("open"));
             Treeview.Item parent = it.hasKey("parent", 8) ? t.item(it.getString("parent")) : null;
             t.insert(parent != null ? parent : t.root, Integer.MAX_VALUE, it.getString("id"), m);
@@ -101,6 +106,7 @@ final class TkTreeviewPersistence {
         t.lines = TkOptions.integer(n.getInteger("treeLines"), 0, 4096);
         Map<String, Object> m = new HashMap<>();
         m.put("selectmode", n.getString("selectmode"));
+        m.put("showindicator", !n.hasKey("showIndicator", 1) || n.getBoolean("showIndicator"));
         List<Object> show = new ArrayList<>();
         if (n.getBoolean("showTree")) show.add("tree");
         if (n.getBoolean("showHeadings")) show.add("headings");

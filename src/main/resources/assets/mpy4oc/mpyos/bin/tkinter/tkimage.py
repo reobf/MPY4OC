@@ -1,22 +1,15 @@
+#!/usr/bin/env pythonw
 """Show an image file (PNG, JPEG, GIF, BMP) in a maximized window, scaled to fit, or a generated picture.
 
 usage: tkimage [file]
 """
-# From the MPYOS prompt, run as a job; an existing job or a direct Python run stays here.
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None
-if spawn is not None:
-    spawn('tkimage', args)
-    raise SystemExit
-
 import tkinter as tk
 
 root = tk.Tk()
 root.title('Image')
 width, height = root.winfo_screenwidth(), root.winfo_screenheight()
-path = args[0] if args else None
+import sys
+path = sys.argv[1] if len(sys.argv) > 1 else None
 if path:
     # The box: the maximized window (the display less the taskbar and the title bar, 36
     # pixels) less the caption, within an image's limits (1024 on a side, 524288 pixels on

@@ -3,8 +3,8 @@
 # between the main frame and the runnable threads and switches between them when a share
 # runs out, so threads interleave even when they never wait. There is one execution line,
 # no parallelism. Waiting (time.sleep, a contended Lock, join from a thread) is a poll each
-# tick; join() from the main frame parks it in the VM (__thread_wait), so the threads get
-# its share. Being plain Python over the VM's tasks, threads and locks are saved with it.
+# tick. A system-main join can park in __thread_wait; a program's main thread polls
+# so KeyboardInterrupt can unwind its join. Threads and locks are saved with the VM.
 #
 # As CPython: Thread(group, target, name, args, kwargs, daemon) with names Thread-N (target),
 # start/run/join/is_alive, name/daemon/ident, a daemon by default when started by a daemon
@@ -129,7 +129,7 @@ class Thread:
             raise RuntimeError("cannot join current thread")
         if self._done:
             return
-        if timeout is None and _here() is None:
+        if timeout is None and _here() is None and _program.current() is None:
             # The main frame waits in the VM: its share of each step goes to the threads.
             try:
                 __thread_wait(_await_thread(self))

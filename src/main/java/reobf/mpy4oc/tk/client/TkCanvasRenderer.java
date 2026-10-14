@@ -19,6 +19,7 @@ import reobf.mpy4oc.tk.TkWidget;
 @SideOnly(Side.CLIENT)
 final class TkCanvasRenderer {
     private static TkFontRenderer font;
+    private final TkIconRenderer icons = new TkIconRenderer();
     private long preparedRevision = -1;
     private int preparedGeneration = -1;
     private TkScene preparedScene;
@@ -26,6 +27,7 @@ final class TkCanvasRenderer {
     void prepare(TkScene scene, long revision) {
         if (font == null) font = new TkFontRenderer();
         if (preparedScene == scene && preparedRevision == revision && preparedGeneration == font.generation()) return;
+        if (preparedGeneration != font.generation()) icons.clear();
         for (TkDisplayList.Item item : scene.display.items) font.generateChars(item.text.codePoints().toArray());
         preparedRevision = revision; preparedGeneration = font.generation();
         preparedScene = scene;
@@ -60,6 +62,10 @@ final class TkCanvasRenderer {
                     if (item.vector.shape == reobf.mpy4oc.tk.TkVector.Shape.TEXT) {
                         if (item.vector.fill >= 0) paintText(item, false);
                     } else TkVectorRenderer.draw(item.vector, item.textX, item.textY); // the canvas origin, scrolled
+                    continue;
+                }
+                if (item.icon != null) {
+                    icons.draw(item);
                     continue;
                 }
                 paintFrame(item);
@@ -97,6 +103,9 @@ final class TkCanvasRenderer {
         OpenGlHelper.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA);
         GL11.glColor4f(1, 1, 1, (item.state & TkDisplayList.DISABLED) != 0 ? .5F : 1);
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, texture.texture);
+        // Row icons are pixel art; keep their edges sharp at GUI scale. Ordinary
+        // Label/Button photos retain the existing smooth sampling.
+        texture.sampling(item.kind == TkWidget.Kind.LABEL && item.part > 0);
         Tessellator t = Tessellator.instance;
         t.startDrawingQuads();
         t.addVertexWithUV(x, y + texture.height, 0, 0, 1);

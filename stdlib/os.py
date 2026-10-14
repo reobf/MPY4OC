@@ -136,3 +136,81 @@ environ = _Environ()
 
 def getenv(key, default=None):
     return environ.get(key, default)
+
+
+# Virtual MPYOS children, not Java/Windows host processes. Lazy imports keep os
+# usable before the filesystem/program runtime has been installed.
+P_WAIT = 0
+P_NOWAIT = P_NOWAITO = 1
+WNOHANG = 1
+defpath = '/bin:/bin/tkinter:/usr/bin'
+
+
+def spawnv(mode, path, args):
+    import _process
+    return _process.spawnv(mode, path, args)
+
+
+def spawnve(mode, path, args, env):
+    import _process
+    return _process.spawnv(mode, path, args, env, explicit_env=True)
+
+
+def spawnvp(mode, file, args):
+    import _process
+    return _process.spawnv(mode, file, args, search=True)
+
+
+def spawnvpe(mode, file, args, env):
+    import _process
+    return _process.spawnv(mode, file, args, env, search=True, explicit_env=True)
+
+
+def spawnl(mode, path, *args):
+    return spawnv(mode, path, args)
+
+
+def spawnle(mode, path, *args):
+    if not args:
+        raise TypeError('spawnle requires an environment argument')
+    return spawnve(mode, path, args[:-1], args[-1])
+
+
+def spawnlp(mode, file, *args):
+    return spawnvp(mode, file, args)
+
+
+def spawnlpe(mode, file, *args):
+    if not args:
+        raise TypeError('spawnlpe requires an environment argument')
+    return spawnvpe(mode, file, args[:-1], args[-1])
+
+
+def getpid():
+    import _process
+    return _process.runtime().pid()
+
+
+def getppid():
+    import _process
+    engine = _process.runtime()
+    job = engine.active.get(engine.pid())
+    return 0 if job is None else job['ppid']
+
+
+def waitpid(pid, options):
+    import _process
+    return _process.runtime().waitpid(pid, options)
+
+
+def waitstatus_to_exitcode(status):
+    if not isinstance(status, int):
+        raise TypeError('status must be an integer')
+    if status < 0 or status > 65535 or status & 127 == 127:
+        raise ValueError('invalid or stopped child status')
+    return -(status & 127) if status & 127 else (status >> 8) & 255
+
+
+def kill(pid, signal):
+    import _process
+    return _process.runtime().kill(pid, signal)

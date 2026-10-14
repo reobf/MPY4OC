@@ -690,11 +690,12 @@ final class Snapshot {
                     return cls;
                 }
                 case T_INSTANCE: {
-                    int slot = byId.size();
-                    byId.add(null);
-                    PyClass cls = (PyClass) readValue();
-                    PyInstance inst = new PyInstance(cls);
-                    byId.set(slot, inst);
+                    // Class methods defined by exec retain their namespace. That
+                    // namespace can already contain this instance and bound timer
+                    // callbacks to it, so publish a real object before reading cls.
+                    PyInstance inst = new PyInstance(null);
+                    byId.add(inst);
+                    inst.cls = (PyClass) readValue();
                     boolean hasNative = in.readBoolean();
                     if (hasNative) inst.nativeValue = readValue();
                     int n = in.readInt();

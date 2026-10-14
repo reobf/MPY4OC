@@ -49,6 +49,11 @@ public final class PyExc {
      *  function name equals {@code skipName} (used to hide the Python-level thread
      *  entry wrapper, which MicroPython's C-level entry never shows). */
     public static String formatTraceback(Instance exc, String skipName) {
+        return formatTraceback(exc, skipName, str(exc));
+    }
+
+    /** As above with the message already made (the VM's: a user class's own __str__). */
+    public static String formatTraceback(Instance exc, String skipName, String message) {
         StringBuilder sb = new StringBuilder();
         java.util.List<Object[]> tb = new java.util.ArrayList<>();
         for (Object[] e : exc.traceback) {
@@ -63,7 +68,7 @@ public final class PyExc {
                   .append(", in ").append(e[2]).append('\n');
             }
         }
-        String s = str(exc);
+        String s = message;
         // MicroPython always prints the colon: bare `raise ValueError` shows
         // "ValueError: " (trailing space), and tests compare against exactly that.
         sb.append(exc.type.name).append(": ").append(s);
@@ -98,6 +103,9 @@ public final class PyExc {
     public static final Type STOP_ITERATION = def("StopIteration", EXCEPTION);
     public static final Type ASSERTION_ERROR = def("AssertionError", EXCEPTION);
     public static final Type OS_ERROR = def("OSError", EXCEPTION);
+    public static final Type FILE_NOT_FOUND_ERROR = def("FileNotFoundError", OS_ERROR);
+    public static final Type CHILD_PROCESS_ERROR = def("ChildProcessError", OS_ERROR);
+    public static final Type PROCESS_LOOKUP_ERROR = def("ProcessLookupError", OS_ERROR);
     public static final Type TIMEOUT_ERROR = def("TimeoutError", OS_ERROR);
     public static final Type IMPORT_ERROR = def("ImportError", EXCEPTION);
     public static final Type MEMORY_ERROR = def("MemoryError", EXCEPTION);

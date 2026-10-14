@@ -14,6 +14,33 @@ public final class PyModule {
     public final MpyModule code; // null for synthetic (no-__init__) packages
     public final Map<String, Object> ns = new LinkedHashMap<>();
 
+    // sys.argv is a real list in each virtual program. The contexts themselves live
+    // in Python state and are snapshotted; the VM rebinds this lookup after restore.
+    transient java.util.function.Supplier<Object> program;
+
+    @SuppressWarnings("unchecked")
+    private Map<Object, Object> contextual(String attribute) {
+        if (!name.equals("sys") || !attribute.equals("argv") || program == null) return null;
+        Object contexts = ns.get("_contexts");
+        if (!(contexts instanceof net.mpy.runtime.PyObj.PyDict)) return null;
+        Object context = ((net.mpy.runtime.PyObj.PyDict) contexts).map.get(program.get());
+        return context instanceof net.mpy.runtime.PyObj.PyDict ? ((net.mpy.runtime.PyObj.PyDict) context).map : null;
+    }
+
+    public Object getAttr(String attribute) {
+        Map<Object, Object> context = contextual(attribute);
+        return context == null ? ns.get(attribute) : context.get(attribute);
+    }
+
+    public void setAttr(String attribute, Object value) {
+        Map<Object, Object> context = contextual(attribute);
+        if (value == null) {
+            Object previous = context == null ? ns.remove(attribute) : context.remove(attribute);
+            if (previous == null) throw new net.mpy.runtime.PyException("AttributeError", "no attribute '" + attribute + "'");
+        } else if (context == null) ns.put(attribute, value);
+        else context.put(attribute, value);
+    }
+
     /** True while this module's top-level code is still executing (cached-before-
      *  executing window). Another coroutine importing it then must wait until
      *  initialization completes -- except a circular import within the SAME frame

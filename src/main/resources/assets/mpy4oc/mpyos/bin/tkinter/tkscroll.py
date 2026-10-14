@@ -1,17 +1,9 @@
+#!/usr/bin/env pythonw
 """Scrolled Canvas: a long line chart on a 1200x600 canvas, with scrollbars and the mouse wheel.
 
 usage: tkscroll
 Click the chart to mark a point; the label shows it in canvas coordinates.
 """
-# From the MPYOS prompt, run as a job; an existing job or a direct Python run stays here.
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None
-if spawn is not None:
-    spawn('tkscroll', args)
-    raise SystemExit
-
 import tkinter as tk
 import math
 

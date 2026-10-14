@@ -1,12 +1,4 @@
-# From the MPYOS prompt, run as a job; an existing job or a direct Python run stays here.
-try:
-    spawn = None if sh.background else sh.spawn
-except (NameError, AttributeError):
-    spawn = None
-if spawn is not None:
-    spawn('tkdemo', args)
-    raise SystemExit
-
+#!/usr/bin/env pythonw
 import tkinter as tk
 
 root = tk.Tk()

@@ -55,7 +55,8 @@ final class TkOptions {
     static void configure(TkWidget w, Map<String, Object> m) {
         for (String key : m.keySet()) {
             if (!java.util.Arrays.asList("text", "background", "foreground", "width", "height", "padx", "pady", "padding", "relief",
-                    "borderwidth", "anchor", "state", "command", "propagate", "takefocus", "labelanchor", "labelwidget", "look", "held", "minwidth").contains(key) && !TkControlOptions.supports(w, key))
+                    "borderwidth", "anchor", "state", "command", "propagate", "takefocus", "labelanchor", "labelwidget", "look", "held", "minwidth").contains(key) && !TkControlOptions.supports(w, key)
+                    && !(w instanceof TkIcon && ((TkIcon) w).option().equals(key)))
                 throw new IllegalArgumentException("unsupported widget option: " + key);
             if (key.equals("text") && !(w instanceof Label || w instanceof Labelframe)
                     || (key.equals("labelanchor") || key.equals("labelwidget")) && !(w instanceof Labelframe) || key.equals("command") && !(w instanceof Button || w instanceof Scale || w instanceof Scrollbar || w instanceof Notebook)
@@ -102,6 +103,10 @@ final class TkOptions {
             if (id != 0 && (labelWidget == null || labelWidget.parent != w || TkWindow.is(labelWidget)))
                 throw new IllegalArgumentException("a labelwidget must be a child of its labelframe");
         }
+        TkIcon icon = w instanceof TkIcon ? (TkIcon) w : null;
+        TkIconDescriptor descriptor = icon == null ? null : m.containsKey(icon.option())
+                ? TkIconDescriptor.parse(w.kind == TkWidget.Kind.FLUIDICON, m.get(icon.option())) : icon.descriptor;
+        if (icon != null) icon.checkDescriptor(descriptor);
         Runnable controls = TkControlOptions.prepare(w, m);
         w.colors(bg, fg); w.padding(pad[0], pad[1], pad[2], pad[3], border); w.relief(relief); w.textAnchor(anchor); w.enabled(!state.equals("disabled"));
         if (w instanceof Label) {
@@ -118,6 +123,7 @@ final class TkOptions {
         if (held != w.held) { w.held = held; w.tree.changed(false); }
         if (w instanceof Label && minColumns != ((Label) w).minColumns) { ((Label) w).minColumns = minColumns; w.tree.changed(true); }
         controls.run();
+        if (icon != null) icon.descriptor(descriptor);
     }
 
     /** Tk's -relief values, with its error message. */

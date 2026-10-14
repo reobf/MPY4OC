@@ -4,7 +4,7 @@ package reobf.mpy4oc.tk;
 public abstract class TkWidget {
     /** Appended only: NBT stores the names, paint records the ordinals (new kinds paint with older ones). */
     public enum Kind { FRAME, LABEL, BUTTON, ENTRY, CHECKBUTTON, RADIOBUTTON, LISTBOX, SCROLLBAR, SCALE, MESSAGE, CANVAS, TEXT, PROGRESSBAR, SEPARATOR, SIZEGRIP, LABELFRAME, NOTEBOOK,
-        SPINBOX, COMBOBOX, TREEVIEW, MENU, MENUBUTTON, PANEDWINDOW }
+        SPINBOX, COMBOBOX, TREEVIEW, MENU, MENUBUTTON, PANEDWINDOW, ITEMICON, FLUIDICON }
     public final TkTree tree;
     public final int id;
     public final Frame parent;
