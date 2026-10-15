@@ -4,10 +4,10 @@ Each thread runs at most one event loop at a time, in the thread itself: asyncio
 loop.run_until_complete / run_forever) runs it in the calling thread, as CPython does, and a
 coroutine's tasks belong to the loop that runs them. The loop is the one in CPython's
 base_events: a queue of callbacks to call soon, a heap of timers, and Futures and Tasks that
-schedule callbacks on it. There is no I/O to select on, so when nothing is ready the loop
-sleeps (time.sleep) until the next timer, looking every tick for work another thread handed
-it (call_soon_threadsafe, run_coroutine_threadsafe). Threads come from threading; nothing
-here needs the VM beyond that.
+schedule callbacks on it. There is no I/O to select on: when nothing is ready the loop parks
+(the VM's wait, _program.park, where CPython's selector.select would block) until its next
+timer is due or another thread hands it work and wakes it (call_soon_threadsafe,
+run_coroutine_threadsafe; CPython's _write_to_self). Threads come from threading.
 
 In an MPYOS program the loop's rounds are poll points (see _program): when the program is
 stopped, the loop's thread gets SystemExit, and asyncio.run() cancels its tasks on the way
@@ -38,10 +38,6 @@ __all__ = ['AbstractEventLoop', 'AbstractEventLoopPolicy', 'BoundedSemaphore', '
 FIRST_COMPLETED = 'FIRST_COMPLETED'
 FIRST_EXCEPTION = 'FIRST_EXCEPTION'
 ALL_COMPLETED = 'ALL_COMPLETED'
-
-# How often a loop with nothing to do looks for work from other threads (a game tick).
-_POLL = 0.05
-
 
 class CancelledError(BaseException):
     """The operation was cancelled (a BaseException, as since Python 3.8)."""
@@ -81,6 +77,22 @@ def _key():
 _running_loops = {}     # thread -> the loop it is running
 _current_loops = {}     # _key() -> the loop set_event_loop() made current (None: set to None)
 _UNSET = object()
+
+
+def _park(deadline):
+    # The VM's wait, where CPython's selector would block (see _program.park): a poll point
+    # for a KeyboardInterrupt and for the program being stopped.
+    if _program is not None:
+        _program.park(deadline)
+    else:
+        __park(deadline)
+
+
+def _unpark(thread):
+    if _program is not None:
+        _program.unpark(thread)
+    else:
+        __unpark(thread)
 
 
 def _forget_program(program):
@@ -402,16 +414,17 @@ class EventLoop(AbstractEventLoop):
                 handle._run()
 
     def _idle(self, timeout):
-        # Nothing to run: sleep until the next timer is due or another thread hands us work.
+        # Nothing to run: park until the next timer is due or another thread hands us work
+        # (call_soon_threadsafe wakes us), where CPython's selector.select(timeout) blocks.
         deadline = None if timeout is None else self.time() + timeout
         while not self._ready and not self._stopping:
             if deadline is None:
-                time.sleep(_POLL)
+                _park(None)
             else:
                 left = deadline - self.time()
-                if left < self._clock_resolution:   # time.sleep() would sleep 0 ms: spin no more
+                if left < self._clock_resolution:   # due within the resolution: run it
                     return
-                time.sleep(left if left < _POLL else _POLL)
+                _park(int(deadline * 1000 + 0.5))
 
     # -- callbacks --
     def _check_callback(self, callback, method):
@@ -429,13 +442,15 @@ class EventLoop(AbstractEventLoop):
         return handle
 
     def call_soon_threadsafe(self, callback, *args, context=None):
-        # Another thread may call this: list.append is one step on this VM, and the loop
-        # notices within a tick when it is idle.
+        # Another thread may call this: list.append is one step on this VM, and the loop is
+        # woken if it is parked in _idle (as CPython's _write_to_self wakes its selector).
         self._check_closed()
         if self._debug:
             self._check_callback(callback, 'call_soon_threadsafe')
         handle = Handle(callback, args, self)
         self._ready.append(handle)
+        if self._thread is not _UNSET:
+            _unpark(self._thread)
         return handle
 
     def call_later(self, delay, callback, *args, context=None):
@@ -1344,68 +1359,96 @@ def timeout_at(when):
 # ---- other threads ------------------------------------------------------------------
 
 class _ThreadFuture:
-    """What run_coroutine_threadsafe returns (a concurrent.futures.Future): result()
-    waits in the calling thread."""
+    """What run_coroutine_threadsafe returns: concurrent.futures.Future, whose result()
+    waits in the calling thread on a threading.Condition, as CPython's does."""
 
     def __init__(self):
+        import threading
+        self._condition = threading.Condition()
         self._state = _PENDING
         self._result = None
         self._exception = None
         self._callbacks = []
         self._cancel_hook = None
 
+    def __repr__(self):
+        return '<Future ' + self._state.lower() + '>'
+
     def done(self):
-        return self._state != _PENDING
+        with self._condition:
+            return self._state != _PENDING
 
     def cancelled(self):
-        return self._state == _CANCELLED
+        with self._condition:
+            return self._state == _CANCELLED
 
     def running(self):
-        return self._state == _PENDING
+        with self._condition:
+            return self._state == _PENDING
 
     def cancel(self):
-        if self._state != _PENDING:
-            return False
-        if self._cancel_hook is not None:
-            self._cancel_hook()
-        self._state = _CANCELLED
+        with self._condition:
+            if self._state != _PENDING:
+                return False
+            if self._cancel_hook is not None:
+                self._cancel_hook()
+            self._state = _CANCELLED
+            self._condition.notify_all()
         self._run_callbacks()
         return True
 
-    def _wait(self, timeout):
-        deadline = None if timeout is None else time.ticks_add(time.ticks_ms(), int(timeout * 1000))
-        while self._state == _PENDING:
-            if deadline is not None and time.ticks_diff(deadline, time.ticks_ms()) <= 0:
-                raise TimeoutError()
-            time.sleep(_POLL)
-
-    def result(self, timeout=None):
-        self._wait(timeout)
-        if self._state == _CANCELLED:
-            raise CancelledError()
+    def _get_result(self):
         if self._exception is not None:
             raise self._exception
         return self._result
 
+    def result(self, timeout=None):
+        with self._condition:
+            if self._state == _CANCELLED:
+                raise CancelledError()
+            elif self._state == _FINISHED:
+                return self._get_result()
+            self._condition.wait(timeout)
+            if self._state == _CANCELLED:
+                raise CancelledError()
+            elif self._state == _FINISHED:
+                return self._get_result()
+            else:
+                raise TimeoutError()
+
     def exception(self, timeout=None):
-        self._wait(timeout)
-        if self._state == _CANCELLED:
-            raise CancelledError()
-        return self._exception
+        with self._condition:
+            if self._state == _CANCELLED:
+                raise CancelledError()
+            elif self._state == _FINISHED:
+                return self._exception
+            self._condition.wait(timeout)
+            if self._state == _CANCELLED:
+                raise CancelledError()
+            elif self._state == _FINISHED:
+                return self._exception
+            else:
+                raise TimeoutError()
 
     def add_done_callback(self, fn):
-        if self._state != _PENDING:
+        with self._condition:
+            if self._state == _PENDING:
+                self._callbacks.append(fn)
+                return
+        try:
             fn(self)
-        else:
-            self._callbacks.append(fn)
+        except Exception as exc:
+            print('exception calling callback for ' + repr(self) + ': ' + repr(exc))
 
     def _set(self, result=None, exception=None, cancelled=False):
-        if self._state != _PENDING:
-            return
-        if cancelled:
-            self._state = _CANCELLED
-        else:
-            self._result, self._exception, self._state = result, exception, _FINISHED
+        with self._condition:
+            if self._state != _PENDING:
+                return
+            if cancelled:
+                self._state = _CANCELLED
+            else:
+                self._result, self._exception, self._state = result, exception, _FINISHED
+            self._condition.notify_all()
         self._run_callbacks()
 
     def _run_callbacks(self):

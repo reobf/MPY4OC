@@ -167,7 +167,18 @@ class Runtime:
                 if job['program'] == program and job['done']:
                     release(program)
                     _drop_callbacks(program)
-                    self.active.pop(pid, None)
+                    # The job leaves active and jobs in one go: a waiter that sees it gone
+                    # from active (a cooperative switch could fall between) finds no job.
+                    irq = __machine_disable_irq()
+                    try:
+                        self.active.pop(pid, None)
+                        if not job['announce']:
+                            try:
+                                self.jobs.remove(job)
+                            except ValueError:
+                                pass  # a concurrent shell reap already removed it
+                    finally:
+                        __machine_enable_irq(irq)
                     if pid in self.children:
                         # Do not keep a finished Thread, frames or GUI state alive just
                         # because its parent has not collected the exit status yet.
@@ -182,11 +193,6 @@ class Runtime:
                     for child in list(self.active.values()):
                         if child['ppid'] == pid:
                             child['ppid'] = 0
-                    if not job['announce']:
-                        try:
-                            self.jobs.remove(job)
-                        except ValueError:
-                            pass  # a concurrent shell reap already removed it
                     __program_drop_ops(program)
 
     def pid(self, program=None):
@@ -355,6 +361,13 @@ class Runtime:
         if options not in (0, os.WNOHANG):
             raise ValueError('waitpid supports only 0 or WNOHANG')
         parent = self.pid()
+
+        def collected():
+            for child_pid, child in list(self.children.items()):
+                if child['ppid'] == parent and (pid == -1 or pid == child_pid) and 'status' in child:
+                    return True
+            return False
+
         while True:
             _program.check()
             with self._lock:
@@ -369,7 +382,7 @@ class Runtime:
                     raise ChildProcessError('no unwaited os.spawn child')
                 if options == os.WNOHANG:
                     return 0, 0
-            time.sleep(0.01)
+            _program.wait_end(collected)    # woken when a program ends
 
     def kill(self, pid, signal):
         if not isinstance(pid, int) or not isinstance(signal, int):
@@ -410,7 +423,8 @@ class Runtime:
             while _program.threads(program, False):
                 if _program.stopping(program) or interactive and self.ctrl_c(tty):
                     break
-                computer._yield_tick()
+                # Woken when a thread ends (or, interactive, a key comes).
+                _program.wait_end(lambda: not _program.threads(program, False) or _program.stopping(program), None, interactive)
         _program.stop(program)
         release(program)
         _drop_callbacks(program)

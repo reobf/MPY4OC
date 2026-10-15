@@ -1,0 +1,24 @@
+new False unlocked
+acquire True True locked
+again, non-blocking False
+again, timeout False
+ValueError: can't specify a timeout for a non-blocking call
+ValueError: timeout value must be positive
+OverflowError
+RuntimeError: release unlocked lock
+with True
+after with False
+while held: ['taker waits']
+after release: ['taker waits', 'taker has it'] True
+blocking acquire True
+then: ['taker waits', 'taker has it', 'taker released'] True
+timeout while held False
+then True
+rlock True True True
+rlock released twice False
+RuntimeError: cannot release un-acquired lock
+thief: cannot release un-acquired lock
+thief acquire False False False
+rlock free True True
+nested with True
+after nested with False True

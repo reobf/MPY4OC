@@ -96,7 +96,7 @@ class MpyosInterruptTest {
         for (String wait : new String[] {"time.sleep(0)", "time.sleep(10000)", "computer.pullSignal()", "computer._yield_tick()"}) {
             var host = TkPythonTest.shellHost("""
                     import time
-                    globals()['__time_sleep'] = _mpy_time_sleep
+                    globals().pop('__time_sleep')    # the real sleep: a park until the deadline
                     FAKE_VFS.files['/bin/app.py'] = %s
                     sh.run_command('app', [])
                     assert SHARED['caught'] and SHARED['cleaned'] and not _program._foreground

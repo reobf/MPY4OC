@@ -74,12 +74,12 @@ class Popen:
     def poll(self):
         return self.returncode
     def wait(self, timeout=None):
-        deadline = None if timeout is None else time.ticks_ms() + max(0, timeout) * 1000
+        deadline = None if timeout is None else time.ticks_add(time.ticks_ms(), int(max(0, timeout) * 1000))
         while self.returncode is None:
             _program.check()
-            if deadline is not None and time.ticks_ms() >= deadline:
+            if deadline is not None and time.ticks_diff(deadline, time.ticks_ms()) <= 0:
                 raise TimeoutExpired(self.args, timeout)
-            time.sleep(0.01)
+            _program.wait_end(lambda: self.returncode is not None, deadline)    # woken when a program ends
         return self.returncode
     def communicate(self, input=None, timeout=None):
         if input is not None:

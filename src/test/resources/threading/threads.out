@@ -1,0 +1,25 @@
+main thread MainThread True False True 1 ['MainThread']
+ident True True
+<Thread(Thread-1 (worker), initial)> False None
+join before start: cannot join thread before it is started
+started True True 2 ['MainThread', 'Thread-1 (worker)']
+start twice: threads can only be started once
+join timed out True
+plain runs as Thread-1 (worker) daemon False ident ok True
+plain sees 2 threads
+joined False 1 <Thread(Thread-1 (worker) True
+<Thread(named, initial)>
+kw runs as named daemon False ident ok True
+kw sees 2 threads
+join self: cannot join current thread
+main still alive True
+outer Thread-3 (nested) True <Thread(Thread-3 (nested), initial daemon)>
+nested makes Thread-4 (worker) daemon True
+child runs as Thread-4 (worker) daemon True ident ok True
+child sees 3 threads
+nested joined child False
+after outer 1
+failed thread False 1
+counting True 0
+counted False 10
+end 1 ['MainThread']

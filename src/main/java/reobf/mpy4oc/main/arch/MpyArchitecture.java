@@ -168,6 +168,16 @@ public class MpyArchitecture implements Architecture {
      *  first tick would drive twice. */
     private boolean hasTicker = false;
 
+    /** A signal was queued (onSignal) since the last drainSignals(): a VM with every
+     *  thread parked is driven this tick to receive it. Set from whichever thread
+     *  signals the machine; true at start and after a load, when the queue may hold
+     *  signals nobody announced. */
+    private volatile boolean signalPending = true;
+
+    /** The machine tick of the last async step (-1: none yet): the ticks the machine slept
+     *  through in between bank their allowance, as the ticker path banks a skipped tick. */
+    private long lastAsyncTick = -1;
+
     /** The machine uptime (in ticks) at which the VM was last driven. Used to make
      *  {@link #driveOneTick()} idempotent within a single game tick: during the brief
      *  startup/load window before hasTicker is set, BOTH runSynchronized and the
@@ -474,6 +484,15 @@ public class MpyArchitecture implements Architecture {
             phase = Phase.THREADED;
             needSyncCall = false;
             int cap = opsPerTick * BANK_MULTIPLIER;
+            // The ticks slept through since the last step (an idle VM sleeps until its
+            // earliest deadline) bank their allowance, as a skipped tick does on the
+            // ticker path.
+            long tick = Math.round(machine.upTime() * 20.0);
+            if (lastAsyncTick >= 0 && tick - lastAsyncTick > 1) {
+                long slept = Math.min(tick - lastAsyncTick - 1, BANK_MULTIPLIER);
+                bankedOps = clampBank(bankedOps + (int) slept * opsPerTick, cap);
+            }
+            lastAsyncTick = tick;
             int allowance = opsPerTick + bankedOps;
             if (allowance > cap) allowance = cap;
             int[] budget = { allowance };
@@ -496,13 +515,32 @@ public class MpyArchitecture implements Architecture {
                 return new ExecutionResult.SynchronizedCall();
             }
             // Otherwise a normal yield (sleep/pullSignal/budget-exhausted/direct-call
-            // budget park): idle a tick and resume on the computer thread.
-            return new ExecutionResult.Sleep(1);
+            // budget park): idle a tick and resume on the computer thread -- or, with every
+            // thread parked, until the earliest deadline (a queued signal wakes a sleeping
+            // machine on its own: OC's Machine leaves Sleeping when signals are queued).
+            return new ExecutionResult.Sleep(idleTicks());
         } catch (Throwable t) {
             crash(t);
             if (pendingError != null) { String m = pendingError; pendingError = null; return new ExecutionResult.Error(m); }
             return new ExecutionResult.Sleep(Integer.MAX_VALUE);
         }
+    }
+
+    /** The VM's clock, {@code __time_ms}: the machine's uptime in milliseconds. */
+    private long clockMs() {
+        return (long) (machine.upTime() * 1000.0);
+    }
+
+    /** How many ticks the machine may sleep after an async step: one, unless every thread
+     *  is parked and none is due or woken, then up to the earliest deadline (for good when
+     *  there is none: only a signal, which wakes the machine, can change that). */
+    private int idleTicks() {
+        if (signalPending || !vm.idle()) return 1;
+        long wake = vm.nextWakeMs();
+        if (wake == Long.MAX_VALUE) return Integer.MAX_VALUE;
+        long ticks = (wake - clockMs() + 49) / 50;
+        if (ticks < 1) return 1;
+        return ticks > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) ticks;
     }
 
     private int clampBank(int remaining, int cap) {
@@ -648,6 +686,13 @@ public class MpyArchitecture implements Architecture {
             if (vm == null) {
                 if (!boot()) return;    // boot() sets pendingError / ended on failure
             }
+            // Every thread parked, none due, no signal queued: nothing can run this tick.
+            // Leave the VM alone; the tick's allowance banks for when it wakes.
+            if (!signalPending && vm.idle() && vm.nextWakeMs() > clockMs()) {
+                int cap = opsPerTick * BANK_MULTIPLIER;
+                bankedOps = Math.min(bankedOps + opsPerTick, cap);
+                return;
+            }
             // Feed one pending OC signal into the VM's queue, if any.
             drainSignals();
 
@@ -676,7 +721,9 @@ public class MpyArchitecture implements Architecture {
 
     @Override
     public void onSignal() {
-        // Signals are pulled in runSynchronized(); nothing to do here.
+        // Signals are pulled by drainSignals() at the next drive; noting that one arrived
+        // keeps an idle VM (every thread parked) from skipping that drive.
+        signalPending = true;
     }
 
     @Override
@@ -1190,9 +1237,13 @@ public class MpyArchitecture implements Architecture {
             // _program (stdlib): a stopped program's task ends here (SystemExit), a
             // background program does not take the keyboard from the shell, and a program
             // the shell waits for leaves it the Ctrl+C that ends the wait.
+            // The wait is the VM's park (_program.park): the puller spends nothing until a
+            // signal is queued (drainSignals wakes it), its timeout is due, or its program
+            // is stopped or interrupted. time.sleep parks the same way (the time module).
             "def _mpy_pull_signal(timeout=None):",
             "    import _program",
             "    _d = None if timeout is None else computer.uptime() + timeout",
+            "    _p = None if timeout is None else __time_ms() + int(timeout * 1000)",
             "    while True:",
             "        _program.check()",
             "        _s = computer._poll_signal(getattr(computer, '_tk_live', False), _program.in_background(), _program.leaves_interrupt())",
@@ -1200,20 +1251,7 @@ public class MpyArchitecture implements Architecture {
             "            return _s",
             "        if _d is not None and computer.uptime() >= _d:",
             "            return None",
-            "        computer._yield_tick()",
-            "",
-            "def _mpy_time_sleep(ms):",
-            "    # cooperative sleep: yield ticks until the server clock passes the",
-            "    # deadline. The frozen time module's default __time_sleep is a no-op,",
-            "    # which would make time.sleep(1) return instantly in a game OS.",
-            "    import _program",
-            "    _d = computer.uptime() + ms / 1000",
-            "    while True:",
-            "        _program.check()",
-            "        computer._yield_tick()",
-            "        _program.check()",
-            "        if computer.uptime() >= _d:",
-            "            return",
+            "        _program.park(_p, True)",
             "",
             "def _mpy_eeprom():",
             "    for _addr in component.list('eeprom'):",
@@ -1255,12 +1293,6 @@ public class MpyArchitecture implements Architecture {
                     if (getBoot != null) computer.ns.put("getBootAddress", getBoot);
                     if (setBoot != null) computer.ns.put("setBootAddress", setBoot);
                 }
-            }
-            // time.sleep goes through the late-bound __time_sleep primitive; replace
-            // the no-op default with the cooperative tick-yielding version.
-            Object sleepFn = globals.get("_mpy_time_sleep");
-            if (sleepFn != null) {
-                globals.put("__time_sleep", sleepFn);
             }
         } catch (Throwable t) {
             MyMod.LOG.warn("mpy: failed to install computer bootstrap", t);
@@ -1806,11 +1838,14 @@ public class MpyArchitecture implements Architecture {
 
     /** Move any queued OC signals into computer._signals as (name, *args) tuples. */
     private void drainSignals() {
+        signalPending = false;
         Object sigs = ((PyModule) vm.globals.get("computer")).ns.get("_signals");
         if (!(sigs instanceof PyObj.PyList)) return;
         PyObj.PyList list = (PyObj.PyList) sigs;
         Signal s;
+        boolean any = false;
         while ((s = machine.popSignal()) != null) {
+            any = true;
             List<Object> parts = new ArrayList<Object>();
             parts.add(s.name());
             // A device came or went: any remembered directness for an address could
@@ -1824,6 +1859,8 @@ public class MpyArchitecture implements Architecture {
             list.items.add(event);
             if (list.items.size() > 256) list.items.remove(0);   // bounded queue
         }
+        // The threads parked for a signal (pullSignal, a Tk loop) look at the queue now.
+        if (any) vm.wakeSignalWaiters();
     }
 
     // ------------------------------------------------------------------ //

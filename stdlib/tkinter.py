@@ -93,6 +93,9 @@ _roots = {}
 # program's own loop runs them (see _update).
 _pending = {}
 _PENDING_LIMIT = 256
+# The threads parked in _idle (mainloop, wait_*), by the program whose windows they serve:
+# an event filed for one of its windows, a timer queued for one, or quit() wakes them.
+_parked = {}
 _next_timer = 0
 _default_root = None
 _next_variable = 0
@@ -503,6 +506,73 @@ def _owner():
     return _program.current() if _program is not None else None
 
 
+def _here():
+    try:
+        return __thread_current()
+    except NameError:
+        return None
+
+
+def _wake(owner):
+    # Wake owner's threads parked in _idle, except the caller (it re-checks on its own).
+    waiting = _parked.get(owner)
+    if waiting:
+        me = _here()
+        for thread in list(waiting):
+            if thread is not me:
+                _program.unpark(thread)
+
+
+def _has_events(owner):
+    # Something for owner's loop to run now: an event filed for one of its windows, or a
+    # Tk signal still in the computer's queue (for whichever window).
+    for token, root in list(_roots.items()):
+        if getattr(root, '_owner', None) == owner and _pending.get(token):
+            return True
+    for signal in list(computer._signals):
+        if len(signal) > 2 and signal[0] in ('tk_command', 'tk_event', 'tk_changed', 'tk_close'):
+            return True
+    return False
+
+
+def _idle(owner, cap_ms=None):
+    # Nothing to run until the next of owner's timers, an event (Tk events are signals,
+    # queued with the computer's others: a queued signal wakes us) or a wake: park there,
+    # where Tk's event loop would block in select. Registered before the last look at the
+    # queues, so a wake between that look and the park is not lost (it leaves a permit).
+    if _program is None:    # a copied file on a VM without _program: poll a tick
+        computer._yield_tick()
+        return
+    now = computer.uptime()
+    soonest = None
+    for root in list(_roots.values()):
+        if getattr(root, '_owner', None) != owner:
+            continue
+        for timer in list(root._timers.values()):
+            if soonest is None or timer[0] < soonest:
+                soonest = timer[0]
+    deadline = None
+    if soonest is not None:
+        left = int((soonest - now) * 1000) + 1
+        if left <= 0:
+            return
+        deadline = __time_ms() + left
+    if cap_ms is not None:
+        cap = __time_ms() + cap_ms
+        if deadline is None or deadline > cap:
+            deadline = cap
+    me = _here()
+    waiting = _parked.setdefault(owner, [])
+    waiting.append(me)
+    try:
+        if not _has_events(owner):
+            _program.park(deadline, True)
+    finally:
+        waiting.remove(me)
+        if not waiting and _parked.get(owner) is waiting:
+            _parked.pop(owner, None)
+
+
 def _child_name(widget, master, name):
     # Tk's path names, numbered as CPython does: '.!frame', '.!frame.!label2', or the name= given.
     if not name:
@@ -539,6 +609,7 @@ def _forget(root):
     if root._token is not None and _roots.get(root._token) is root:
         _roots.pop(root._token)
         _pending.pop(root._token, None)
+        _wake(getattr(root, '_owner', None))    # a mainloop on it ends
 
 
 def _default():
@@ -1347,7 +1418,7 @@ class Widget:
             _update(owner)
             if done():
                 break
-            computer._yield_tick()
+            _idle(owner, 50)    # what done() looks at may change without a wake: look each tick
 
     def wait_window(self, window=None):
         """Run events until window (this widget by default) is destroyed."""
@@ -1417,8 +1488,9 @@ class Widget:
             raise ValueError('widget was destroyed')
         deadline = computer.uptime() + max(0, int(ms)) / 1000
         if func is None:
-            while computer.uptime() < deadline:
-                computer._yield_tick()
+            # Tk's `after ms` without a script: sleep that long (a poll point, as time.sleep).
+            import time
+            time.sleep(max(0, int(ms)) / 1000)
             return None
         return self._queue_timer(deadline, func, args, False)
 
@@ -1437,9 +1509,10 @@ class Widget:
             _next_timer += 1
             name = 'after#' + str(_next_timer)
             self._root._timers[name] = (deadline, self, func, args, idle)
-            return name
         finally:
             __machine_enable_irq(irq)
+        _wake(getattr(self._root, '_owner', None))   # a loop parked until a later timer re-plans
+        return name
 
     def after_cancel(self, name):
         for root in list(_roots.values()):
@@ -1460,12 +1533,14 @@ class Widget:
             if _program is not None:
                 _program.check()   # the program was stopped (MPYOS kill, or its command ended)
             _update(owner)
-            computer._yield_tick()
+            if root._alive and not root._quit:
+                _idle(owner)
         if _program is not None:
             _program.check()       # kill closed the window: stop here, not in the code after mainloop()
 
     def quit(self):
         self._root._quit = True
+        _wake(getattr(self._root, '_owner', None))
 
     def _detach(self):
         for child in list(self._children):
@@ -4609,6 +4684,7 @@ def _update(owner=None):
         waiting.append(signal)
         if len(waiting) > _PENDING_LIMIT:
             waiting.pop(0)    # a program that stopped polling keeps only its latest events
+        _wake(getattr(_roots[signal[2]], '_owner', None))    # its loop may be parked
     for token in [t for t, root in _roots.items() if getattr(root, '_owner', None) == owner]:
         waiting = _pending.get(token)
         while waiting:

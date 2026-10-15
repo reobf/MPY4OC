@@ -18,12 +18,15 @@ public final class AsyncTask {
     Object lastYield = PyObj.NONE; // the value most recently yielded (e.g. a sleep request)
     boolean atYieldPoint;         // true if suspended at a yield (resume via resumeGen);
                                   // false if suspended by budget exhaustion (plain continue)
-    // sleep_ms timing: how many real milliseconds remain before this task may run
-    // again, and the wall-clock instant from which that remaining time is measured.
-    // Serialization stores only the remaining amount, and restore resets the clock,
-    // so time spent while the snapshot is at rest does not count toward the sleep.
-    long sleepRemainingMs;        // > 0 while sleeping
-    long sleepClockBase;          // System.currentTimeMillis() when remaining was last set
+    /** {@link #parkDeadline} while the task is runnable (not parked). */
+    static final long NOT_PARKED = Long.MIN_VALUE;
+    // Park state (see Vm's park/unpark section): the host clock value (__time_ms) the
+    // task may run again at -- NOT_PARKED while runnable, Long.MAX_VALUE until unparked;
+    // a permit left by an unpark that arrived while the task was not parked (its next
+    // park returns at once); and whether a queued host signal wakes it (pullSignal).
+    long parkDeadline = NOT_PARKED;
+    boolean permit;
+    boolean wakeOnSignal;
     // When suspended by budget exhaustion mid-call-chain, the deepest active frame
     // (execution's real resume point). Its caller links reach back up to the coro's
     // top frame. Null when suspended at a clean yield point (resume via resumeGen).

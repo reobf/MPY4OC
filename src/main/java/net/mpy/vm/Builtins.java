@@ -109,22 +109,16 @@ public final class Builtins {
         globals.putIfAbsent("exec_sandbox", Vm.EXEC_SANDBOX_BUILTIN);
         globals.putIfAbsent("eval_sandbox", Vm.EVAL_SANDBOX_BUILTIN);
         globals.putIfAbsent("eval", Vm.EVAL_BUILTIN);
-        globals.putIfAbsent("__jasyncio_create_task", Vm.CREATE_TASK_BUILTIN);
-        globals.putIfAbsent("__jasyncio_run", Vm.RUN_BUILTIN);
         globals.putIfAbsent("__thread_test_and_set", Vm.TEST_AND_SET_BUILTIN);
-        globals.putIfAbsent("__jasyncio_make_sleep", Vm.MAKE_SLEEP_BUILTIN);
-        globals.putIfAbsent("__jasyncio_wake", Vm.WAKE_BUILTIN);
-        globals.putIfAbsent("__jasyncio_in_task", Vm.IN_TASK_BUILTIN);
-        globals.putIfAbsent("__jasyncio_current_coro", Vm.CURRENT_CORO_BUILTIN);
-        globals.putIfAbsent("__jasyncio_sleep_ms", Vm.SLEEP_MS_OF_BUILTIN);
-        // The thread primitives under their own names (threading and asyncio use these; the
-        // __jasyncio_ names above stay for VMs saved before, whose code still calls them):
-        // start a generator as a thread, which one is running (None: the main frame), park
-        // the main frame until a generator ends, and a timed yield for a thread's generator.
+        // The thread primitives: start a generator as a thread, which one is running (None:
+        // the main frame), and the kernel-style wait pair every blocking call is built on:
+        // park the caller until a deadline, an unpark, or (when asked) a queued signal.
+        // (A VM saved before these existed brings its own __jasyncio_*/__thread_wait/
+        // __thread_sleep globals along; their builtins are kept under their old names.)
         globals.putIfAbsent("__thread_start", Vm.CREATE_TASK_BUILTIN);
         globals.putIfAbsent("__thread_current", Vm.CURRENT_CORO_BUILTIN);
-        globals.putIfAbsent("__thread_wait", Vm.RUN_BUILTIN);
-        globals.putIfAbsent("__thread_sleep", Vm.MAKE_SLEEP_BUILTIN);
+        globals.putIfAbsent("__park", Vm.PARK_BUILTIN);
+        globals.putIfAbsent("__unpark", Vm.UNPARK_BUILTIN);
         globals.putIfAbsent("__program_set", Vm.PROGRAM_SET_BUILTIN);
         globals.putIfAbsent("__program_foreground", Vm.PROGRAM_FOREGROUND_BUILTIN);
         globals.putIfAbsent("__program_leave_foreground", Vm.PROGRAM_LEAVE_FOREGROUND_BUILTIN);

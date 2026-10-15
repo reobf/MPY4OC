@@ -18,9 +18,9 @@ import java.util.Map;
  * - random: a pure-Python deterministic PRNG whose state lives in the module
  *   namespace, so snapshots capture and restore it
  * - heapq: pure Python
- * - time: host-overridable __time_ms / __time_sleep (defaults: a monotonic
- *   millisecond clock and a no-op sleep; game hosts should install their own
- *   deterministic clock for snapshot-safe behavior)
+ * - time: a host-overridable __time_ms clock (default: a monotonic millisecond
+ *   clock; game hosts install their own deterministic one for snapshot-safe
+ *   behavior); sleep parks on the VM (a host may install __time_sleep instead)
  *
  * Usage:
  *   StdLib.installPrimitives(globals);
@@ -37,7 +37,7 @@ public final class StdLib {
     }
 
     /** Install the Java primitives the frozen modules bind against. Hosts may
-     *  overwrite __time_ms / __time_sleep afterwards with their own clock. */
+     *  overwrite __time_ms afterwards with their own clock. */
     public static void installPrimitives(Map<String, Object> globals) {
         globals.putIfAbsent("__math_sqrt", f1(StrictMath::sqrt));
         globals.putIfAbsent("__math_sin", f1(StrictMath::sin));
@@ -187,7 +187,6 @@ public final class StdLib {
             return PyObj.NONE;
         });
         globals.putIfAbsent("__time_ms", (HostFunction) a -> (System.nanoTime() - T0) / 1_000_000L);
-        globals.putIfAbsent("__time_sleep", (HostFunction) a -> PyObj.NONE);
     }
 
     private interface D2D { double apply(double x); }

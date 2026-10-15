@@ -1,0 +1,13 @@
+consumer waits
+notified
+consumer got apple
+wait timeout False
+wait_for timeout False
+wait_for at once ready
+wait: cannot wait on un-acquired lock
+notify: cannot notify on un-acquired lock
+notify_all: cannot notify on un-acquired lock
+after notify(1): 1
+after notify_all: ['a', 'b', 'c']
+wait_for True
+owned after wait: [True]

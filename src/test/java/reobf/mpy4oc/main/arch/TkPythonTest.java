@@ -34,10 +34,15 @@ class TkPythonTest {
         final PyModule computer = new PyModule("computer", "<host>", null);
         final MpyArchitecture converter = new MpyArchitecture(null);
         Vm vm; double time;
+        final long t0 = System.nanoTime();
         Host() {
             computer.ns.put("_signals", new PyObj.PyList());
             reg("uptime", args -> time);
             reg("_yield_tick", args -> { vm.requestYield(); return PyObj.NONE; });
+            // The VM's clock (time.ticks_ms(), park deadlines): the uptime tests move by hand
+            // plus real time, so a sleep or a timer also progresses on its own. Resolved in
+            // snapshots by its globals name, as the architecture's.
+            globals.put("__time_ms", (HostFunction) args -> (long) (time * 1000) + (System.nanoTime() - t0) / 1_000_000L);
             globals.put("computer", computer);
             TkHostApi.install(globals, registry, (address, args) -> {
                 TileTkDisplay tile = tiles.get(address);
@@ -59,7 +64,7 @@ class TkPythonTest {
         Object py(Object value) {
             return converter.toPy(value);
         }
-        /** Install the architecture's real computer bootstrap (pullSignal, time.sleep) before the program. */
+        /** Install the architecture's real computer bootstrap (pullSignal) before the program. */
         boolean bootstrap;
         void start(String source) throws Exception {
             MpyModule main = MpyLoader.load(MpyCross.compile(source, "tk_test.py"), new QstrPool());
@@ -84,6 +89,9 @@ class TkPythonTest {
                     for (TkTree.Command command : item.getValue().widgets().takeCommands()) {
                         emit(item.getValue(), item.getKey(), command, "");
                     }
+                // As the architecture's drainSignals: a queued signal wakes the threads parked for
+                // one (pullSignal, a Tk loop). Tests also queue signals from Python, so look each step.
+                if (!signals().items.isEmpty()) vm.wakeSignalWaiters();
                 try { if (stepBudget > 1) vm.step(new int[] {stepBudget}); else vm.step(); }
                 catch (net.mpy.runtime.PyException error) {
                     // With the Python traceback (file/line), which the exception message alone lacks.

@@ -93,10 +93,15 @@ public final class Vm {
      *  when {@link #daemonFinishOnExit} is on and async tasks remain, the main frame
      *  can be done while the VM is not yet finished (it keeps draining tasks). */
     private boolean mainReturned;
-    /** When __thread_wait(gen) blocks the main frame on a task, this is that task.
-     *  While non-null, step() drives only async; once the task settles, its result
-     *  is delivered to the main frame's TOS (or its exception raised) and this clears. */
-    private AsyncTask mainWaitingTask;
+    /** Park state of the main frame (see the park/unpark section), the same three items
+     *  a task has: the host clock value it may run again at ({@link AsyncTask#NOT_PARKED}
+     *  while runnable, Long.MAX_VALUE until unparked), a pending unpark permit, and
+     *  whether a queued host signal wakes it. */
+    private long mainParkDeadline = AsyncTask.NOT_PARKED;
+    private boolean mainPermit, mainWakeOnSignal;
+    /** The host clock ({@code __time_ms}, milliseconds) as read at the start of the
+     *  current step; park deadlines are compared against it. */
+    private long nowMs;
 
     /**
      * While driveTask is running a coroutine, its outermost frame. Transient (never
@@ -129,6 +134,7 @@ public final class Vm {
     // task/program boundaries or a stats read, never by looking up every opcode.
     private long executedOps, accountedOps, retiredOps;
     private static final int OPS_SNAPSHOT_TAG = 0x4f505331; // optional trailing OPS1 section
+    private static final int PARK_SNAPSHOT_TAG = 0x5041524b; // optional trailing PARK section
     private static final class ProgramOps {
         final Object program;
         long count;
@@ -195,8 +201,9 @@ public final class Vm {
         PyObj.PyList scope = (PyObj.PyList) scopes.get(scopes.size() - 1);
         scope.items.set(3, Math.max((Long) scope.items.get(3), strong ? 2L : 1L));
         pendingInterrupt = scope;
-        // A foreground runner may be parked in a native scheduler sleep.
-        for (AsyncTask task : asyncTasks) if (task.coro == scope.items.get(1)) task.sleepRemainingMs = 0;
+        // A foreground runner may be parked (time.sleep, a lock, pullSignal): wake it so
+        // it reaches its poll point now rather than at its deadline.
+        unpark(scope.items.get(1));
         return true;
     }
 
@@ -453,21 +460,118 @@ public final class Vm {
         return false;
     }
 
-    /** True when the VM is in a legitimate zero-op wait: every pending async task is
-     *  sleeping (timer not yet due), so a step consumes nothing by design. A host can
-     *  use this to tell a healthy idle sleep apart from a program that is genuinely
-     *  doing nothing useful. */
-    public boolean idleWaiting() {
-        boolean any = false;
-        for (AsyncTask t : asyncTasks) {
-            if (t.done) continue;
-            if (t.sleepRemainingMs <= 0) return false;   // a runnable task exists
-            any = true;
+    // ==== park / unpark: the wait primitive every blocking call is built on =========
+    //
+    // A thread (a pool task, or the main frame) with nothing to do until some moment or
+    // event parks: it holds no seat and spends no instruction until its deadline passes,
+    // another thread unparks it, or -- when it asked for that -- a host signal is queued.
+    // An unpark that arrives while the target is not parked is kept as a permit that
+    // makes its next park return at once (LockSupport semantics), so a waiter that checks
+    // a condition and then parks cannot miss a wake-up that came in between. Wakes may be
+    // early or spurious; every waiter re-checks what it waited for. This is the VM's
+    // counterpart of the kernel wait CPython's locks, sleeps and selector block in.
+
+    /** The host clock the deadlines are measured on: {@code __time_ms} in milliseconds,
+     *  the clock Python's time.ticks_ms() reads, so a deadline computed in Python and
+     *  compared here agree (the JVM clock when a host installs none). */
+    private long clockMs() {
+        Object clock = globals.get("__time_ms");
+        if (clock instanceof HostFunction) {
+            Object v = ((HostFunction) clock).call(NO_ARGS);
+            if (v instanceof Number) return ((Number) v).longValue();
         }
-        // All pending tasks are asleep. This is an idle wait when something is
-        // actually waiting on them: either the main frame blocked in __thread_wait,
-        // or the main frame already returned (daemon drain mode).
-        return any && (mainWaitingTask != null || mainReturned);
+        return System.currentTimeMillis();
+    }
+
+    /** Park the caller (the task being driven, else the main frame). Returns false when a
+     *  permit was pending: it is consumed and no park happens. */
+    private boolean parkCurrent(long deadline, boolean wakeOnSignal) {
+        if (drivingTask != null) {
+            AsyncTask t = drivingTask;
+            if (t.permit) { t.permit = false; return false; }
+            t.parkDeadline = deadline;
+            t.wakeOnSignal = wakeOnSignal;
+        } else {
+            if (mainPermit) { mainPermit = false; return false; }
+            mainParkDeadline = deadline;
+            mainWakeOnSignal = wakeOnSignal;
+        }
+        return true;
+    }
+
+    /** Wake {@code target} (a task's generator, or None/null for the main frame): parked, it
+     *  is runnable again at once (a task in this very step, the main frame at the next);
+     *  not parked, it keeps a permit and its next park returns at once (LockSupport's
+     *  rule, so a wake-up between a waiter's check and its park is not lost). Returns
+     *  whether the target exists. */
+    public boolean unpark(Object target) {
+        if (target == null || target == PyObj.NONE) {
+            if (mainParkDeadline != AsyncTask.NOT_PARKED) {
+                mainParkDeadline = AsyncTask.NOT_PARKED;
+                mainPermit = mainWakeOnSignal = false;
+            } else {
+                mainPermit = true;
+            }
+            return true;
+        }
+        for (AsyncTask t : asyncTasks) {
+            if (t.coro == target && !t.done) {
+                if (t.parkDeadline != AsyncTask.NOT_PARKED) {
+                    t.parkDeadline = AsyncTask.NOT_PARKED;
+                    t.permit = t.wakeOnSignal = false;
+                } else {
+                    t.permit = true;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Wake every parked thread whose deadline has passed (or that holds a permit: a VM
+     *  saved before unpark woke at once may hold one). Uses {@link #nowMs}. */
+    private void wakeDue() {
+        if (mainParkDeadline != AsyncTask.NOT_PARKED && (mainPermit || nowMs >= mainParkDeadline)) {
+            mainParkDeadline = AsyncTask.NOT_PARKED;
+            mainPermit = mainWakeOnSignal = false;
+        }
+        for (AsyncTask t : asyncTasks) {
+            if (t.done || t.parkDeadline == AsyncTask.NOT_PARKED) continue;
+            if (t.permit || nowMs >= t.parkDeadline) {
+                t.parkDeadline = AsyncTask.NOT_PARKED;
+                t.permit = t.wakeOnSignal = false;
+            }
+        }
+    }
+
+    /** A host signal was queued: wake the threads parked asking for one (pullSignal, a Tk
+     *  loop). They look at the queue themselves and park again if it holds nothing for them. */
+    public void wakeSignalWaiters() {
+        if (mainWakeOnSignal) unpark(PyObj.NONE);
+        for (AsyncTask t : asyncTasks) if (!t.done && t.wakeOnSignal && t.parkDeadline != AsyncTask.NOT_PARKED) unpark(t.coro);
+    }
+
+    /** True when nothing can run before {@link #nextWakeMs()}: the main frame is parked
+     *  (or has returned) and every pending task is parked, none holding a permit. A host
+     *  may then leave the VM alone until that moment, or until it queues a signal. */
+    public boolean idle() {
+        if (finished) return false;
+        if (!mainReturned && (mainParkDeadline == AsyncTask.NOT_PARKED || mainPermit)) return false;
+        for (AsyncTask t : asyncTasks) {
+            if (!t.done && (t.parkDeadline == AsyncTask.NOT_PARKED || t.permit)) return false;
+        }
+        return true;
+    }
+
+    /** The earliest park deadline among the parked threads, on the host clock
+     *  (Long.MAX_VALUE when all of them wait for an unpark or a signal only). */
+    public long nextWakeMs() {
+        long next = Long.MAX_VALUE;
+        if (!mainReturned && mainParkDeadline != AsyncTask.NOT_PARKED) next = Math.min(next, mainParkDeadline);
+        for (AsyncTask t : asyncTasks) {
+            if (!t.done && t.parkDeadline != AsyncTask.NOT_PARKED) next = Math.min(next, t.parkDeadline);
+        }
+        return next;
     }
 
     /**
@@ -499,7 +603,7 @@ public final class Vm {
      * {@link #step(int[])} already gives async a third of each budget automatically.
      * {@code ops[0]} is updated in place to the number of instructions left unused.
      */
-    public void drainAsync(int[] ops) { driveAsync(ops); }
+    public void drainAsync(int[] ops) { nowMs = clockMs(); driveAsync(ops); }
 
     private void driveAsync(int[] ops) {
         // safety: a task that finished (or died) while holding the IRQ lock must
@@ -511,28 +615,14 @@ public final class Vm {
         for (AsyncTask t : asyncTasks) t.blacklistedThisRound = false;
         int budget = ops[0];
 
-        // advance sleep timers by the real time elapsed since each sleeping task's
-        // clock base; wake those whose remaining time has run out. Time spent while
-        // a snapshot was at rest is NOT counted, because restore reset sleepClockBase
-        // to the restore instant.
-        long now = System.currentTimeMillis();
-        for (AsyncTask t : asyncTasks) {
-            if (t.done || t.sleepRemainingMs <= 0) continue;
-            long elapsed = now - t.sleepClockBase;
-            if (elapsed < 0) elapsed = 0;
-            if (elapsed >= t.sleepRemainingMs) {
-                t.sleepRemainingMs = 0;          // slept long enough — runnable again
-            } else {
-                t.sleepRemainingMs -= elapsed;   // still sleeping; carry the remainder
-                t.sleepClockBase = now;
-            }
-        }
+        // wake the parked tasks that are due or hold a permit (nowMs is the caller's)
+        wakeDue();
 
         while (budget > 0) {
-            // runnable = not done, not blacklisted this call, not currently sleeping
+            // runnable = not done, not blacklisted this call, not parked
             java.util.List<AsyncTask> runnable = new java.util.ArrayList<>();
             for (AsyncTask t : asyncTasks)
-                if (!t.done && !t.blacklistedThisRound && t.sleepRemainingMs <= 0
+                if (!t.done && !t.blacklistedThisRound && t.parkDeadline == AsyncTask.NOT_PARKED
                         && (irqDepth == 0 || irqHolder == t)) runnable.add(t);
             if (runnable.isEmpty()) break;
 
@@ -675,13 +765,10 @@ public final class Vm {
             t.atYieldPoint = true;
             t.suspendedFrame = null;
             t.coro.frame.caller = null;
-            // a sleep_ms() request: begin the real-time timer for this task
+            // a yielded SleepRequest (code of a VM saved before park/unpark): park until due
             if (t.lastYield instanceof SleepRequest) {
                 long ms = ((SleepRequest) t.lastYield).ms;
-                if (ms > 0) {
-                    t.sleepRemainingMs = ms;
-                    t.sleepClockBase = System.currentTimeMillis();
-                }
+                if (ms > 0) t.parkDeadline = nowMs + ms;
             }
         } else {
             // budget exhausted mid-instruction/mid-call-chain: the frame chain is
@@ -870,7 +957,8 @@ public final class Vm {
         current = root;
         finished = false;
         mainReturned = false;
-        mainWaitingTask = null;
+        mainParkDeadline = AsyncTask.NOT_PARKED;
+        mainPermit = mainWakeOnSignal = false;
         returnValue = null;
     }
 
@@ -982,11 +1070,9 @@ public final class Vm {
             out.writeBoolean(daemonFinishOnExit);
             out.writeBoolean(yielding);
             w.writeValue(returnValue);
-            // main frame blocked in run(): index of the awaited task (-1 if none).
-            // Written before the task list; resolved to the AsyncTask on restore.
-            int waitIdx = -1;
-            if (mainWaitingTask != null) waitIdx = asyncTasks.indexOf(mainWaitingTask);
-            out.writeInt(waitIdx);
+            // once the index of the task __thread_wait had blocked the main frame on;
+            // the slot stays for the format, nothing blocks the main frame that way now
+            out.writeInt(-1);
 
             // globals: with a registry, host functions are stored by id; without one
             // they are skipped (and re-registered by name on restore).
@@ -1013,7 +1099,6 @@ public final class Vm {
             // the cooperative event loop's task list: each task's coroutine (a
             // PyGen, already serializable) plus its done/result/error state.
             out.writeInt(asyncTasks.size());
-            long snapNow = System.currentTimeMillis();
             for (AsyncTask t : asyncTasks) {
                 w.writeValue(t.coro);
                 out.writeBoolean(t.done);
@@ -1021,14 +1106,10 @@ public final class Vm {
                 w.writeValue(t.error);
                 out.writeBoolean(t.atYieldPoint);
                 w.writeValue(t.lastYield);
-                // store the REMAINING sleep time (subtracting any already-elapsed since
-                // the clock base), so time spent at rest after this snapshot is ignored.
-                long remaining = t.sleepRemainingMs;
-                if (remaining > 0) {
-                    long elapsed = snapNow - t.sleepClockBase;
-                    remaining = Math.max(0, remaining - Math.max(0, elapsed));
-                }
-                out.writeLong(remaining);
+                // the park deadline on the host clock (NOT_PARKED while runnable). The slot
+                // once held a remaining sleep time; such a value reads as a deadline long
+                // past, so a task of that snapshot wakes once and re-checks what it waited for.
+                out.writeLong(t.parkDeadline);
                 // For a task budget-suspended mid-call-chain, serialize the chain of
                 // frames from the deepest active frame up to (but excluding) the coro's
                 // top frame, which is already captured via t.coro above. On restore the
@@ -1054,6 +1135,17 @@ public final class Vm {
             for (Map.Entry<Object, ProgramOps> entry : programOps.entrySet()) {
                 w.writeValue(entry.getKey());
                 out.writeLong(entry.getValue().count);
+            }
+            // PARK: the main frame's park state and the tasks' permits/signal waits (the
+            // tasks' deadlines travel in the task list above). Absent in older snapshots.
+            out.writeInt(PARK_SNAPSHOT_TAG);
+            out.writeLong(mainParkDeadline);
+            out.writeBoolean(mainPermit);
+            out.writeBoolean(mainWakeOnSignal);
+            out.writeInt(asyncTasks.size());
+            for (AsyncTask t : asyncTasks) {
+                out.writeBoolean(t.permit);
+                out.writeBoolean(t.wakeOnSignal);
             }
         } catch (IOException e) {
             throw new RuntimeException(e); // never thrown by ByteArrayOutputStream
@@ -1121,7 +1213,7 @@ public final class Vm {
             daemonFinishOnExit = in.readBoolean();
             yielding = in.readBoolean();
             returnValue = r.readValue();
-            int waitIdx = in.readInt();   // main-frame run() block: task index or -1
+            in.readInt();   // once the task __thread_wait blocked the main frame on (-1 now)
             int g = in.readInt();
             for (int i = 0; i < g; i++) {
                 String name = (String) r.readValue();
@@ -1144,7 +1236,6 @@ public final class Vm {
             // restore the cooperative event loop's task list
             asyncTasks.clear();
             int nt = in.readInt();
-            long restoreNow = System.currentTimeMillis();
             for (int i = 0; i < nt; i++) {
                 PyGen coro = (PyGen) r.readValue();
                 AsyncTask t = new AsyncTask(coro);
@@ -1153,11 +1244,7 @@ public final class Vm {
                 t.error = (PyExc.Instance) r.readValue();
                 t.atYieldPoint = in.readBoolean();
                 t.lastYield = r.readValue();
-                t.sleepRemainingMs = in.readLong();
-                // reset the clock base to the restore instant: the remaining time
-                // starts counting fresh now, so the interval the snapshot spent at
-                // rest does not shorten the sleep.
-                t.sleepClockBase = restoreNow;
+                t.parkDeadline = in.readLong();
                 // reconstruct the budget-suspended call chain (deepest-first) and relink
                 // callers up to the coroutine's top frame, so execution resumes exactly
                 // where it stopped rather than at the coro top.
@@ -1173,24 +1260,37 @@ public final class Vm {
                 }
                 asyncTasks.add(t);
             }
-            // resolve the main-frame run() block, if any, to the restored task
-            mainWaitingTask = (waitIdx >= 0 && waitIdx < asyncTasks.size())
-                              ? asyncTasks.get(waitIdx) : null;
             refreshInterrupt();
             programOps.clear();
             accountingProgram = null;
             executedOps = accountedOps = retiredOps = 0;
-            if (in.available() != 0) {
-                if (in.readInt() != OPS_SNAPSHOT_TAG) throw new IOException("unknown VM snapshot extension");
-                executedOps = accountedOps = in.readLong();
-                retiredOps = in.readLong();
-                int count = in.readInt();
-                if (count < 0) throw new IOException("invalid ops counter count");
-                for (int i = 0; i < count; i++) {
-                    Object program = r.readValue();
-                    ProgramOps value = new ProgramOps(program);
-                    value.count = in.readLong();
-                    programOps.put(program, value);
+            mainParkDeadline = AsyncTask.NOT_PARKED;
+            mainPermit = mainWakeOnSignal = false;
+            while (in.available() != 0) {
+                int tag = in.readInt();
+                if (tag == OPS_SNAPSHOT_TAG) {
+                    executedOps = accountedOps = in.readLong();
+                    retiredOps = in.readLong();
+                    int count = in.readInt();
+                    if (count < 0) throw new IOException("invalid ops counter count");
+                    for (int i = 0; i < count; i++) {
+                        Object program = r.readValue();
+                        ProgramOps value = new ProgramOps(program);
+                        value.count = in.readLong();
+                        programOps.put(program, value);
+                    }
+                } else if (tag == PARK_SNAPSHOT_TAG) {
+                    mainParkDeadline = in.readLong();
+                    mainPermit = in.readBoolean();
+                    mainWakeOnSignal = in.readBoolean();
+                    int count = in.readInt();
+                    if (count != asyncTasks.size()) throw new IOException("park section does not match the task list");
+                    for (AsyncTask t : asyncTasks) {
+                        t.permit = in.readBoolean();
+                        t.wakeOnSignal = in.readBoolean();
+                    }
+                } else {
+                    throw new IOException("unknown VM snapshot extension");
                 }
             }
         } catch (IOException e) {
@@ -1270,35 +1370,11 @@ public final class Vm {
         if (budget <= 0) { remops[0] = 0; return; }
 
         boolean haveTasks = hasPendingTasks();
-
-        // __thread_wait(gen): the main frame is blocked on mainWaitingTask. Drive only
-        // async until that task settles, then hand its result (or exception) to the
-        // main frame and let it resume on a subsequent step.
-        if (mainWaitingTask != null) {
-            int[] a = { budget };
-            if (!mainWaitingTask.done && haveTasks) {
-                driveAsync(a);          // a[0] holds whatever async did not consume
-            }
-            if (mainWaitingTask.done) {
-                AsyncTask t = mainWaitingTask;
-                mainWaitingTask = null;
-                if (t.error != null) {
-                    raiseIp = current.ip;
-                    raiseInto(t.error, null);
-                } else {
-                    current.setTop(t.result);   // run() returns the coroutine's value
-                }
-                remops[0] = a[0];
-                if (!finished && remops[0] > 0) remops[0] = runLoop(remops[0]);
-            } else {
-                // Still waiting on the task. Report the budget async actually left
-                // unused -- when the task is just sleeping, async runs nothing and the
-                // whole budget rolls over (so ops bank up during a sleep) rather than
-                // being falsely counted as spent.
-                remops[0] = a[0];
-            }
-            return;
-        }
+        // The step's clock reading: wake whoever is due, then whoever is still parked
+        // holds no seat and spends nothing (its share banks).
+        nowMs = clockMs();
+        wakeDue();
+        boolean mainParked = mainParkDeadline != AsyncTask.NOT_PARKED;
 
         if (mainReturned) {
             // The main frame is done (finished == true). In daemon mode keep draining
@@ -1315,8 +1391,8 @@ public final class Vm {
         }
 
         if (!haveTasks) {
-            // no async work: the main frame takes everything
-            remops[0] = runLoop(budget);
+            // no async work: the main frame takes everything (or, parked, banks it)
+            remops[0] = mainParked ? budget : runLoop(budget);
             return;
         }
 
@@ -1326,7 +1402,7 @@ public final class Vm {
         // while interrupts are off).
         if (irqDepth > 0) {
             if (irqHolder == MAIN_IRQ_HOLDER) {
-                remops[0] = runLoop(budget);
+                remops[0] = mainParked ? budget : runLoop(budget);
             } else {
                 int[] a = { budget };
                 driveAsync(a);
@@ -1346,14 +1422,13 @@ public final class Vm {
         // must come first. Whatever async leaves unused falls to the main frame.
         int runnableSeats = 0;
         for (AsyncTask t : asyncTasks)
-            if (!t.done && t.sleepRemainingMs <= 0) runnableSeats++;
+            if (!t.done && t.parkDeadline == AsyncTask.NOT_PARKED) runnableSeats++;
         int asyncShare;
         if (asyncFirstThisStep) {
             asyncShare = budget;
         } else if (runnableSeats == 0) {
-            // every task is sleeping: driveAsync must still run (it is what advances
-            // and expires the sleep timers), and sleepers spend nothing anyway --
-            // hand it the whole budget and let the remainder fall to the main frame.
+            // every task is parked: driveAsync runs nothing and spends nothing (it still
+            // purges finished tasks); the whole budget falls through to the main frame.
             asyncShare = budget;
         } else {
             asyncShare = budget - budget / (runnableSeats + 1);
@@ -1370,14 +1445,13 @@ public final class Vm {
             remops[0] = mainShare;
             return;
         }
-        remops[0] = runLoop(mainShare);
+        remops[0] = mainParked ? mainShare : runLoop(mainShare);
     }
 
     /** True once execution is complete. Normally that is when the root frame returns;
      *  in daemon-finish mode (finishDaemonOnExit()), the VM is not finished until the
      *  main frame has returned AND all async tasks have drained. */
     public boolean isFinished() {
-        if (mainWaitingTask != null) return false;   // main frame blocked in run()
         if (daemonFinishOnExit && mainReturned && hasPendingTasks()) return false;
         return finished;
     }
@@ -2939,10 +3013,10 @@ public final class Vm {
     public static final Object PROGRAM_DROP_OPS_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _program_drop_ops>"; }
     };
-    /** __thread_wait(gen) (once jasyncio.run): register the generator as a task and
-     *  BLOCK the main frame until it completes, then return its value (or raise its
-     *  exception). Unlike __thread_start (which returns immediately), it advances the
-     *  pool via the host's step() driver until the awaited task settles. */
+    /** __thread_wait(gen) of VMs saved before park/unpark (once jasyncio.run): it blocked
+     *  the main frame on a task. Calling it now raises RuntimeError, which its only
+     *  caller (the old threading.join) answers by polling; the singleton stays so those
+     *  snapshots still load. */
     public static final Object RUN_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function run>"; }
     };
@@ -2955,25 +3029,35 @@ public final class Vm {
     public static final Object TEST_AND_SET_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _test_and_set>"; }
     };
-    /** __thread_sleep(ms): build a SleepRequest(ms) for a task's generator to yield. */
+    /** __thread_sleep(ms) of VMs saved before park/unpark: a SleepRequest(ms) for a
+     *  thread's generator to yield (the scheduler parks the task until it is due). */
     public static final Object MAKE_SLEEP_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _make_sleep>"; }
     };
-    /** Old jasyncio bridge (kept for saved VMs): clear a pending sleep so a task becomes runnable at once.
-     *  Task.cancel() needs it -- a coroutine parked in `await sleep(1)` is held out of
-     *  the runnable set until the timer expires, so it would not look at the
-     *  cancellation flag for a whole second. Cancelling should be prompt. */
+    /** __jasyncio_wake(coro) of VMs saved before park/unpark: an unpark by coroutine. */
     public static final Object WAKE_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _wake>"; }
+    };
+    /** __park(deadline_ms=None, wake_on_signal=False): park the calling thread (see the
+     *  park/unpark section) until the host clock passes deadline (None: until unparked),
+     *  an unpark, or -- with wake_on_signal -- a queued host signal. Returns at once when
+     *  a permit is pending. The caller re-checks what it waited for: wakes may be early.
+     *  A pending foreground interrupt is raised here rather than after the wait. */
+    public static final Object PARK_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _park>"; }
+    };
+    /** __unpark(thread): a permit for a thread's generator (None: the main frame): wakes
+     *  it if parked, else makes its next park return at once. True when it exists. */
+    public static final Object UNPARK_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function _unpark>"; }
     };
     /** Turn on daemon-finish mode — after the main frame returns,
      *  keep running async tasks to completion instead of finishing immediately. */
     public static final Object FINISH_DAEMON_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function finishDaemonOnExit>"; }
     };
-    /** Old jasyncio bridge (kept for saved VMs): True when the caller is running inside a scheduled task
-     *  (drivingTask != null) rather than on the main frame. run() uses it to pick
-     *  between blocking the main frame (mainWaitingTask) and waiting cooperatively. */
+    /** Old jasyncio bridge (kept for saved VMs): True when the caller is running inside a
+     *  scheduled task (drivingTask != null) rather than on the main frame. */
     public static final Object IN_TASK_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function _in_task>"; }
     };
@@ -3744,7 +3828,7 @@ public final class Vm {
         // native builtin singletons (len/sorted/map/filter/dict/list/sum/...) that
         // are dispatched specially in callInto: run them via a one-off nested call
         // so they're usable as first-class callables (e.g. sorted(key=len)).
-        if (callable == LEN_BUILTIN || callable == BOOL_BUILTIN || callable == ALL_BUILTIN || callable == ANY_BUILTIN || callable == REPR_BUILTIN || callable == PRINT_BUILTIN || callable == GLOBALS_BUILTIN || callable == LOCALS_BUILTIN || callable == COMPILE_BUILTIN || callable == EXEC_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN || callable == EVAL_BUILTIN || callable == CREATE_TASK_BUILTIN || callable == RUN_BUILTIN || callable == TEST_AND_SET_BUILTIN || callable == MAKE_SLEEP_BUILTIN || callable == WAKE_BUILTIN || callable == IN_TASK_BUILTIN || callable == CURRENT_CORO_BUILTIN || callable == SLEEP_MS_OF_BUILTIN || callable == BYTEARRAY_BUILTIN || callable == DISABLE_IRQ_BUILTIN || callable == ENABLE_IRQ_BUILTIN || callable == FINISH_DAEMON_BUILTIN || callable == SORTED_BUILTIN || callable == MAP_BUILTIN
+        if (callable == LEN_BUILTIN || callable == BOOL_BUILTIN || callable == ALL_BUILTIN || callable == ANY_BUILTIN || callable == REPR_BUILTIN || callable == PRINT_BUILTIN || callable == GLOBALS_BUILTIN || callable == LOCALS_BUILTIN || callable == COMPILE_BUILTIN || callable == EXEC_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN || callable == EVAL_BUILTIN || callable == CREATE_TASK_BUILTIN || callable == RUN_BUILTIN || callable == TEST_AND_SET_BUILTIN || callable == MAKE_SLEEP_BUILTIN || callable == WAKE_BUILTIN || callable == PARK_BUILTIN || callable == UNPARK_BUILTIN || callable == IN_TASK_BUILTIN || callable == CURRENT_CORO_BUILTIN || callable == SLEEP_MS_OF_BUILTIN || callable == BYTEARRAY_BUILTIN || callable == DISABLE_IRQ_BUILTIN || callable == ENABLE_IRQ_BUILTIN || callable == FINISH_DAEMON_BUILTIN || callable == SORTED_BUILTIN || callable == MAP_BUILTIN
                 || callable == FILTER_BUILTIN || callable == DICT_BUILTIN || callable == LIST_BUILTIN
                 || callable == SUM_BUILTIN || callable == FORMAT_BUILTIN || callable == ASCII_BUILTIN || callable == LOAD_MPY_BUILTIN) {
             Frame sc = current; boolean sf = finished; boolean smr = mainReturned; Object sr = returnValue;
@@ -4069,13 +4153,22 @@ public final class Vm {
         }
         if (callable == WAKE_BUILTIN) {
             Object arg = args.length >= 1 ? args[0] : null;
-            Object res = Boolean.FALSE;
-            if (arg instanceof PyGen) {
-                for (AsyncTask t : asyncTasks) {
-                    if (t.coro == arg && !t.done) { t.sleepRemainingMs = 0; res = Boolean.TRUE; break; }
-                }
-            }
-            current.setTop(res);
+            current.setTop(arg instanceof PyGen && unpark(arg) ? Boolean.TRUE : Boolean.FALSE);
+            return;
+        }
+        if (callable == PARK_BUILTIN) {
+            long deadline = Long.MAX_VALUE;
+            if (args.length >= 1 && args[0] != PyObj.NONE) deadline = asLong(args[0]);
+            boolean onSignal = args.length >= 2 && Ops.isTrue(args[1]);
+            // A pending interrupt is delivered here, before any park state is set: a thread
+            // that unwinds with KeyboardInterrupt must not be left looking parked.
+            foregroundYield();
+            current.setTop(PyObj.NONE);
+            if (parkCurrent(deadline, onSignal)) yielding = true;
+            return;
+        }
+        if (callable == UNPARK_BUILTIN) {
+            current.setTop(unpark(args.length >= 1 ? args[0] : PyObj.NONE) ? Boolean.TRUE : Boolean.FALSE);
             return;
         }
         if (callable == MAKE_SLEEP_BUILTIN) {
@@ -4213,31 +4306,9 @@ public final class Vm {
             return;
         }
         if (callable == RUN_BUILTIN) {
-            interruptPoint(true);
-            if (args.length < 1 || !(args[0] instanceof PyGen))
-                throw PyException.typeError("run() requires a coroutine");
-            // run() is only meaningful from the top-level (main) frame -- it blocks it.
-            // Nesting run() inside a coroutine is a programming error (as in CPython).
-            //
-            // Walk the whole call chain, not just the current frame: its caller
-            // (threading.join, once jasyncio.run) is itself a plain Python function, so by
-            // the time this builtin runs, `current` is that function's own frame
-            // (genOwner == null) even when it was called from a coroutine. Checking only the top frame let the nested call through, which
-            // then suspended the main frame from inside a coroutine and quietly wedged
-            // the whole thing -- the coroutine simply returned None with no error.
-            for (Frame fr = current; fr != null; fr = fr.caller) {
-                if (fr.genOwner != null)
-                    throw new PyException("RuntimeError", "run() cannot be called from a running coroutine");
-            }
-            AsyncTask t = registerTask((PyGen) args[0]);
-            mainWaitingTask = t;
-            // Leave a placeholder on the main frame's TOS; step() will overwrite it
-            // with the task's result once it settles and resume the main frame.
-            current.setTop(PyObj.NONE);
-            // Suspend the main frame: abort this run batch so the host's next step()
-            // drives async. The main frame's ip already points past this call.
-            requestYield();
-            return;
+            // __thread_wait() of a VM saved before park/unpark: its caller, the old
+            // threading.join, polls when this is raised.
+            throw new PyException("RuntimeError", "__thread_wait() is no longer available; join() waits on its own");
         }
         if (callable == COMPILE_BUILTIN) {
             if (compiler == null) throw new PyException("NotImplementedError", "compile() is not available (no compiler configured)");

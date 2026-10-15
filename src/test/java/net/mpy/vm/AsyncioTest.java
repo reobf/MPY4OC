@@ -24,9 +24,10 @@ import org.junit.jupiter.params.provider.ValueSource;
  * asyncio follows CPython 3.12: each scenario in src/test/resources/asyncio runs here and in CPython
  * (tools/asyncio-golden.py wrote the .out files), and the lines it collects in OUT must be the same.
  *
- * The VM runs as in a game: one step per 50 ms tick on a clock of its own, and time.sleep yields
- * ticks until the clock passes its deadline (the architecture's bootstrap). The scenarios sleep in
- * multiples of 0.05 s, so the order of events does not depend on how fast either side runs.
+ * The VM runs as in a game: one step per 50 ms tick on a clock of its own. time.sleep is a host's
+ * __time_sleep here, yielding ticks until the clock passes its deadline (the frozen default parks
+ * instead; ThreadingTest runs on that). The scenarios sleep in multiples of 0.05 s, so the order
+ * of events does not depend on how fast either side runs.
  */
 class AsyncioTest {
     static final Path DIR = Path.of("src/test/resources/asyncio");

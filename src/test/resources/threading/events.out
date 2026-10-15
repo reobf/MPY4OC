@@ -1,0 +1,23 @@
+event False False
+wait True True
+set again True
+cleared False False
+sem True True False False
+released one True
+released two True True False
+ValueError: semaphore initial value must be >= 0
+ValueError: Semaphore released too many times
+with bsem False
+after with bsem True
+sem wait True
+barrier 3 0 False
+waiting 2
+released action [0, 1, 2] 0 False
+waiter: broken
+broken True
+after reset False 0
+wait timed out: broken True
+timer True False
+before []
+after ['fired']
+cancelled ['fired'] False

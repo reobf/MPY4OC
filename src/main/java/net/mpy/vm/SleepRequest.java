@@ -1,8 +1,8 @@
 package net.mpy.vm;
 
-/** Yielded by a thread's generator (__thread_sleep(ms)): asks the scheduler to not resume this task
- *  for at least {@code ms} real milliseconds (measured only while the VM is live
- *  and being driven; time at rest across a snapshot does not count). */
+/** Yielded by a thread's generator in VMs saved before park/unpark (__thread_sleep(ms)):
+ *  the scheduler parks the task for {@code ms} milliseconds of the host clock. New code
+ *  calls __park() instead; the class stays so such snapshots still load. */
 public final class SleepRequest {
     final long ms;
     SleepRequest(long ms) { this.ms = ms; }
