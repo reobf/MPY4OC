@@ -81,9 +81,11 @@ while True:
 | `tkaemon` | AE 合成 CPU 监视器:OC Adapter 贴着 ME 控制器或 ME 接口即可,只读 |
 | `tkdesktop` / `tkdemo` 等 | Tk 示例,源码在 `/bin/tkinter/` |
 
-Tk 命令默认在后台运行,输入后立即返回提示符。脚本里启动别的程序用 `subprocess.Popen(['pythonw', 'app.py'])` 或 `os.spawn*`,语义见 [程序启动接口](https://github.com/reobf/MPY4OC/wiki/Tk-使用说明#标准程序启动接口)。
+tkinter 程序默认在后台运行,输入后立即返回提示符。脚本里启动别的程序用 `subprocess.Popen(['pythonw', 'app.py'])` 或 `os.spawn*`,语义见 [程序启动接口](https://github.com/reobf/MPY4OC/wiki/tkinter-使用说明#标准程序启动接口)。
 
 ## Python 里有什么
+
+MPYOS 中可直接用 `open('notes.txt', 'w')` 和 `input('Name: ')`。文件按当前程序的 cwd 和 `/mnt` 挂载访问 OC 磁盘，支持 UTF-8、二进制、`with`、读写和追加；后台程序不能读取终端。OC 暂不支持 `+`、`x` 打开模式。已有硬盘更新 JAR、`/lib/osfs.py`、`/lib/term.py` 后重启。标准入口在冻结库里，其他宿主可用 `io.install(opener=..., reader=...)` 提供自己的文件和输入后端。
 
 - `component`、`computer` 是内置全局对象,不用 import;MPYOS 另带 `event`、`fs`、`term`、`requests`、`socket`、`urllib` 等库。
 - 冻结标准库:`asyncio` `binascii` `cmath` `collections` `deflate` `functools` `gc` `hashlib` `heapq` `io` `json` `machine` `math` `micropython` `os` `pickle` `random` `re` `struct` `subprocess` `sys` `threading` `time` `tkinter` `traceback`。
@@ -95,7 +97,7 @@ Tk 命令默认在后台运行,输入后立即返回提示符。脚本里启动�
 
 ## 文档
 
-- [Tk 使用说明](https://github.com/reobf/MPY4OC/wiki/Tk-使用说明)(wiki):从裸 `init.py` 启动、选屏、控件、桌面与窗口、各个 Tk 命令、程序启动接口、终端中断。
+- [tkinter 使用说明](https://github.com/reobf/MPY4OC/wiki/tkinter-使用说明)(wiki):从裸 `init.py` 启动、选屏、控件、桌面与窗口、各个 tkinter 命令、程序启动接口、终端中断。
 - [MPYOS 用户手册](https://github.com/reobf/MPY4OC/wiki/MPYOS-用户手册)(wiki):装机、开机、shell 与命令、SFTP 卡、故障排查。
 - [MicroPython 编程指南](https://github.com/reobf/MPY4OC/wiki/MicroPython-编程指南)(wiki):和标准 Python 的差异、组件操作、联网、存档注意点。
 

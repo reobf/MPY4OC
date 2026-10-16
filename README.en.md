@@ -81,9 +81,11 @@ ops left unused while idle are banked (up to 10 ticks' worth) and spent in a bur
 | `tkaemon` | AE crafting CPU monitor: an OC Adapter next to an ME Controller or ME Interface is enough; read-only |
 | `tkdesktop` / `tkdemo` and others | Tk examples, source in `/bin/tkinter/` |
 
-Tk commands run in the background by default and return the prompt immediately. To start another program from a script, use `subprocess.Popen(['pythonw', 'app.py'])` or `os.spawn*`; see the [process API](https://github.com/reobf/MPY4OC/wiki/Tk-使用说明#标准程序启动接口) (wiki, Chinese).
+tkinter programs run in the background by default and return the prompt immediately. To start another program from a script, use `subprocess.Popen(['pythonw', 'app.py'])` or `os.spawn*`; see the [process API](https://github.com/reobf/MPY4OC/wiki/tkinter-Guide#the-standard-process-launch-api) (wiki).
 
 ## What Python has here
+
+MPYOS provides `open('notes.txt', 'w')` and `input('Name: ')`. Files use the calling program's cwd and `/mnt` mounts on OC disks, with UTF-8, binary mode, `with`, reading, writing and appending. Background programs cannot read the terminal. OC update (`+`) and exclusive creation (`x`) modes are not supported. Existing disks need the new JAR, `/lib/osfs.py`, `/lib/term.py` and an OC computer reboot. The entry points live in the frozen library; other hosts can supply their own file and input backends through `io.install(opener=..., reader=...)`.
 
 - `component` and `computer` are built-in globals, no import needed; MPYOS adds `event`, `fs`, `term`, `requests`, `socket`, `urllib` and more.
 - Frozen standard library: `asyncio` `binascii` `cmath` `collections` `deflate` `functools` `gc` `hashlib` `heapq` `io` `json` `machine` `math` `micropython` `os` `pickle` `random` `re` `struct` `subprocess` `sys` `threading` `time` `tkinter` `traceback`.
@@ -95,7 +97,7 @@ When a mod update changes the MPYOS code on the LiveCD, a system already install
 
 ## Documentation
 
-- [Tk guide](https://github.com/reobf/MPY4OC/wiki/Tk-使用说明) (wiki, Chinese, with Python examples): bare `init.py`, display selection, widgets, desktop and windows, each Tk command, the process API, terminal interrupts.
+- [tkinter Guide](https://github.com/reobf/MPY4OC/wiki/tkinter-Guide) (wiki): bare `init.py`, display selection, widgets, desktop and windows, each tkinter command, the process API, terminal interrupts.
 - [MPYOS User Manual](https://github.com/reobf/MPY4OC/wiki/MPYOS-User-Manual) (wiki): building the machine, booting, the shell and its commands, the SFTP card, troubleshooting.
 - [MicroPython Programming Guide](https://github.com/reobf/MPY4OC/wiki/MicroPython-Programming-Guide) (wiki): differences from standard Python, working with components, networking, save-file caveats.
 
