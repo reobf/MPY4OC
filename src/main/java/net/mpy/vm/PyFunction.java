@@ -2,6 +2,8 @@ package net.mpy.vm;
 
 import net.mpy.loader.CodeObject;
 import net.mpy.loader.MpyModule;
+import net.mpy.qstr.SymbolMap;
+import net.mpy.qstr.SymbolPool;
 
 /**
  * A Python bytecode function object, created by MAKE_FUNCTION / MAKE_FUNCTION_DEFARGS.
@@ -16,10 +18,16 @@ public final class PyFunction {
     public final MpyModule module;
     /** User-set function attributes (func.attr = x); lazily created. Enables
      *  functools.wraps (setting __name__ etc.) and attaching data to functions. */
-    public java.util.Map<String, Object> attrs;
-    public java.util.Map<String, Object> attrsOrNew() {
-        if (attrs == null) attrs = new java.util.LinkedHashMap<>();
+    public SymbolMap attrs;
+    private SymbolPool symbols;
+    public SymbolMap attrsOrNew() {
+        if (symbols == null) symbols = new SymbolPool();
+        if (attrs == null) attrs = new SymbolMap(symbols);
         return attrs;
+    }
+    public void bindSymbols(SymbolPool pool) {
+        symbols = pool;
+        if (attrs != null) attrs.bind(pool);
     }
     public final Object[] defaults; // positional defaults (length == prelude.nDefPosArgs)
     public final java.util.Map<Object, Object> kwDefaults; // keyword-only defaults (nullable)

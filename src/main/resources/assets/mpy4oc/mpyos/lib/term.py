@@ -243,13 +243,12 @@ class Terminal:
                     self.x -= 1
                 i += 1
             else:
-                # batch everything up to the next control character
-                j = i + 1
-                while j < n:
-                    c = text[j]
-                    if c == "\n" or c == "\r" or c == "\t" or c == "\b":
-                        break
-                    j += 1
+                # batch everything up to the next control character (found natively)
+                j = n
+                for control in ("\n", "\r", "\t", "\b"):
+                    k = text.find(control, i + 1, j)
+                    if k >= 0:
+                        j = k
                 self._blit(text[i:j])
                 i = j
 
@@ -297,7 +296,7 @@ class Terminal:
         self.write_color(text + end, rgb)
 
     # -- input --
-    def read(self, prompt=None, history=None, complete=None):
+    def read(self, prompt=None, history=None, complete=None, interrupt=False):
         """Read one line of input, echoing as the user types. Supports backspace,
         left/right, home/end, up/down history, and Tab completion. Returns the line
         without the trailing newline, or None on interrupt (Ctrl+D / Ctrl+C on
@@ -500,6 +499,8 @@ class Terminal:
                             redraw()
             elif ch == 3:          # Ctrl+C
                 self.write("^C\n")
+                if interrupt:
+                    raise KeyboardInterrupt
                 return None
             elif ch == 4:          # Ctrl+D
                 if not buf:

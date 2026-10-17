@@ -1,7 +1,7 @@
 package net.mpy.vm;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
+import net.mpy.qstr.SymbolMap;
+import net.mpy.qstr.SymbolPool;
 
 /**
  * A user-defined class (Phase 7+): name, bases (multiple inheritance supported),
@@ -12,7 +12,7 @@ import java.util.Map;
 public final class PyClass {
     public final String name;
     public final PyClass[] bases;
-    public final Map<String, Object> ns = new LinkedHashMap<>();
+    public final SymbolMap ns;
     /** If this class (or an ancestor) inherits a built-in type, the native base
      *  (BuiltinType.STR / LIST / ...); instances carry a wrapped native value. */
     public BuiltinType nativeBase;
@@ -21,6 +21,12 @@ public final class PyClass {
     public net.mpy.runtime.PyExc.Type excType;
 
     public PyClass(String name, PyClass[] bases) {
+        this(name, bases, bases != null && bases.length > 0 ? bases[0].ns.symbols() : new SymbolPool());
+    }
+
+    public PyClass(String name, PyClass[] bases, SymbolPool symbols) {
+        ns = new SymbolMap(symbols);
+        symbols.intern(name);
         this.name = name;
         this.bases = bases == null ? new PyClass[0] : bases;
         // inherit a native base from any base class
@@ -47,6 +53,20 @@ public final class PyClass {
         for (PyClass b : bases) {
             Object v = b.lookup(attr);
             if (v != null) return v;
+        }
+        return null;
+    }
+
+    public Object lookup(SymbolPool symbols, int attr) {
+        Object value = ns.getSymbol(symbols, attr);
+        if (value != null) return value;
+        return lookupInBases(symbols, attr);
+    }
+
+    public Object lookupInBases(SymbolPool symbols, int attr) {
+        for (PyClass base : bases) {
+            Object value = base.lookup(symbols, attr);
+            if (value != null) return value;
         }
         return null;
     }

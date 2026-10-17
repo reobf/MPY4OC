@@ -3,6 +3,8 @@ package net.mpy.vm;
 import net.mpy.runtime.Methods;
 import net.mpy.runtime.PyExc;
 import net.mpy.runtime.PyObj;
+import net.mpy.qstr.SymbolMap;
+import net.mpy.qstr.SymbolPool;
 
 import java.math.BigInteger;
 import java.util.IdentityHashMap;
@@ -20,13 +22,35 @@ final class MemEstimator {
     private long total;
 
     static long estimate(Frame top, Map<String, Object> globals) {
+        return estimate(top, globals, null);
+    }
+
+    static long estimate(Frame top, Map<String, Object> globals, SymbolPool symbols) {
         MemEstimator e = new MemEstimator();
+        e.addSymbols(symbols);
         for (Frame f = top; f != null; f = f.caller) e.addFrame(f);
-        for (Map.Entry<String, Object> g : globals.entrySet()) {
-            e.total += 48 + 2L * g.getKey().length();
-            e.add(g.getValue());
-        }
+        e.addNamespace(globals);
         return e.total;
+    }
+
+    private void addSymbols(SymbolPool symbols) {
+        if (symbols != null && seen.put(symbols, Boolean.TRUE) == null) total += symbols.estimatedBytes();
+    }
+
+    private void addNamespace(Map<String, Object> namespace) {
+        if (namespace == null || seen.put(namespace, Boolean.TRUE) != null) return;
+        if (namespace instanceof SymbolMap) {
+            SymbolMap map = (SymbolMap) namespace;
+            addSymbols(map.symbolsOrNull());
+            total += map.estimatedBytes();
+            for (Object value : map.values()) add(value);
+        } else {
+            total += 48;
+            for (var entry : namespace.entrySet()) {
+                total += 48 + 2L * entry.getKey().length();
+                add(entry.getValue());
+            }
+        }
     }
 
     private void addFrame(Frame f) {
@@ -37,6 +61,7 @@ final class MemEstimator {
         add(f.returnOverride);
         // f.names aliases a PyClass ns counted via buildingClass
         if (f.buildingClass != null) add(f.buildingClass);
+        addNamespace(f.execGlobals);
     }
 
     private void add(Object v) {
@@ -89,21 +114,22 @@ final class MemEstimator {
             total += 48;
             for (Object d : fn.defaults) add(d);
             if (fn.kwDefaults != null) for (var e : fn.kwDefaults.entrySet()) { add(e.getKey()); add(e.getValue()); }
+            addNamespace(fn.attrs);
             return;
         }
         if (v instanceof PyGen) { total += 64; addFrame(((PyGen) v).frame); return; }
         if (v instanceof PyClass) {
             PyClass c = (PyClass) v;
-            total += 64 + 48L * c.ns.size();
+            total += 64;
             for (PyClass b : c.bases) add(b);
-            for (var e : c.ns.entrySet()) add(e.getValue());
+            addNamespace(c.ns);
             return;
         }
         if (v instanceof PyInstance) {
             PyInstance i = (PyInstance) v;
-            total += 48 + 48L * i.attrs.size();
+            total += 48;
             add(i.cls);
-            for (var e : i.attrs.entrySet()) add(e.getValue());
+            addNamespace(i.attrs);
             return;
         }
         if (v instanceof Descriptors.StaticMethod) { total += 24; add(((Descriptors.StaticMethod) v).fn); return; }
@@ -114,6 +140,12 @@ final class MemEstimator {
         if (v instanceof PyExc.Instance) {
             total += 40;
             for (Object a : ((PyExc.Instance) v).args) add(a);
+            addNamespace(((PyExc.Instance) v).userAttrs);
+            return;
+        }
+        if (v instanceof PyModule) {
+            total += 48;
+            addNamespace(((PyModule) v).ns);
             return;
         }
         total += 32; // markers, exception types, host functions, slices, ...

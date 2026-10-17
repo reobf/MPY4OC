@@ -108,7 +108,7 @@ class Response:
             return data.decode()
         except Exception:
             # undecodable bytes: fall back to latin-1 semantics
-            return "".join([chr(b) for b in data])
+            return data.decode("latin-1")
 
     @property
     def encoding(self):
@@ -332,4 +332,4 @@ def _decode_body(data):
     try:
         return data.decode()
     except Exception:
-        return "".join([chr(b) for b in data])
+        return data.decode("latin-1")

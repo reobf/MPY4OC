@@ -60,6 +60,7 @@ class socket:
         self._timeout = None    # None = block forever, 0 = non-blocking-ish
         self._eof = False
         self._closed = False
+        self._rbuf = b""        # what the card handed over past what the caller took
 
     # -- configuration -------------------------------------------------
 
@@ -143,6 +144,13 @@ class socket:
         """Read up to bufsize bytes. Blocks (cooperatively) until data arrives;
         returns b"" only at end-of-stream, like CPython."""
         h = self._need()
+        if bufsize < 0:
+            raise ValueError('negative buffersize in recv')
+        if bufsize == 0:
+            return b''
+        if self._rbuf:
+            chunk, self._rbuf = self._rbuf[:bufsize], self._rbuf[bufsize:]
+            return chunk
         if self._eof:
             return b""
         deadline = self._deadline()
@@ -168,18 +176,32 @@ class socket:
         return b"".join(parts)
 
     def recv_line(self, limit=65536):
-        """Non-standard helper: read up to and including b"\\n" (or EOF)."""
-        parts = []
-        got = 0
-        while got < limit:
-            c = self.recv(1)
-            if not c:
-                break
-            parts.append(c)
-            got += 1
-            if c == b"\n":
-                break
-        return b"".join(parts)
+        """Non-standard helper: read up to and including b"\\n" (or EOF, or limit bytes).
+        The card is read in chunks; what follows the line waits for the next recv."""
+        h = self._need()
+        if limit < 0:
+            raise ValueError('negative line limit')
+        deadline = self._deadline()
+        while True:
+            k = self._rbuf.find(b"\n")
+            if k >= 0 and k < limit:
+                line, self._rbuf = self._rbuf[:k + 1], self._rbuf[k + 1:]
+                return line
+            if len(self._rbuf) >= limit:
+                line, self._rbuf = self._rbuf[:limit], self._rbuf[limit:]
+                return line
+            if self._eof:
+                line, self._rbuf = self._rbuf, b""
+                return line
+            while True:
+                chunk = h.read(4096)
+                if chunk is None:       # remote closed the stream
+                    self._eof = True
+                    break
+                if len(chunk):
+                    self._rbuf += chunk
+                    break
+                self._wait(deadline, "recv timed out")
 
     # -- internals -----------------------------------------------------
 

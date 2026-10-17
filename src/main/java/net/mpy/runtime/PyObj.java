@@ -442,13 +442,27 @@ public final class PyObj {
          *  Python objects up front. A lazy Iter is materialised on snapshot (its
          *  remaining elements are drained into items) so it can be serialised. */
         public transient java.util.function.Supplier<Object> supplier;
-        public Iter(java.util.List<Object> items) { this.items = items; }
+        /** A range walked in place: values are computed one at a time, so
+         *  {@code for i in range(10**12)} allocates nothing; a snapshot stores the
+         *  range and {@link #index} rather than the values. Null for other iterators. */
+        public final Range range;
+        private final long rangeLength;
+        public long index;
+        public Iter(java.util.List<Object> items) { this.items = items; this.range = null; this.rangeLength = 0; }
         public Iter(java.util.function.Supplier<Object> supplier) {
             this.items = new java.util.ArrayList<>();
             this.supplier = supplier;
+            this.range = null;
+            this.rangeLength = 0;
+        }
+        public Iter(Range range) {
+            this.items = new java.util.ArrayList<>(0);
+            this.range = range;
+            this.rangeLength = range.length();
         }
         /** Next value, or {@link #STOP_ITERATION} when exhausted. */
         public Object next() {
+            if (range != null) return index < rangeLength ? (Object) range.get(index++) : STOP_ITERATION;
             if (supplier != null) return supplier.get();
             return pos < items.size() ? items.get(pos++) : STOP_ITERATION;
         }

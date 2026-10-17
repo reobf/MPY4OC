@@ -12,9 +12,10 @@ import java.util.concurrent.Future;
  */
 public final class TkImage {
     /** Largest side of one image, images per display and their total pixels. */
-    public static final int MAX_SIDE = 1024, MAX_IMAGES = 64, MAX_PIXELS = 524_288;
+    public static final int MAX_SIDE = net.mpy.runtime.ImageCodec.MAX_SIDE, MAX_IMAGES = 64,
+            MAX_PIXELS = net.mpy.runtime.ImageCodec.MAX_PIXELS;
     /** Largest encoded file (PNG, JPEG, GIF, BMP) accepted for decoding. */
-    public static final int MAX_FILE_BYTES = 1 << 20;
+    public static final int MAX_FILE_BYTES = net.mpy.runtime.ImageCodec.MAX_FILE_BYTES;
     /** Images up to this many pixels are packed on the spot; larger ones off the server thread. */
     static final int INLINE_PACK_PIXELS = 16384;
     /** A large image that keeps changing is re-packed at most this often. */

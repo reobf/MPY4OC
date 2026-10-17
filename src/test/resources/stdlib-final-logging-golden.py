@@ -1,0 +1,36 @@
+# CPython 3.12.14
+import logging
+from io import StringIO
+stream = StringIO()
+logging.basicConfig(stream=stream, level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s', force=True)
+logger = logging.getLogger('test.child')
+logger.debug('hidden')
+logger.info('value=%s', 3)
+logger.warning('%(x)s', {'x':'mapping'})
+parent = logging.getLogger('test')
+parent.setLevel(logging.ERROR)
+logger.warning('hidden')
+logger.error('failure')
+parent.setLevel(logging.DEBUG)
+handler = logging.StreamHandler(stream)
+handler.setFormatter(logging.Formatter('{levelname}:{name}:{message}:{job}', style='{', defaults={'job':'-'}))
+handler.addFilter(logging.Filter('test.child'))
+logger.addHandler(handler)
+logger.propagate = False
+logging.LoggerAdapter(logger, {'job':42}).info('ok')
+logger.info('plain')
+logging.disable(logging.CRITICAL)
+logger.critical('hidden')
+logging.disable(logging.NOTSET)
+
+actual = stream.getvalue()
+assert actual == 'INFO:test.child:value=3\nWARNING:test.child:mapping\nERROR:test.child:failure\nINFO:test.child:ok:42\nINFO:test.child:plain:-\n', 'stream.getvalue()' + ': ' + repr(actual)
+actual = logger.getEffectiveLevel()
+assert actual == 10, 'logger.getEffectiveLevel()' + ': ' + repr(actual)
+actual = logger.hasHandlers()
+assert actual == True, 'logger.hasHandlers()' + ': ' + repr(actual)
+actual = logging.getLevelName("WARN")
+assert actual == 30, 'logging.getLevelName("WARN")' + ': ' + repr(actual)
+actual = logging.getLevelName(99)
+assert actual == 'Level 99', 'logging.getLevelName(99)' + ': ' + repr(actual)
+passed = True

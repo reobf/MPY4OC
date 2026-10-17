@@ -95,6 +95,11 @@ public class MyMod {
                 .setTextureName("mpy4oc:sftpcard");
         cpw.mods.fml.common.registry.GameRegistry.registerItem(sftpCard, "mpy4oc.oc.sftpcard");
 
+        webCard = (reobf.mpy4oc.main.item.ItemWebCard) new reobf.mpy4oc.main.item.ItemWebCard()
+                .setMaxStackSize(1).setUnlocalizedName("mpy4oc.webcard").setTextureName("mpy4oc:sftpcard");
+        cpw.mods.fml.common.registry.GameRegistry.registerItem(webCard, "web_card");
+        li.cil.oc.server.driver.Registry.add((li.cil.oc.api.driver.Item) webCard);
+
         // The card item IS its own OC item-driver (it implements HostAware).
         li.cil.oc.server.driver.Registry.add((li.cil.oc.api.driver.Item) sftpCard);
         LOG.info("Registered item + driver: mpy4oc:sftpcard (port " + Config.port + ")");
@@ -111,6 +116,8 @@ public class MyMod {
 
     /** The async MPY APU item (async CPU + built-in GPU). */
     public static reobf.mpy4oc.main.item.ItemMpyAPUAsync mpyApuAsync;
+
+    public static reobf.mpy4oc.main.item.ItemWebCard webCard;
 
     /** The SFTP card item. */
     public static reobf.mpy4oc.main.item.ItemSFTPCard sftpCard;
@@ -155,6 +162,12 @@ public class MyMod {
             }
         });
         LOG.info("Registered OpenComputers environment provider: sftp card");
+
+        li.cil.oc.api.Driver.add(new li.cil.oc.api.driver.EnvironmentProvider() {
+            @Override public Class<?> getEnvironment(net.minecraft.item.ItemStack stack) {
+                return stack != null && stack.getItem() == webCard ? reobf.mpy4oc.main.item.ItemWebCard.APIEnv.class : null;
+            }
+        });
 
         // The mpy BIOS: bios.py source lives in the EEPROM code section. The arch
         // compiles and runs it at boot; it finds a bootable disk and runs its
@@ -285,6 +298,8 @@ public class MyMod {
                 new net.minecraft.item.ItemStack(sftpCard),
                 cardBase, new net.minecraft.item.ItemStack(net.minecraft.init.Items.string));
         }
+        if (cardBase != null) cpw.mods.fml.common.registry.GameRegistry.addShapelessRecipe(
+                new net.minecraft.item.ItemStack(webCard), cardBase, new net.minecraft.item.ItemStack(net.minecraft.init.Items.redstone));
         // sync <-> async conversion, per tier, both directions, 1:1 -- the two
         // families are the same silicon scheduled differently, so switching is
         // free rather than a crafting cost.
@@ -375,5 +390,6 @@ public class MyMod {
     @Mod.EventHandler
     public void serverStopped(FMLServerStoppedEvent event) {
         reobf.mpy4oc.tk.net.TkNetwork.serverStopped();
+        reobf.mpy4oc.main.item.ItemWebCard.shutdown();
     }
 }

@@ -19,6 +19,18 @@ public final class Frame {
     public final byte[] bc;        // executable bytecode (prelude stripped)
     public final Object[] state;   // locals (high end) + value stack (low end)
     public final int nState;
+    private net.mpy.qstr.SymbolPool symbolPool;
+    private int[] symbolIds;
+
+    /** Cache module-local name operands in this VM's symbol space. String literal
+     * bytecodes keep using the original qstr table and never call this method. */
+    public int symbolId(net.mpy.qstr.SymbolPool pool, int local) {
+        if (symbolPool != pool) {
+            symbolPool = pool;
+            symbolIds = pool.table(code.module);
+        }
+        return pool.resolve(code.module, symbolIds, local);
+    }
 
     public int ip;                 // instruction pointer into bc
     public int sp = -1;            // value-stack top index (-1 == empty)

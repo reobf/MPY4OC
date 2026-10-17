@@ -32,11 +32,17 @@ public final class PyExc {
         public final Type type;
         public Object[] args;
         /** Custom instance attributes for user exception subclasses (self.code etc). */
-        public final Map<String, Object> userAttrs = new LinkedHashMap<>();
+        public final net.mpy.qstr.SymbolMap userAttrs;
         /** Traceback entries {file, line, blockName}, appended as the exception
          *  unwinds through frames (MicroPython's add_traceback order). */
         public final java.util.List<Object[]> traceback = new java.util.ArrayList<>();
-        public Instance(Type type, Object[] args) { this.type = type; this.args = args == null ? NO_ARGS : args; }
+        public Instance(Type type, Object[] args) {
+            this.type = type;
+            this.args = args == null ? NO_ARGS : args;
+            this.userAttrs = type.userClass instanceof net.mpy.vm.PyClass
+                    ? new net.mpy.qstr.SymbolMap(((net.mpy.vm.PyClass) type.userClass).ns.symbols())
+                    : new net.mpy.qstr.SymbolMap();
+        }
         @Override public String toString() { return repr(this); }
     }
 
@@ -97,13 +103,19 @@ public final class PyExc {
     public static final Type VALUE_ERROR = def("ValueError", EXCEPTION);
     public static final Type TYPE_ERROR = def("TypeError", EXCEPTION);
     public static final Type RUNTIME_ERROR = def("RuntimeError", EXCEPTION);
+    public static final Type RECURSION_ERROR = def("RecursionError", RUNTIME_ERROR);
     public static final Type NOT_IMPLEMENTED_ERROR = def("NotImplementedError", RUNTIME_ERROR);
     public static final Type NAME_ERROR = def("NameError", EXCEPTION);
     public static final Type ATTRIBUTE_ERROR = def("AttributeError", EXCEPTION);
     public static final Type STOP_ITERATION = def("StopIteration", EXCEPTION);
     public static final Type ASSERTION_ERROR = def("AssertionError", EXCEPTION);
     public static final Type OS_ERROR = def("OSError", EXCEPTION);
+    public static final Type EOF_ERROR = def("EOFError", EXCEPTION);
     public static final Type FILE_NOT_FOUND_ERROR = def("FileNotFoundError", OS_ERROR);
+    public static final Type FILE_EXISTS_ERROR = def("FileExistsError", OS_ERROR);
+    public static final Type IS_A_DIRECTORY_ERROR = def("IsADirectoryError", OS_ERROR);
+    public static final Type NOT_A_DIRECTORY_ERROR = def("NotADirectoryError", OS_ERROR);
+    public static final Type PERMISSION_ERROR = def("PermissionError", OS_ERROR);
     public static final Type CHILD_PROCESS_ERROR = def("ChildProcessError", OS_ERROR);
     public static final Type PROCESS_LOOKUP_ERROR = def("ProcessLookupError", OS_ERROR);
     public static final Type TIMEOUT_ERROR = def("TimeoutError", OS_ERROR);
@@ -116,6 +128,12 @@ public final class PyExc {
     public static final Type KEYBOARD_INTERRUPT = def("KeyboardInterrupt", BASE_EXCEPTION);
     public static final Type SYSTEM_EXIT = def("SystemExit", BASE_EXCEPTION);
     public static final Type STOP_ASYNC_ITERATION = def("StopAsyncIteration", EXCEPTION);
+
+    static {
+        // Python 3 aliases, including legacy MPYOS filesystem call sites.
+        TYPES.put("IOError", OS_ERROR);
+        TYPES.put("EnvironmentError", OS_ERROR);
+    }
 
     /** UnicodeDecodeError(encoding, object, start, end, reason), CPython's argument layout. */
     public static boolean unicodeDecodeArgs(Object[] args) {

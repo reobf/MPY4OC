@@ -6,6 +6,8 @@
 *.[jJ][pP][gG]          binary
 *.[jJ][pP][eE][gG]      binary
 *.[gG][iI][fF]          binary
+*.[bB][mM][pP]          binary
+src/test/resources/pil/*.raw binary
 *.[tT][iI][fF]          binary
 *.[tT][iI][fF][fF]      binary
 *.[iI][cC][oO]          binary
@@ -42,3 +44,4 @@
 *.[pP][sS]1             text eol=crlf
 
 *[aA][uU][tT][oO][gG][eE][nN][eE][rR][aA][tT][eE][dD]* binary
+*.[pP]12                binary

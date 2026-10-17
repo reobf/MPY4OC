@@ -4,6 +4,8 @@ import net.mpy.bytecode.Opcodes;
 import net.mpy.loader.MpyLoader;
 import net.mpy.loader.MpyModule;
 import net.mpy.qstr.QstrPool;
+import net.mpy.qstr.SymbolMap;
+import net.mpy.qstr.SymbolPool;
 import net.mpy.runtime.Format;
 import net.mpy.runtime.Methods;
 import net.mpy.runtime.PyExc;
@@ -63,6 +65,7 @@ public final class Vm {
 
     public MpyModule module;   // replaced by the embedded main module on restore
     public final Map<String, Object> globals;
+    public final SymbolPool symbols = new SymbolPool();
     /** Keys present in globals after builtins/primitives are installed, i.e. the
      *  names that globals()/locals() must hide (MicroPython keeps builtins in a
      *  separate namespace not exposed by globals()). */
@@ -157,6 +160,8 @@ public final class Vm {
     final Map<String, PyModule> loadedModules = new HashMap<>();          // dotted name -> module
 
     private void registerModule(String name, PyModule module) {
+        symbols.intern(name);
+        module.ns.bind(symbols);
         loadedModules.put(name, module);
         if (name.equals("sys")) module.program = this::currentProgram;
     }
@@ -329,7 +334,7 @@ public final class Vm {
         cellModules.add(Map.entry(label == null ? "" : label, m));   // labels are display-only
     }
 
-    public Vm(MpyModule module) { this(module, new HashMap<>()); }
+    public Vm(MpyModule module) { this(module, null); }
 
     /**
      * Create a VM. Both parameters may be null: with no module, drive execution
@@ -341,11 +346,19 @@ public final class Vm {
      */
     public Vm(MpyModule module, Map<String, Object> globals) {
         this.module = module;
-        this.globals = globals != null ? globals : new HashMap<>();
+        this.globals = globals != null ? globals : new SymbolMap(symbols);
+        if (this.globals instanceof SymbolMap) ((SymbolMap) this.globals).bind(symbols);
+        for (Object value : this.globals.values()) bindSymbols(value);
         limits.apply();
         memCheckCountdown = limits.memoryCheckInterval;
         Builtins.install(this.globals);
         StdLib.installPrimitives(this.globals);
+        PyModule ioBuiltins = StdLib.installIoBuiltins(this.globals, symbols);
+        if (ioBuiltins != null) {
+            registerModule(ioBuiltins.name, ioBuiltins);
+            byCode.put(ioBuiltins.code, ioBuiltins);
+        }
+        refreshIoBuiltins();
         this.globals.putIfAbsent("__name__", "__main__");
         this.globals.putIfAbsent("yieldJava", yieldHost());
         this.globals.putIfAbsent("__tb_current", (HostFunction) a ->
@@ -739,7 +752,7 @@ public final class Vm {
             return Math.max(1, consumedHp);
         } catch (PyException pe) {
             t.done = true;
-            t.error = PyExc.from(pe);
+            t.error = exFrom(pe);
             restoreTop(savedCurrent, savedFinished, savedYielding, savedReturn, savedDriving);
             return give;
         }
@@ -805,7 +818,7 @@ public final class Vm {
      *  (the same walk the memory limit uses). Cheap enough for an occasional
      *  computer.freeMemory() call, not for a hot loop. */
     public long estimatedMemory() {
-        return MemEstimator.estimate(current, globals);
+        return MemEstimator.estimate(current, globals, symbols);
     }
 
     /** The configured soft memory ceiling in bytes (Long.MAX_VALUE if unlimited). */
@@ -1181,7 +1194,7 @@ public final class Vm {
         if (hosts == null) hosts = HostRegistry.fromGlobals(globals);
         else hosts.fallbackTo(globals);
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(data))) {
-            Snapshot.Reader r = new Snapshot.Reader(in, module, hosts); // one identity space
+            Snapshot.Reader r = new Snapshot.Reader(in, module, hosts, symbols); // one identity space
             // read the embedded module table and load each module from its bytes;
             // the snapshot carries its own code, so nothing external can mismatch.
             int nm = in.readInt();
@@ -1223,6 +1236,7 @@ public final class Vm {
 
             handledException = (PyExc.Instance) r.readValue();
 
+            PyModule installedIoBuiltins = loadedModules.get("_builtin_io");
             loadedModules.clear();
             byCode.clear();
             int lm = in.readInt();
@@ -1232,6 +1246,14 @@ public final class Vm {
                 registerModule(name, pm);
                 if (pm.code != null) byCode.put(pm.code, pm);
             }
+
+            // Older snapshots have no Python I/O builtins. Their fresh defaults
+            // remain in globals, so retain the owning module for the next save.
+            if (!loadedModules.containsKey("_builtin_io") && installedIoBuiltins != null) {
+                registerModule(installedIoBuiltins.name, installedIoBuiltins);
+                byCode.put(installedIoBuiltins.code, installedIoBuiltins);
+            }
+            refreshIoBuiltins();
 
             // restore the cooperative event loop's task list
             asyncTasks.clear();
@@ -1564,7 +1586,7 @@ public final class Vm {
         while (remaining > 0 && !finished && !taskYielded) {
             try {
             if (limits.memoryCheckInterval > 0 && --memCheckCountdown <= 0) {
-                long used = MemEstimator.estimate(current, globals);
+                long used = MemEstimator.estimate(current, globals, symbols);
                 if (used > limits.memoryLimit) {
                     memCheckCountdown = limits.memoryCheckInterval;
                     throw new PyException("MemoryError",
@@ -1690,48 +1712,50 @@ public final class Vm {
                     case Opcodes.DELETE_FAST:   f.setLocal((int) arg, null);     break dispatch;
 
                     case Opcodes.LOAD_NAME: {
-                        String name = f.code.module.qstr((int) arg);
+                        int id = f.symbolId(symbols, (int) arg);
+                        String name = symbols.name(id);
                         // single-lookup fast path: a stored value is virtually never
                         // Java null (Python None is PyObj.NONE), so get()+null-check
                         // replaces containsKey+get; the rare null falls back.
                         if (f.names != null) {
-                            Object v = f.names.get(name);
-                            if (v != null || f.names.containsKey(name)) { f.push(v); break dispatch; }
+                            Object v = nameGet(f.names, id);
+                            if (v != null || nameContains(f.names, id)) { f.push(v); break dispatch; }
                         }
                         Map<String, Object> scope = scopeOf(f);
-                        Object v = scope.get(name);
-                        if (v != null || scope.containsKey(name)) { f.push(v); break dispatch; }
+                        Object v = nameGet(scope, id);
+                        if (v != null || nameContains(scope, id)) { f.push(v); break dispatch; }
                         if (scope != globals) {
-                            v = globals.get(name);
-                            if ((v != null || globals.containsKey(name)) && fallsThrough(f, name)) { f.push(v); break dispatch; }
+                            v = nameGet(globals, id);
+                            if ((v != null || nameContains(globals, id)) && fallsThrough(f, name)) { f.push(v); break dispatch; }
                         }
                         throw PyException.nameError("name '" + name + "' is not defined");
                     }
                     case Opcodes.LOAD_GLOBAL: {
-                        String name = f.code.module.qstr((int) arg);
+                        int id = f.symbolId(symbols, (int) arg);
+                        String name = symbols.name(id);
                         Map<String, Object> scope = scopeOf(f);
-                        Object v = scope.get(name);
-                        if (v != null || scope.containsKey(name)) { f.push(v); break dispatch; }
+                        Object v = nameGet(scope, id);
+                        if (v != null || nameContains(scope, id)) { f.push(v); break dispatch; }
                         if (scope != globals) {
-                            v = globals.get(name);
-                            if ((v != null || globals.containsKey(name)) && fallsThrough(f, name)) { f.push(v); break dispatch; }
+                            v = nameGet(globals, id);
+                            if ((v != null || nameContains(globals, id)) && fallsThrough(f, name)) { f.push(v); break dispatch; }
                         }
                         throw PyException.nameError("name '" + name + "' is not defined");
                     }
                     case Opcodes.STORE_NAME: {
-                        String name = f.code.module.qstr((int) arg);
-                        if (f.names != null) f.names.put(name, f.pop());
-                        else scopeOf(f).put(name, f.pop());
+                        int id = f.symbolId(symbols, (int) arg);
+                        if (f.names != null) namePut(f.names, id, f.pop());
+                        else namePut(scopeOf(f), id, f.pop());
                         break dispatch;
                     }
                     case Opcodes.STORE_GLOBAL:
-                        scopeOf(f).put(f.code.module.qstr((int) arg), f.pop());
+                        namePut(scopeOf(f), f.symbolId(symbols, (int) arg), f.pop());
                         break dispatch;
                     case Opcodes.DELETE_NAME: case Opcodes.DELETE_GLOBAL: {
-                        String dn = f.code.module.qstr((int) arg);
+                        int id = f.symbolId(symbols, (int) arg);
                         Map<String, Object> scope = scopeOf(f);
-                        if (scope.containsKey(dn)) scope.remove(dn);
-                        else globals.remove(dn);
+                        if (nameContains(scope, id)) nameRemove(scope, id);
+                        else nameRemove(globals, id);
                         break dispatch;
                     }
 
@@ -1757,7 +1781,17 @@ public final class Vm {
                             Object m = ((PyInstance) obj).cls.lookup("__getitem__");
                             if (m != null) { f.setTop(callSync(new BoundPyMethod(m, obj), new Object[]{index})); break dispatch; }
                             Object nv = nativeValueOf(obj);   // MyStr('hi')[0] / MyList[i]
-                            if (nv != null) { f.setTop(Ops.subscrGet(nv, index)); break dispatch; }
+                            if (nv != null) {
+                                try { f.setTop(Ops.subscrGet(nv, index)); }
+                                catch (PyException error) {
+                                    Object missing = nv instanceof PyObj.PyDict && "KeyError".equals(error.pyType)
+                                            ? ((PyInstance) obj).cls.lookup("__missing__") : null;
+                                    if (missing == null) throw error;
+                                    // A defaultdict factory may park or save: keep its ordinary Python frames.
+                                    callInto(new BoundPyMethod(missing, obj), new Object[]{index}, NO_KW_NAMES, NO_KW_VALUES);
+                                }
+                                break dispatch;
+                            }
                             throw PyException.typeError("'" + ((PyInstance) obj).cls.name + "' object is not subscriptable");
                         }
                         f.setTop(Ops.subscrGet(obj, index));
@@ -1880,13 +1914,18 @@ public final class Vm {
                     }
                     case Opcodes.GET_ITER: {
                         Object o = f.top();
-                        if (!(o instanceof PyGen)) f.setTop(iterOf(o)); // a gen is its own iterator
+                        // A range is walked in place: FOR_ITER makes one value per instruction, under
+                        // the ops budget. Builtins that drain an iterable in Java (list, sum, ...) still
+                        // go through Ops.getIter, which bounds the size before allocating anything.
+                        if (o instanceof PyObj.Range) f.setTop(new PyObj.Iter((PyObj.Range) o));
+                        else if (!(o instanceof PyGen)) f.setTop(iterOf(o)); // a gen is its own iterator
                         break dispatch;
                     }
                     case Opcodes.GET_ITER_STACK: {
                         int base = f.sp;
                         Object src = f.state[base];
-                        Object it = (src instanceof PyGen) ? src : iterOf(src); // a gen is its own iterator
+                        Object it = src instanceof PyObj.Range ? new PyObj.Iter((PyObj.Range) src)   // walked in place (see GET_ITER)
+                                : (src instanceof PyGen) ? src : iterOf(src); // a gen is its own iterator
                         f.sp = base + (NSLOTS - 1);
                         f.state[base] = null;      // MP_OBJ_NULL marker (slot 0)
                         f.state[base + 1] = it;    // iterator object (slot 1)
@@ -1911,6 +1950,7 @@ public final class Vm {
                         PyObj.Cell[] closed = new PyObj.Cell[nClosed];
                         for (int k = nClosed - 1; k >= 0; k--) closed[k] = (PyObj.Cell) f.pop();
                         PyFunction fn = new PyFunction(f.code.children.get((int) arg), f.code.module, null);
+                        fn.bindSymbols(symbols);
                         fn.defScope = f.execGlobals; fn.defSandbox = f.sandboxScope;   // inherit the sandbox, if any
                         f.push(new Closure(fn, closed));
                         break dispatch;
@@ -1924,6 +1964,7 @@ public final class Vm {
                         Object[] defs = (defTuple instanceof PyObj.Tuple) ? ((PyObj.Tuple) defTuple).items : null;
                         java.util.Map<Object, Object> kwd = (defDict instanceof PyObj.PyDict) ? ((PyObj.PyDict) defDict).map : null;
                         PyFunction fn = new PyFunction(f.code.children.get((int) arg), f.code.module, defs, kwd);
+                        fn.bindSymbols(symbols);
                         fn.defScope = f.execGlobals; fn.defSandbox = f.sandboxScope;
                         f.drop(1);
                         f.setTop(new Closure(fn, closed));
@@ -1931,6 +1972,7 @@ public final class Vm {
                     }
                     case Opcodes.MAKE_FUNCTION: {
                         PyFunction fn = new PyFunction(f.code.children.get((int) arg), f.code.module, null);
+                        fn.bindSymbols(symbols);
                         fn.defScope = f.execGlobals; fn.defSandbox = f.sandboxScope;
                         f.push(fn);
                         break dispatch;
@@ -1941,6 +1983,7 @@ public final class Vm {
                         Object[] defs = (defTuple instanceof PyObj.Tuple) ? ((PyObj.Tuple) defTuple).items : null;
                         java.util.Map<Object, Object> kwd = (defDict instanceof PyObj.PyDict) ? ((PyObj.PyDict) defDict).map : null;
                         PyFunction fn = new PyFunction(f.code.children.get((int) arg), f.code.module, defs, kwd);
+                        fn.bindSymbols(symbols);
                         fn.defScope = f.execGlobals; fn.defSandbox = f.sandboxScope;
                         f.drop(1);       // remove def_dict
                         f.setTop(fn);    // replace def_tuple with the function
@@ -1948,9 +1991,9 @@ public final class Vm {
                     }
                     // ---- attributes & methods (Phase 5) ------------------------
                     case Opcodes.LOAD_ATTR: {
-                        String name = f.code.module.qstr((int) arg);
+                        int id = f.symbolId(symbols, (int) arg);
                         Object obj = f.top();
-                        Descriptors.Property prop = suspendableProperty(obj, name);
+                        Descriptors.Property prop = suspendableProperty(obj, id);
                         if (prop != null) {
                             // Run the getter as a real subframe (not callSync) so that a
                             // getter which waits cooperatively -- e.g. Response.content
@@ -1961,18 +2004,19 @@ public final class Vm {
                             callInto(prop.getter, new Object[]{obj});
                             break dispatch;
                         }
-                        f.setTop(loadAttr(obj, name));
+                        f.setTop(loadAttr(obj, id));
                         break dispatch;
                     }
                     case Opcodes.STORE_ATTR: {
-                        String name = f.code.module.qstr((int) arg);
+                        int id = f.symbolId(symbols, (int) arg);
+                        String name = symbols.name(id);
                         Object obj = f.peek(0);          // value at peek(1)
                         Object value = f.peek(1);
                         f.drop(2);
                         if (obj instanceof PyInstance) {
                             PyInstance inst = (PyInstance) obj;
                             // A class-level property intercepts assignment/deletion.
-                            Object cm = inst.cls.lookup(name);
+                            Object cm = inst.cls.lookup(symbols, id);
                             if (cm instanceof Descriptors.Property) {
                                 Descriptors.Property prop = (Descriptors.Property) cm;
                                 if (value == null) {   // del inst.name -> deleter
@@ -1987,31 +2031,32 @@ public final class Vm {
                                 break dispatch;
                             }
                             if (value == null) {   // del inst.name (plain attribute)
-                                if (inst.attrs.remove(name) == null)
+                                if (inst.attrs.removeSymbol(symbols, id) == null)
                                     throw new PyException("AttributeError",
                                             "'" + inst.cls.name + "' object has no attribute '" + name + "'");
                                 break dispatch;
                             }
-                            inst.attrs.put(name, value);
+                            inst.attrs.putSymbol(symbols, id, value);
                             break dispatch;
                         }
-                        if (obj instanceof PyExc.Instance) { ((PyExc.Instance) obj).userAttrs.put(name, value); break dispatch; }
-                        if (obj instanceof PyClass) { ((PyClass) obj).ns.put(name, value); break dispatch; }
-                        if (obj instanceof PyModule) { ((PyModule) obj).setAttr(name, value); break dispatch; }
-                        if (obj instanceof PyFunction) { ((PyFunction) obj).attrsOrNew().put(name, value); break dispatch; }
-                        if (obj instanceof Closure) { ((Closure) obj).fun.attrsOrNew().put(name, value); break dispatch; }
+                        if (obj instanceof PyExc.Instance) { ((PyExc.Instance) obj).userAttrs.putSymbol(symbols, id, value); break dispatch; }
+                        if (obj instanceof PyClass) { ((PyClass) obj).ns.putSymbol(symbols, id, value); break dispatch; }
+                        if (obj instanceof PyModule) { ((PyModule) obj).setAttr(symbols, id, value); break dispatch; }
+                        if (obj instanceof PyFunction) { ((PyFunction) obj).attrsOrNew().putSymbol(symbols, id, value); break dispatch; }
+                        if (obj instanceof Closure) { ((Closure) obj).fun.attrsOrNew().putSymbol(symbols, id, value); break dispatch; }
                         throw new PyException("AttributeError", "'" + Methods.typeName(obj)
                                 + "' object has no attribute '" + name + "'");
                     }
                     case Opcodes.LOAD_METHOD: {
-                        String name = f.code.module.qstr((int) arg);
+                        int id = f.symbolId(symbols, (int) arg);
+                        String name = symbols.name(id);
                         Object obj = f.top();
                         if (name.equals("__class__")) { f.setTop(Builtins.typeOf(obj)); f.push(null); break dispatch; }
                         if (obj instanceof PyInstance) {
                             PyInstance inst = (PyInstance) obj;
-                            Object v = inst.attrs.get(name);
+                            Object v = inst.attrs.getSymbol(symbols, id);
                             if (v != null) { f.setTop(v); f.push(null); break dispatch; } // plain attr
-                            Object m = inst.cls.lookup(name);
+                            Object m = inst.cls.lookup(symbols, id);
                             if (m == null) {
                                 // native subclass: fall through to str/list methods on the native value
                                 if (inst.nativeValue != null && Methods.lookup(inst.nativeValue, name) != null) {
@@ -2044,10 +2089,10 @@ public final class Vm {
                         }
                         if (obj instanceof PyExc.Instance) {
                             PyExc.Instance e = (PyExc.Instance) obj;
-                            Object ua = e.userAttrs.get(name);
+                            Object ua = e.userAttrs.getSymbol(symbols, id);
                             if (ua != null) { f.setTop(ua); f.push(null); break dispatch; }
                             if (e.type.userClass != null) {
-                                Object m = ((PyClass) e.type.userClass).lookup(name);
+                                Object m = ((PyClass) e.type.userClass).lookup(symbols, id);
                                 if (m instanceof PyFunction || m instanceof Closure) { f.setTop(m); f.push(e); break dispatch; }
                                 if (m instanceof Descriptors.Property) {   // @property on an exception class
                                     f.setTop(callSync(((Descriptors.Property) m).getter, new Object[]{e}));
@@ -2058,11 +2103,11 @@ public final class Vm {
                                 if (m != null) { f.setTop(m); f.push(null); break dispatch; }
                             }
                             // fall through to args/value pseudo-attrs via loadAttr
-                            f.setTop(loadAttr(e, name)); f.push(null);
+                            f.setTop(loadAttr(e, id)); f.push(null);
                             break dispatch;
                         }
                         if (obj instanceof PyClass) {
-                            Object m = ((PyClass) obj).lookup(name);
+                            Object m = ((PyClass) obj).lookup(symbols, id);
                             if (m == null) {
                                 // Base.__init__(self, ...) on a user exception subclass
                                 // (see loadAttr / LOAD_SUPER_METHOD)
@@ -2082,7 +2127,7 @@ public final class Vm {
                             break dispatch;
                         }
                         if (obj instanceof PyModule) {              // module.fn(...)
-                            f.setTop(loadAttr(obj, name));
+                            f.setTop(loadAttr(obj, id));
                             f.push(null);
                             break dispatch;
                         }
@@ -2099,8 +2144,8 @@ public final class Vm {
                         // a function attribute that is itself callable (e.g. fib.cache_info())
                         if (obj instanceof PyFunction || obj instanceof Closure) {
                             PyFunction fnObj = obj instanceof Closure ? ((Closure) obj).fun : (PyFunction) obj;
-                            if (fnObj.attrs != null && fnObj.attrs.containsKey(name)) {
-                                f.setTop(fnObj.attrs.get(name));   // the attribute is the callable
+                            if (fnObj.attrs != null && fnObj.attrs.containsSymbol(symbols, id)) {
+                                f.setTop(fnObj.attrs.getSymbol(symbols, id));   // the attribute is the callable
                                 f.push(null);                       // no bound self
                                 break dispatch;
                             }
@@ -2175,7 +2220,7 @@ public final class Vm {
                                     break dispatch;
                                 }
                                 PyExc.Instance exc = isClose
-                                        ? PyExc.from(new PyException("GeneratorExit", "GeneratorExit"))
+                                        ? exFrom(new PyException("GeneratorExit", "GeneratorExit"))
                                         : coerceToExc(nPos > 0 ? pos[0] : null);
                                 if (isClose) {
                                     // close() runs the generator's finally blocks and then
@@ -2285,14 +2330,14 @@ public final class Vm {
                                     Object[] hit = resolveDotted(root, dotted);
                                     if (hit == null) {
                                         if (i < tparts.length) {
-                                            pm = new PyModule(dotted, root, null); // synthetic package
+                                            pm = new PyModule(dotted, root, null, symbols); // synthetic package
                                             registerModule(dotted, pm);
                                         } else {
                                             throw new PyException("ImportError", "no module named '" + target + "'");
                                         }
                                     } else {
                                         MpyModule mcode = MpyLoader.load((byte[]) hit[0], new QstrPool());
-                                        pm = new PyModule(dotted, root, mcode);
+                                        pm = new PyModule(dotted, root, mcode, symbols);
                                         pm.initializing = true;            // until its top-level returns
                                         registerModule(dotted, pm);     // cache before executing
                                         byCode.put(mcode, pm);
@@ -2394,11 +2439,12 @@ public final class Vm {
 
                     case Opcodes.LOAD_SUPER_METHOD: {
                         // stack: (..., super, __class__, self); result: (..., method, self)
-                        String name = f.code.module.qstr((int) arg);
+                        int id = f.symbolId(symbols, (int) arg);
+                        String name = symbols.name(id);
                         Object self = f.pop();
                         Object clsObj = f.pop();
                         if (!(clsObj instanceof PyClass)) throw PyException.typeError("super(): bad __class__");
-                        Object m = ((PyClass) clsObj).lookupInBases(name);
+                        Object m = ((PyClass) clsObj).lookupInBases(symbols, id);
                         if (m == null) {
                             // super().__init__(...) on a user exception subclass: the
                             // built-in Exception base's __init__ just records args.
@@ -2581,14 +2627,14 @@ public final class Vm {
                                 Object[] hit = resolveDotted(root, dotted);
                                 if (hit == null) {
                                     if (i < tparts.length) {
-                                        pm = new PyModule(dotted, root, null); // synthetic package
+                                        pm = new PyModule(dotted, root, null, symbols); // synthetic package
                                         registerModule(dotted, pm);
                                     } else {
                                         throw new PyException("ImportError", "no module named '" + target + "'");
                                     }
                                 } else {
                                     MpyModule code = MpyLoader.load((byte[]) hit[0], new QstrPool());
-                                    pm = new PyModule(dotted, root, code);
+                                    pm = new PyModule(dotted, root, code, symbols);
                                     pm.initializing = true;            // until its top-level returns
                                     registerModule(dotted, pm);     // cache before executing
                                     byCode.put(code, pm);
@@ -2638,7 +2684,7 @@ public final class Vm {
                                 throw new PyException("ImportError", "can't import name " + name);
                             }
                             MpyModule code = MpyLoader.load((byte[]) hit[0], new QstrPool());
-                            child = new PyModule(childDotted, pm.root, code);
+                            child = new PyModule(childDotted, pm.root, code, symbols);
                             child.initializing = true;                 // until its top-level returns
                             registerModule(childDotted, child);
                             byCode.put(code, child);
@@ -2762,15 +2808,14 @@ public final class Vm {
                 // one crossing a nested-execution boundary keeps its instance so
                 // the traceback continues seamlessly in the outer frames.
                 if (pe.escaped) throw pe;
-                PyExc.Instance inst = pe.instance != null ? pe.instance : PyExc.from(pe);
-                raiseInto(inst, pe);
+                raiseInto(exFrom(pe), pe);
             } catch (IndexOutOfBoundsException | ClassCastException | NullPointerException | NegativeArraySizeException bad) {
                 // What malformed bytecode does to the interpreter (an operand past a table, a
                 // stack slot of the wrong kind). Programs may run .mpy files they were given,
                 // so this fails the running program as a Python error instead of taking down
                 // the whole computer. Control flow (HostPause) is none of these and passes on.
                 PyException pe = new PyException("RuntimeError", "invalid bytecode or VM state: " + bad);
-                raiseInto(PyExc.from(pe), pe);
+                raiseInto(exFrom(pe), pe);
             }
 
             // ---- post-instruction bookkeeping ----
@@ -2947,6 +2992,12 @@ public final class Vm {
     public static final Object PRINT_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function print>"; }
     };
+    public static final Object GETATTR_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function getattr>"; }
+    };
+    public static final Object HASATTR_BUILTIN = new NativeBuiltin() {
+        @Override public String toString() { return "<built-in function hasattr>"; }
+    };
     /** format()/ascii(): VM-native so they can dispatch __format__/__repr__. */
     public static final Object FORMAT_BUILTIN = new NativeBuiltin() {
         @Override public String toString() { return "<built-in function format>"; }
@@ -3103,6 +3154,10 @@ public final class Vm {
     boolean copyMappingTo(PyObj.PyDict target, Object source) {
         if (!(source instanceof PyInstance)) return false;
         PyInstance instance = (PyInstance) source;
+        if (instance.nativeValue instanceof PyObj.PyDict) {
+            target.map.putAll(((PyObj.PyDict) instance.nativeValue).map);
+            return true;
+        }
         if (!instance.attrs.containsKey("keys") && instance.cls.lookup("keys") == null) return false;
         Object getitem = instance.cls.lookup("__getitem__");
         if (getitem == null) throw PyException.typeError("object is not subscriptable");
@@ -3132,9 +3187,8 @@ public final class Vm {
         return out;
     }
 
-    /** getiter with __iter__ dispatch: an instance's __iter__ result becomes the
-     *  iterator (a PyObj.Iter, a PyGen, or another instance with __next__). For a
-     *  __next__-driven instance we eagerly drain into a PyObj.Iter. */
+    /** getiter with __iter__ dispatch. Python iterators use a resumable generator
+     *  adapter, retaining one item at a time and allowing I/O, budget pauses and snapshots. */
     private Object iterOf(Object o) {
         if (o instanceof PyInstance) {
             PyInstance inst = (PyInstance) o;
@@ -3163,6 +3217,11 @@ public final class Vm {
                     PyInstance iit = (PyInstance) it;
                     Object nx = iit.cls.lookup("__next__");
                     if (nx != null) {
+                        PyModule builtins = loadedModules.get("_builtin_io");
+                        Object adapter = builtins == null ? null : builtins.ns.get("_iterate");
+                        if (adapter instanceof PyFunction)
+                            return new PyGen(prepareFrame((PyFunction) adapter, new Object[] {iit}));
+                        // Legacy snapshots can carry the older helper module.
                         java.util.List<Object> buf = new java.util.ArrayList<>();
                         while (true) {
                             Object v;
@@ -3200,8 +3259,12 @@ public final class Vm {
         }
         return Ops.getIter(o);
     }
-    private static PyExc.Instance exFrom(PyException e) {
-        return e.instance != null ? e.instance : PyExc.from(e);
+    /** The Python instance of a Java-side exception, made here if it has none yet, and in
+     *  this VM's symbol space either way (a detached one may carry attributes a host set). */
+    private PyExc.Instance exFrom(PyException e) {
+        PyExc.Instance inst = e.instance != null ? e.instance : PyExc.from(e);
+        bindSymbols(inst);
+        return inst;
     }
 
     /** Synchronously exhaust a generator into a list by running its frame as the
@@ -3242,7 +3305,7 @@ public final class Vm {
      *  mode says where yields/returns deliver; exhaustIp is FOR_ITER's jump target. */
     /** Turn a thrown value (class or instance) into an exception instance. */
     private PyExc.Instance coerceToExc(Object v) {
-        if (v == null) return PyExc.from(new PyException("RuntimeError", "throw() requires an exception"));
+        if (v == null) return exFrom(new PyException("RuntimeError", "throw() requires an exception"));
         return toExcInstance(v);   // one place decides what counts as raisable
     }
 
@@ -3409,6 +3472,8 @@ public final class Vm {
         java.util.List<Object[]> deco = new java.util.ArrayList<>(items.size());
         for (Object it : items) deco.add(new Object[]{keyFn == null ? it : callSync(keyFn, new Object[]{it}), it});
         deco.sort((x, y) -> {
+            // Reverse the comparison, not the sorted sequence: ties stay stable.
+            if (reverse) { Object[] swap = x; x = y; y = swap; }
             // dunder-aware: a < b via __lt__ when present, else structural
             if (x[0] instanceof PyInstance || y[0] instanceof PyInstance) {
                 Object lt = binaryOpDispatch(Ops.LESS, x[0], y[0]);
@@ -3418,7 +3483,6 @@ public final class Vm {
             }
             return Ops.compare(x[0], y[0]);
         });
-        if (reverse) java.util.Collections.reverse(deco);
         items.clear();
         for (Object[] d : deco) items.add(d[1]);
     }
@@ -3435,6 +3499,37 @@ public final class Vm {
 
     /** The global scope for a frame: its module's namespace for imported-module
      *  code, else the VM's main globals. */
+    private Object bindSymbols(Object value) {
+        if (value instanceof PyModule) ((PyModule) value).ns.bind(symbols);
+        else if (value instanceof PyClass) {
+            PyClass cls = (PyClass) value;
+            cls.ns.bind(symbols);
+            for (PyClass base : cls.bases) bindSymbols(base);
+        } else if (value instanceof PyInstance) {
+            PyInstance instance = (PyInstance) value;
+            instance.attrs.bind(symbols);
+            bindSymbols(instance.cls);
+        } else if (value instanceof PyFunction) ((PyFunction) value).bindSymbols(symbols);
+        else if (value instanceof Closure) ((Closure) value).fun.bindSymbols(symbols);
+        else if (value instanceof PyExc.Instance) ((PyExc.Instance) value).userAttrs.bind(symbols);
+        return value;
+    }
+
+    private Object nameGet(Map<String, Object> scope, int id) {
+        return scope instanceof SymbolMap ? ((SymbolMap) scope).getSymbol(symbols, id) : scope.get(symbols.name(id));
+    }
+    private boolean nameContains(Map<String, Object> scope, int id) {
+        return scope instanceof SymbolMap ? ((SymbolMap) scope).containsSymbol(symbols, id) : scope.containsKey(symbols.name(id));
+    }
+    private void namePut(Map<String, Object> scope, int id, Object value) {
+        if (scope instanceof SymbolMap) ((SymbolMap) scope).putSymbol(symbols, id, value);
+        else scope.put(symbols.name(id), value);
+    }
+    private void nameRemove(Map<String, Object> scope, int id) {
+        if (scope instanceof SymbolMap) ((SymbolMap) scope).removeSymbol(symbols, id);
+        else scope.remove(symbols.name(id));
+    }
+
     private Map<String, Object> scopeOf(Frame f) {
         if (f.execGlobals != null) return f.execGlobals;   // exec(code, ns)
         Map<String, Object> ns = f.code.module.ns;
@@ -3533,6 +3628,18 @@ public final class Vm {
         boolean lInst = lhs instanceof PyInstance;
         boolean rInst = rhs instanceof PyInstance;
         if (!lInst && !rInst) return Ops.binaryOp(op, lhs, rhs);
+        if (op >= Ops.INPLACE_OR && op <= Ops.INPLACE_POWER) {
+            int normal = op + (Ops.OR - Ops.INPLACE_OR);
+            String method = arithDunder(normal);
+            if (lInst && method != null) {
+                Object inPlace = ((PyInstance) lhs).cls.lookup("__i" + method.substring(2));
+                if (inPlace != null) {
+                    Object result = callSync(new BoundPyMethod(inPlace, lhs), new Object[]{rhs});
+                    if (result != PyObj.NOT_IMPLEMENTED) return result;
+                }
+            }
+            return binaryOpDispatch(normal, lhs, rhs);
+        }
 
         // built-in subclass passthrough: if an operand is a native-subclass
         // instance with no user dunder for this op, operate on its native value
@@ -3677,6 +3784,7 @@ public final class Vm {
      *  dunder when the first argument is a user instance defining it, and
      *  converts user instances among the other arguments with __index__. */
     private Object callHost(HostFunction fn, Object[] args) {
+        for (Object argument : args) bindSymbols(argument);
         if (fn instanceof DunderHostFunction && args.length > 0) {
             Object first = args[0];
             Object m = first instanceof PyInstance ? ((PyInstance) first).cls.lookup(((DunderHostFunction) fn).dunder) : null;
@@ -3691,7 +3799,7 @@ public final class Vm {
             }
             args = converted;
         }
-        return fn.call(args);
+        return bindSymbols(fn.call(args));
     }
 
     /** str()/repr() with __str__/__repr__ dispatch on user instances. repr falls
@@ -3815,12 +3923,73 @@ public final class Vm {
             if (b != null) return Ops.isTrue(callSync(new BoundPyMethod(b, inst), NO_ARGS));
             Object l = inst.cls.lookup("__len__");
             if (l != null) return Ops.isTrue(callSync(new BoundPyMethod(l, inst), NO_ARGS));
+            if (inst.nativeValue != null) return Ops.isTrue(inst.nativeValue);
             return true;
         }
         return Ops.isTrue(o);
     }
 
+    /** The Python-implemented builtins in _builtin_io take over from the host versions when a
+     *  call needs Python frames: a generator or a user object to iterate (its __next__ may park
+     *  or save), user objects to compare, or key=/default=. Plain containers of plain values
+     *  stay on the host versions, which cost one instruction instead of a frame per element. */
+    private Object pythonBuiltin(Object callable, Object[] args, String[] kwNames) {
+        String name;
+        if (callable == Builtins.MIN || callable == Builtins.MAX) {
+            if (kwNames.length == 0 && plainExtreme(args)) return null;
+            name = callable == Builtins.MIN ? "_min" : "_max";
+        } else if (callable == Builtins.ITER) {
+            if (kwNames.length == 0 && args.length == 1 && !(args[0] instanceof PyInstance) && !(args[0] instanceof PyGen)) return null;
+            name = "_iter";
+        } else if (callable == ALL_BUILTIN || callable == ANY_BUILTIN) {
+            if (kwNames.length == 0 && args.length == 1 && !(args[0] instanceof PyInstance) && !(args[0] instanceof PyGen)) return null;
+            name = callable == ALL_BUILTIN ? "_all" : "_any";
+        } else return null;
+        PyModule module = loadedModules.get("_builtin_io");
+        return module == null ? null : module.ns.get(name);
+    }
+
+    /** min/max over values the host can compare: no user objects (their __lt__ runs in Python)
+     *  among the arguments or inside a list/tuple/set/dict argument. Iterators are not inspected
+     *  (that would consume them) and go to Python. */
+    private static boolean plainExtreme(Object[] args) {
+        if (args.length == 1) {
+            Object a = args[0];
+            if (a instanceof PyObj.PyList) return plainValues(((PyObj.PyList) a).items);
+            if (a instanceof PyObj.Tuple) return plainValues(java.util.Arrays.asList(((PyObj.Tuple) a).items));
+            if (a instanceof PyObj.PySet) return plainValues(((PyObj.PySet) a).items);
+            if (a instanceof PyObj.PyDict) return plainValues(((PyObj.PyDict) a).map.keySet());
+            return a instanceof String || a instanceof PyObj.Bytes || a instanceof PyObj.ByteArray || a instanceof PyObj.Range;
+        }
+        return args.length > 1 && plainValues(java.util.Arrays.asList(args));
+    }
+
+    private static boolean plainValues(Iterable<Object> values) {
+        for (Object v : values) {
+            if (v instanceof PyInstance || v instanceof PyGen) return false;
+            if (v instanceof PyObj.Tuple && !plainValues(java.util.Arrays.asList(((PyObj.Tuple) v).items))) return false;
+            if (v instanceof PyObj.PyList && !plainValues(((PyObj.PyList) v).items)) return false;
+        }
+        return true;
+    }
+
+    /** The code of _builtin_io's next(): its one-argument form needs no Python frame. */
+    private Object ioNextCode;
+
+    private void refreshIoBuiltins() {
+        PyModule module = loadedModules.get("_builtin_io");
+        Object next = module == null ? null : module.ns.get("next");
+        ioNextCode = next instanceof PyFunction ? ((PyFunction) next).code : null;
+    }
+
     private Object callSync(Object callable, Object[] args) {
+        Object python = pythonBuiltin(callable, args, NO_KW_NAMES);
+        if (python != null) return callSync(python, args);
+        if (callable instanceof PyInstance) {
+            Object method = ((PyInstance) callable).cls.lookup("__call__");
+            if (method == null) throw PyException.typeError("object is not callable");
+            return callSync(new BoundPyMethod(method, callable), args);
+        }
         if (callable instanceof BuiltinType && ((BuiltinType) callable).isConstructor())
             return ((BuiltinType) callable).construct(this, args, NO_KW_NAMES, NO_KW_VALUES);
         if (callable instanceof HostFunction) return callHost((HostFunction) callable, args);
@@ -3830,7 +3999,8 @@ public final class Vm {
         // so they're usable as first-class callables (e.g. sorted(key=len)).
         if (callable == LEN_BUILTIN || callable == BOOL_BUILTIN || callable == ALL_BUILTIN || callable == ANY_BUILTIN || callable == REPR_BUILTIN || callable == PRINT_BUILTIN || callable == GLOBALS_BUILTIN || callable == LOCALS_BUILTIN || callable == COMPILE_BUILTIN || callable == EXEC_BUILTIN || callable == EXEC_SANDBOX_BUILTIN || callable == EVAL_SANDBOX_BUILTIN || callable == EVAL_BUILTIN || callable == CREATE_TASK_BUILTIN || callable == RUN_BUILTIN || callable == TEST_AND_SET_BUILTIN || callable == MAKE_SLEEP_BUILTIN || callable == WAKE_BUILTIN || callable == PARK_BUILTIN || callable == UNPARK_BUILTIN || callable == IN_TASK_BUILTIN || callable == CURRENT_CORO_BUILTIN || callable == SLEEP_MS_OF_BUILTIN || callable == BYTEARRAY_BUILTIN || callable == DISABLE_IRQ_BUILTIN || callable == ENABLE_IRQ_BUILTIN || callable == FINISH_DAEMON_BUILTIN || callable == SORTED_BUILTIN || callable == MAP_BUILTIN
                 || callable == FILTER_BUILTIN || callable == DICT_BUILTIN || callable == LIST_BUILTIN
-                || callable == SUM_BUILTIN || callable == FORMAT_BUILTIN || callable == ASCII_BUILTIN || callable == LOAD_MPY_BUILTIN) {
+                || callable == SUM_BUILTIN || callable == FORMAT_BUILTIN || callable == ASCII_BUILTIN || callable == LOAD_MPY_BUILTIN
+                || callable == GETATTR_BUILTIN || callable == HASATTR_BUILTIN) {
             Frame sc = current; boolean sf = finished; boolean smr = mainReturned; Object sr = returnValue;
             boolean sy = yielding; int sri = raiseIp;
             Frame probe = new Frame(current.code);   // scratch frame to receive setTop
@@ -3863,6 +4033,7 @@ public final class Vm {
         }
         if (!(fn instanceof PyFunction)) throw PyException.typeError("object is not callable");
         Frame fr = prepareFrame((PyFunction) fn, a);
+        if ((((PyFunction) fn).code.prelude.scopeFlags & SCOPE_GENERATOR) != 0) return new PyGen(fr);
         Frame sc = current; boolean sf = finished; boolean smr = mainReturned; Object sr = returnValue;
         boolean sy = yielding; int sri = raiseIp;
         try {
@@ -3888,6 +4059,15 @@ public final class Vm {
     /** LOAD_ATTR semantics: instance attrs, class-chain methods (bound), class
      *  namespace entries, and built-in type methods (bound). */
     private Object loadAttr(Object obj, String name) {
+        // Dynamic failed probes must not retain arbitrary strings in the VM symbol pool.
+        return loadAttr(obj, symbols.find(name), name);
+    }
+
+    private Object loadAttr(Object obj, int id) {
+        return loadAttr(obj, id, symbols.name(id));
+    }
+
+    private Object loadAttr(Object obj, int id, String name) {
         // Every object's type, as in CPython. MicroPython's compiler reads it for async with
         // (__aexit__ gets type(exc)), and programs use self.__class__.
         if (name.equals("__class__")) return Builtins.typeOf(obj);
@@ -3921,9 +4101,9 @@ public final class Vm {
                 d.map.putAll(inst.attrs);
                 return d;
             }
-            Object v = inst.attrs.get(name);
+            Object v = id == 0 ? inst.attrs.get(name) : inst.attrs.getSymbol(symbols, id);
             if (v != null) return v;
-            Object m = inst.cls.lookup(name);
+            Object m = id == 0 ? inst.cls.lookup(name) : inst.cls.lookup(symbols, id);
             if (m == null) {
                 if (inst.nativeValue != null && Methods.lookup(inst.nativeValue, name) != null)
                     return new Methods.BoundMethod(inst.nativeValue, name);
@@ -3950,7 +4130,7 @@ public final class Vm {
         }
         if (obj instanceof PyClass) {
             if (name.equals("__name__")) return ((PyClass) obj).name;
-            Object m = ((PyClass) obj).lookup(name);
+            Object m = id == 0 ? ((PyClass) obj).lookup(name) : ((PyClass) obj).lookup(symbols, id);
             if (m == null) {
                 // Base.__init__(self, ...) written out longhand on a user exception
                 // subclass: the built-in Exception base's __init__ just records args
@@ -3965,7 +4145,7 @@ public final class Vm {
             return m;
         }
         if (obj instanceof PyModule) {
-            Object v = ((PyModule) obj).getAttr(name);
+            Object v = id == 0 ? ((PyModule) obj).getAttr(name) : ((PyModule) obj).getAttr(symbols, id);
             if (v == null) {
                 // PEP 562: a module-level __getattr__ is consulted for names not
                 // found in the namespace. The arch uses this to give the component
@@ -3994,12 +4174,12 @@ public final class Vm {
                 return new PyObj.Tuple(e.args);
             }
             // user exception subclass: custom instance attrs, then class methods
-            Object ua = e.userAttrs.get(name);
+            Object ua = id == 0 ? e.userAttrs.get(name) : e.userAttrs.getSymbol(symbols, id);
             if (ua != null) return ua;
             Object decodeAttr = PyExc.unicodeDecodeAttr(e, name);
             if (decodeAttr != null) return decodeAttr;
             if (e.type.userClass != null) {
-                Object m = ((PyClass) e.type.userClass).lookup(name);
+                Object m = id == 0 ? ((PyClass) e.type.userClass).lookup(name) : ((PyClass) e.type.userClass).lookup(symbols, id);
                 if (m instanceof PyFunction || m instanceof Closure) return new BoundPyMethod(m, e);
                 if (m instanceof Descriptors.Property)   // @property on a user exception class
                     return callSync(((Descriptors.Property) m).getter, new Object[]{e});
@@ -4014,7 +4194,10 @@ public final class Vm {
         // function attributes (func.attr, func.__name__)
         if (obj instanceof PyFunction || obj instanceof Closure) {
             PyFunction fn = obj instanceof Closure ? ((Closure) obj).fun : (PyFunction) obj;
-            if (fn.attrs != null && fn.attrs.containsKey(name)) return fn.attrs.get(name);
+            if (fn.attrs != null) {
+                Object attr = id == 0 ? fn.attrs.get(name) : fn.attrs.getSymbol(symbols, id);
+                if (attr != null) return attr;
+            }
             if (name.equals("__name__") || name.equals("__qualname__")) return fn.name();
             if (name.equals("__module__")) return "__main__";
             if (name.equals("__doc__")) return PyObj.NONE;
@@ -4030,6 +4213,31 @@ public final class Vm {
     }
 
     private void callInto(Object callable, Object[] args, String[] kwNames, Object[] kwValues) {
+        // CGI redirects only this virtual program. Normal builtin/host print stays native.
+        if (callable == PRINT_BUILTIN || callable instanceof HostFunction && callable == globals.get("print")) {
+            PyModule sys = loadedModules.get("sys");
+            Object redirected = sys == null ? null : sys.getAttr("_print");
+            if (redirected != null && redirected != PyObj.NONE && redirected != callable) {
+                callInto(redirected, args, kwNames, kwValues);
+                return;
+            }
+        }
+        // Keep the frequent integer min(a,b)/max(a,b) used by buffered I/O cheap.
+        if ((callable == Builtins.MIN || callable == Builtins.MAX) && kwNames.length == 0
+                && args.length == 2 && args[0] instanceof Long && args[1] instanceof Long) {
+            long a = (Long) args[0], b = (Long) args[1];
+            current.setTop((callable == Builtins.MIN ? a <= b : a >= b) ? args[0] : args[1]);
+            return;
+        }
+        if (callable == Builtins.ITER && kwNames.length == 0 && args.length == 1 && args[0] instanceof PyGen) {
+            current.setTop(args[0]);   // a generator is its own iterator
+            return;
+        }
+        // next(it) without a default needs no Python frame; next(it, default) catches StopIteration in Python.
+        if (callable instanceof PyFunction && ((PyFunction) callable).code == ioNextCode && args.length == 1 && kwNames.length == 0)
+            callable = NEXT_BUILTIN;
+        Object python = pythonBuiltin(callable, args, kwNames);
+        if (python != null) { callInto(python, args, kwNames, kwValues); return; }
         if (callable instanceof PyFunction) {
             PyFunction fn = (PyFunction) callable;
             if ((fn.code.prelude.scopeFlags & SCOPE_GENERATOR) != 0) {
@@ -4086,7 +4294,7 @@ public final class Vm {
                     throw PyException.typeError("can only inherit from classes");
                 }
             }
-            PyClass cls = new PyClass((String) args[1], baseList.toArray(new PyClass[0]));
+            PyClass cls = new PyClass((String) args[1], baseList.toArray(new PyClass[0]), symbols);
             if (nativeBase != null) cls.nativeBase = nativeBase;
             if (excBase != null) {
                 // create a PyExc.Type for this user exception, chained to its base,
@@ -4118,11 +4326,12 @@ public final class Vm {
                 current.returnOverride = exc;
                 return;
             }
-            PyInstance inst = new PyInstance(cls);
+            PyInstance inst = new PyInstance(cls, symbols);
             // subclass of a built-in: seed the native value from the argument
             if (cls.nativeBase != null) {
                 inst.nativeValue = cls.nativeBase.construct(this,
-                        args.length == 0 ? NO_ARGS : new Object[]{args[0]}, NO_KW_NAMES, NO_KW_VALUES);
+                        args.length == 0 || cls.nativeBase == BuiltinType.DICT && cls.lookup("__init__") != null
+                                ? NO_ARGS : new Object[]{args[0]}, NO_KW_NAMES, NO_KW_VALUES);
             }
             Object init = cls.lookup("__init__");
             if (init == null) {
@@ -4397,11 +4606,28 @@ public final class Vm {
             current.setTop(PyObj.NONE);
             return;
         }
+        if (callable == GETATTR_BUILTIN || callable == HASATTR_BUILTIN) {
+            boolean probe = callable == HASATTR_BUILTIN;
+            if (kwNames.length != 0 || args.length < 2 || args.length > (probe ? 2 : 3))
+                throw PyException.typeError("invalid attribute lookup arguments");
+            if (!(args[1] instanceof String)) throw PyException.typeError("attribute name must be string");
+            Object value;
+            try { value = loadAttr(args[0], (String) args[1]); }
+            catch (PyException error) {
+                if (!PyExc.isSub(exFrom(error).type, PyExc.ATTRIBUTE_ERROR)) throw error;
+                if (probe) { current.setTop(Boolean.FALSE); return; }
+                if (args.length == 3) { current.setTop(args[2]); return; }
+                throw error;
+            }
+            current.setTop(probe ? Boolean.TRUE : value);
+            return;
+        }
         if (callable == ALL_BUILTIN || callable == ANY_BUILTIN) {
             boolean wantAll = callable == ALL_BUILTIN;
             if (args.length != 1) throw PyException.typeError((wantAll ? "all" : "any") + " expected 1 argument");
-            java.util.List<Object> items = materialize(args[0]);
-            for (Object o : items) {
+            // Host iterators are consumed one item at a time, so the decision stops the iteration.
+            PyObj.Iter it = args[0] instanceof PyGen || args[0] instanceof PyInstance ? new PyObj.Iter(materialize(args[0])) : Ops.getIter(args[0]);
+            for (Object o; (o = it.next()) != PyObj.STOP_ITERATION;) {
                 boolean t = truthy(o);
                 if (wantAll && !t) { current.setTop(Boolean.FALSE); return; }
                 if (!wantAll && t) { current.setTop(Boolean.TRUE); return; }
@@ -4506,7 +4732,14 @@ public final class Vm {
         if (callable == NEXT_BUILTIN) {
             if (args.length != 1) throw PyException.typeError("next expected 1 argument");
             if (args[0] instanceof PyGen) { resumeGen((PyGen) args[0], PyGen.MODE_CALL, 0, PyObj.NONE); return; }
-            PyObj.Iter it = Ops.getIter(args[0]);
+            if (args[0] instanceof PyInstance) {
+                Object method = ((PyInstance) args[0]).cls.lookup("__next__");
+                if (method == null) throw PyException.typeError("object is not an iterator");
+                callInto(new BoundPyMethod(method, args[0]), NO_ARGS);
+                return;
+            }
+            if (!(args[0] instanceof PyObj.Iter)) throw PyException.typeError("object is not an iterator");
+            PyObj.Iter it = (PyObj.Iter) args[0];
             Object v = it.next();
             if (v == PyObj.STOP_ITERATION) throw new PyException("StopIteration", "", new Object[0]);
             current.setTop(v);
@@ -4537,7 +4770,7 @@ public final class Vm {
         if (callable instanceof PyExc.Type) {
             // instantiating an exception: ValueError("msg") etc.
             if (kwNames.length != 0) throw PyException.typeError("exceptions do not accept keyword arguments");
-            current.setTop(((PyExc.Type) callable).make(args));
+            current.setTop(bindSymbols(((PyExc.Type) callable).make(args)));
             return;
         }
         throw PyException.notImpl("calling a non-callable ("
@@ -4937,11 +5170,11 @@ public final class Vm {
      * some other way (instance dict, method, native value) or the getter is not a
      * Python function -- those paths stay on the fast in-place route.
      */
-    private Descriptors.Property suspendableProperty(Object obj, String name) {
+    private Descriptors.Property suspendableProperty(Object obj, int id) {
         if (!(obj instanceof PyInstance)) return null;
         PyInstance inst = (PyInstance) obj;
-        if (inst.attrs.get(name) != null) return null;      // instance attr wins here
-        Object m = inst.cls.lookup(name);
+        if (inst.attrs.getSymbol(symbols, id) != null) return null;      // instance attr wins here
+        Object m = inst.cls.lookup(symbols, id);
         if (!(m instanceof Descriptors.Property)) return null;
         Object g = ((Descriptors.Property) m).getter;
         return (g instanceof PyFunction || g instanceof Closure) ? (Descriptors.Property) m : null;

@@ -390,6 +390,55 @@ class TkPythonTest {
         return out.toByteArray();
     }
 
+    @Test void pilImagesUpdateExistingWidgetsAndSurviveJointSnapshot() throws Exception {
+        Host host = new Host(); TileTkDisplay tile = new TileTkDisplay(); host.tiles.put("screen-a", tile);
+        host.start("""
+                import tkinter as tk
+                from PIL import Image, ImageDraw, ImageTk
+                root = tk.Tk()
+                im = Image.new('RGBA', (12, 8), 'navy')
+                photo = ImageTk.PhotoImage(im, master=root)
+                label = tk.Label(root, image=photo)
+                label.pack()
+                canvas = tk.Canvas(root, width=40, height=20)
+                canvas.pack()
+                item = canvas.create_image(1, 2, image=photo, anchor='nw')
+                image_id = photo._id
+                armed = True
+                yieldJava()
+                ImageDraw.Draw(im).rectangle((0, 0, 5, 7), fill='red')
+                photo.paste(im)
+                assert photo._id == image_id
+                assert photo.get(2, 3) == (255, 0, 0)
+                assert photo.get(10, 3) == (0, 0, 128)
+                assert label['image'] == str(photo)
+                assert canvas.itemcget(item, 'image') == str(photo)
+                try:
+                    photo.paste(Image.new('RGB', (2, 2)))
+                    raise AssertionError('accepted wrong size')
+                except ValueError:
+                    pass
+                assert photo.get(2, 3) == (255, 0, 0)
+                updated = True
+                yieldJava()
+                root.destroy()
+                assert not root._images and not root._callbacks
+                passed = True
+                """);
+        host.runUntil("armed");
+        byte[] snapshot = host.vm.saveSnapshot(host.registry);
+        NBTTagCompound nbt = new NBTTagCompound(); tile.writeToNBT(nbt);
+        Host restored = new Host(); TileTkDisplay copy = new TileTkDisplay(); copy.readFromNBT(nbt);
+        restored.tiles.put("screen-a", copy);
+        restored.vm = Vm.fromSnapshot(snapshot, restored.globals, restored.registry);
+        assertEquals(tile.scene(), copy.scene());
+        restored.runUntil("updated");
+        assertEquals(1, copy.scene().images.size(), "paste reuses the original image");
+        assertEquals(2, copy.scene().display.items.stream().filter(i -> i.image != 0).count());
+        restored.runUntil("passed");
+        assertTrue(copy.scene().images.isEmpty());
+    }
+
     @Test void photoImagesFromDataFilesAndPixels() throws Exception {
         Host host = new Host(); TileTkDisplay tile = new TileTkDisplay(); host.tiles.put("screen-a", tile);
         java.awt.image.BufferedImage picture = new java.awt.image.BufferedImage(40, 30, java.awt.image.BufferedImage.TYPE_INT_ARGB);
@@ -1656,10 +1705,10 @@ class TkPythonTest {
             host.vm.globals.put("COMMAND", filename.substring(0, filename.length() - 3));
             // Observe completion of real widget setup without replacing the demo's event loop.
             String source = Files.readString(command);
-            var loop = java.util.regex.Pattern.compile("(?m)^([a-zA-Z_][\\w.]*)\\.mainloop\\(\\)$").matcher(source);
+            var loop = java.util.regex.Pattern.compile("(?m)^([\\t ]*)([a-zA-Z_][\\w.]*)\\.mainloop\\(\\)$").matcher(source);
             assertTrue(loop.find(), filename);
             host.vm.globals.put("SOURCE", loop.replaceFirst(java.util.regex.Matcher.quoteReplacement(
-                    "SHARED['root'] = " + loop.group(1) + "\n" + loop.group())));
+                    loop.group(1) + "SHARED['root'] = " + loop.group(2) + "\n" + loop.group())));
             try {
                 host.runUntil("passed");
                 assertTrue(display.application().tokens().isEmpty(), filename);

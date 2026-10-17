@@ -113,7 +113,7 @@ class _NullTty:
         print(text, end='')
     def print(self, *parts):
         print(*parts)
-    def read(self, *args):
+    def read(self, *args, **kwargs):
         raise OSError('no terminal attached')
 
 
@@ -137,7 +137,7 @@ class _JobTty:
         self.write(str(text) + end)
     def size(self):
         return self._shell.tty.size()
-    def read(self, *args):
+    def read(self, *args, **kwargs):
         raise OSError('a background job cannot read the terminal')
     def _screen(self, *args):
         raise OSError('a background job cannot draw on the terminal')
@@ -167,8 +167,9 @@ class Runtime:
                 if job['program'] == program and job['done']:
                     release(program)
                     _drop_callbacks(program)
-                    # The job leaves active and jobs in one go: a waiter that sees it gone
-                    # from active (a cooperative switch could fall between) finds no job.
+                    # The bookkeeping goes in one step: a waiter that sees the job gone from
+                    # active (a cooperative switch could fall anywhere in between) must also
+                    # find it gone from jobs and its exit record already written.
                     irq = __machine_disable_irq()
                     try:
                         self.active.pop(pid, None)
@@ -177,22 +178,22 @@ class Runtime:
                                 self.jobs.remove(job)
                             except ValueError:
                                 pass  # a concurrent shell reap already removed it
+                        if pid in self.children:
+                            # Do not keep a finished Thread, frames or GUI state alive just
+                            # because its parent has not collected the exit status yet.
+                            code = job['returncode']
+                            status = -code if code < 0 else (code & 255) << 8
+                            self.children[pid] = {'ppid': job['ppid'], 'status': status}
+                        # Orphans keep running, but no dead parent can wait for them.
+                        # PID 0 is the shell/root context; orphan exits are auto-reaped.
+                        for child_pid, child in list(self.children.items()):
+                            if child['ppid'] == pid:
+                                self.children.pop(child_pid, None)
+                        for child in list(self.active.values()):
+                            if child['ppid'] == pid:
+                                child['ppid'] = 0
                     finally:
                         __machine_enable_irq(irq)
-                    if pid in self.children:
-                        # Do not keep a finished Thread, frames or GUI state alive just
-                        # because its parent has not collected the exit status yet.
-                        code = job['returncode']
-                        status = -code if code < 0 else (code & 255) << 8
-                        self.children[pid] = {'ppid': job['ppid'], 'status': status}
-                    # Orphans keep running, but no dead parent can wait for them.
-                    # PID 0 is the shell/root context; orphan exits are auto-reaped.
-                    for child_pid, child in list(self.children.items()):
-                        if child['ppid'] == pid:
-                            self.children.pop(child_pid, None)
-                    for child in list(self.active.values()):
-                        if child['ppid'] == pid:
-                            child['ppid'] = 0
                     __program_drop_ops(program)
 
     def pid(self, program=None):
@@ -288,6 +289,7 @@ class Runtime:
         os._inherit_environment(program, prepared['env'])
         _set_cwd(program, prepared['cwd'])
         sys._contexts[program] = {'argv': list(prepared['args'])}
+        sys._contexts[program].update(prepared.get('stdio', {}))
         if background:
             _program._background.append(program)
         return job
@@ -446,7 +448,17 @@ def install(vfs, tty=None):
         _runtime = Runtime(vfs, tty)
     elif tty is not None:
         _runtime.tty = tty
+    import io
+    io.install(reader=_read_input)
     return _runtime
+
+
+def _read_input(prompt):
+    # Resolve input at call time, so imported functions and child threads obey
+    # their own program's foreground/background ownership.
+    if _program.in_background():
+        raise OSError('a background job cannot read the terminal')
+    return runtime().tty.read(prompt, interrupt=True)
 
 
 def runtime():

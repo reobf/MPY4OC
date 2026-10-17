@@ -68,3 +68,5 @@ mpy4oc.tk.merge.too_large=A display group can be at most 8×8 blocks.
 mpy4oc.tk.resolution.title=Display resolution
 mpy4oc.tk.resolution.limit=%s×%s blocks, up to %s×%s
 mpy4oc.tk.resolution.max=Maximum
+
+item.mpy4oc.webcard.name=Web Server Card

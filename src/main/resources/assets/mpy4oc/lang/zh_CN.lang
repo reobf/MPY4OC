@@ -68,3 +68,5 @@ mpy4oc.tk.merge.too_large=显示器组最大 8×8 块。
 mpy4oc.tk.resolution.title=显示器分辨率
 mpy4oc.tk.resolution.limit=%s×%s 块,上限 %s×%s
 mpy4oc.tk.resolution.max=最大
+
+item.mpy4oc.webcard.name=Web 服务卡

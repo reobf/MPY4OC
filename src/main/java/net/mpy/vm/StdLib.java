@@ -36,6 +36,26 @@ public final class StdLib {
         return StdLibData.MODULES::get;
     }
 
+    /** Small Python builtins use normal VM frames, so disk/terminal calls can park,
+     * yield to OC and survive snapshots without a synchronous Java call boundary. */
+    static PyModule installIoBuiltins(Map<String, Object> globals, net.mpy.qstr.SymbolPool symbols) {
+        byte[] data = StdLibData.MODULES.get("_builtin_io");
+        if (data == null) return null; // bootstrapping genStdlib from an older generated file
+        var code = net.mpy.loader.MpyLoader.load(data, new net.mpy.qstr.QstrPool());
+        PyModule module = new PyModule("_builtin_io", "", code, symbols);
+        for (var child : code.root.children) {
+            String name = code.qstr(child.prelude.simpleNameQstr);
+            if (!name.equals("open") && !name.equals("input") && !name.equals("next") && !name.startsWith("_")) continue;
+            PyFunction function = new PyFunction(child, code, null);
+            function.bindSymbols(symbols);
+            function.defScope = module.ns;
+            module.ns.put(name, function);
+            if (!name.startsWith("_")) globals.putIfAbsent(name, function);
+        }
+        module.ns.put("_next_raw", Vm.NEXT_BUILTIN);
+        return module;
+    }
+
     /** Install the Java primitives the frozen modules bind against. Hosts may
      *  overwrite __time_ms afterwards with their own clock. */
     public static void installPrimitives(Map<String, Object> globals) {
@@ -101,8 +121,10 @@ public final class StdLib {
             return new PyObj.Tuple(new Object[]{ m, (long) e });
         });
         globals.putIfAbsent("__jtype", (HostFunction) a -> typeName(a[0]));
-        globals.putIfAbsent("__re_exec", (HostFunction) a -> reExec((String) a[0], (String) a[1],
-                net.mpy.runtime.Ops.isTrue(a[2]), (int) (long) (Long) a[3]));
+        globals.putIfAbsent("__iter_native", (HostFunction) a -> a[0] instanceof PyGen ? a[0] : Ops.getIter(a[0]));
+        globals.putIfAbsent("__re_exec", (HostFunction) net.mpy.runtime.Regex::exec);
+        globals.putIfAbsent("__re_info", (HostFunction) net.mpy.runtime.Regex::info);
+        globals.putIfAbsent("__re_purge", (HostFunction) net.mpy.runtime.Regex::purge);
         globals.putIfAbsent("__struct_pack", (HostFunction) StdLib::structPack);
         globals.putIfAbsent("__struct_unpack", (HostFunction) a -> structUnpack((String) a[0], (PyObj.Bytes) a[1]));
         globals.putIfAbsent("__struct_calcsize", (HostFunction) a -> (long) fmtSize((String) a[0]));
@@ -187,6 +209,47 @@ public final class StdLib {
             return PyObj.NONE;
         });
         globals.putIfAbsent("__time_ms", (HostFunction) a -> (System.nanoTime() - T0) / 1_000_000L);
+        // The text-file codec of the frozen io module: whole buffers decoded and newline-
+        // translated in one call (see Methods.ioDecode), and text encoded with the character
+        // count CPython's write() returns, so no Python loop runs per character.
+        globals.putIfAbsent("__io_decode", (HostFunction) a -> {
+            byte[] data = a[0] instanceof PyObj.ByteArray ? ((PyObj.ByteArray) a[0]).toBytes() : ((PyObj.Bytes) a[0]).data;
+            return net.mpy.runtime.Methods.ioDecode(data, a[1], (String) a[2], ((Number) a[3]).longValue(),
+                    net.mpy.runtime.Ops.isTrue(a[4]), net.mpy.runtime.Ops.isTrue(a[5]));
+        });
+        // json: CPython's parser and serializer on the host (see net.mpy.runtime.Json).
+        globals.putIfAbsent("__pil", (HostFunction) net.mpy.runtime.PilImage::call);
+        // Civil UTC time is independent of the OC uptime clock used by sleep/timers.
+        globals.putIfAbsent("__datetime_now", (HostFunction) a -> System.currentTimeMillis() * 1000L);
+        globals.putIfAbsent("__json_loads", (HostFunction) a -> net.mpy.runtime.Json.loads((String) a[0],
+                a.length > 1 && Ops.isTrue(a[1]), a.length < 3 || Ops.isTrue(a[2])));
+        globals.putIfAbsent("__json_location", (HostFunction) a -> net.mpy.runtime.Json.location((String) a[0], ((Number) a[1]).intValue()));
+        globals.putIfAbsent("__json_dumps", (HostFunction) a -> net.mpy.runtime.Json.dumps(a[0], a[1], (String) a[2], (String) a[3],
+                Ops.isTrue(a[4]), Ops.isTrue(a[5]), Ops.isTrue(a[6]), Ops.isTrue(a[7]), a.length < 9 || Ops.isTrue(a[8])));
+        // random: one xorshift64 step on a plain long (the state as Python keeps it, possibly as
+        // an unsigned big int from an older save), with the value the caller needs: the top
+        // `bits` bits, the unsigned state modulo `mod`, or (neither) the whole unsigned state.
+        globals.putIfAbsent("__random_step", (HostFunction) a -> {
+            long x = a[0] instanceof BigInteger ? ((BigInteger) a[0]).longValue() : ((Number) a[0]).longValue();
+            x ^= x << 13;
+            x ^= x >>> 7;
+            x ^= x << 17;
+            long bits = ((Number) a[1]).longValue();
+            long mod = a[2] instanceof BigInteger ? 0 : ((Number) a[2]).longValue();
+            Object value;
+            if (bits > 0 && bits < 64) value = x >>> (64 - bits);
+            else if (bits <= 0 && mod > 0) value = Long.remainderUnsigned(x, mod);
+            else value = x >= 0 ? (Object) x : new BigInteger(Long.toUnsignedString(x));
+            return new PyObj.Tuple(new Object[] {x, value});
+        });
+        globals.putIfAbsent("__io_encode", (HostFunction) a -> {
+            String text = (String) a[0];
+            Object newline = a[1];
+            String written = newline instanceof String && !((String) newline).isEmpty() && !newline.equals("\n")
+                    ? text.replace("\n", (String) newline) : text;
+            return new PyObj.Tuple(new Object[] {new PyObj.Bytes(written.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                    (long) text.codePointCount(0, text.length())});
+        });
     }
 
     private interface D2D { double apply(double x); }
@@ -258,41 +321,6 @@ public final class StdLib {
         if (o instanceof BigInteger) return ((BigInteger) o).doubleValue();
         if (o instanceof Boolean) return (Boolean) o ? 1.0 : 0.0;
         throw net.mpy.runtime.PyException.typeError("can't convert to float");
-    }
-
-    // ---- re: java.util.regex behind a single primitive ----
-
-    private static final java.util.LinkedHashMap<String, java.util.regex.Pattern> RE_CACHE =
-            new java.util.LinkedHashMap<>(64, 0.75f, true) {
-                @Override protected boolean removeEldestEntry(Map.Entry<String, java.util.regex.Pattern> e) {
-                    return size() > 64;
-                }
-            };
-
-    private static synchronized java.util.regex.Pattern rePattern(String p) {
-        java.util.regex.Pattern pat = RE_CACHE.get(p);
-        if (pat == null) {
-            try { pat = java.util.regex.Pattern.compile(p); }
-            catch (java.util.regex.PatternSyntaxException e) {
-                throw net.mpy.runtime.PyException.valueError("bad regular expression: " + e.getDescription());
-            }
-            RE_CACHE.put(p, pat);
-        }
-        return pat;
-    }
-
-    /** None (null) or a flat span list [s0,e0,s1,e1,...] (-1 for unmatched groups). */
-    private static Object reExec(String pattern, String s, boolean anchored, int pos) {
-        java.util.regex.Matcher m = rePattern(pattern).matcher(s);
-        m.region(pos, s.length());
-        boolean hit = anchored ? m.lookingAt() : m.find();
-        if (!hit) return PyObj.NONE;
-        PyObj.PyList spans = new PyObj.PyList();
-        for (int g = 0; g <= m.groupCount(); g++) {
-            spans.items.add((long) m.start(g));
-            spans.items.add((long) m.end(g));
-        }
-        return spans;
     }
 
     // ---- struct: a ByteBuffer-backed pack/unpack engine ----

@@ -118,6 +118,30 @@ class MpyosShellTest {
                 """);
     }
 
+    @Test void standardInputUsesLineEditorAndDistinguishesEofFromInterrupt() throws Exception {
+        run("""
+                paste('hello')
+                enter()
+                assert input('Value: ') == 'hello'
+                enter()
+                assert input() == ''
+                key(4)
+                try:
+                    input()
+                    raise AssertionError('expected EOF')
+                except EOFError:
+                    pass
+                key(3)
+                try:
+                    input()
+                    raise AssertionError('expected interrupt')
+                except KeyboardInterrupt:
+                    pass
+                assert not signals
+                passed = True
+                """);
+    }
+
     @Test void tabCompletesListsCandidatesAndRestoresTheColoredShellPrompt() throws Exception {
         run("""
                 sh.cwd = '/home'
@@ -411,6 +435,16 @@ class MpyosShellTest {
                 cand = sh._complete(text, len('python "space dir/ins'))[0]
                 assert cand[0] == text, cand
                 assert cand[1] == len('python "space dir/inside.py"'), cand
+                passed = True
+                """);
+    }
+
+    @Test void batchedWritesPreserveAllFourControlCharacters() throws Exception {
+        run("""
+                tty.write('abc\\rZ\\tQ\\b!\\nlast')
+                assert gpu.rows[0].startswith('Z   !'), gpu.rows[0]
+                assert gpu.rows[1].startswith('last'), gpu.rows[1]
+                assert (tty.x, tty.y) == (5, 2)
                 passed = True
                 """);
     }

@@ -41,7 +41,8 @@ final class Snapshot {
             T_CELL = 25, T_CLOSURE = 26, T_GEN = 27, T_CLASS = 28, T_INSTANCE = 29,
             T_BOUNDPYM = 30, T_NEXT_BUILTIN = 31, T_LIST_BUILTIN = 32, T_BUILD_CLASS = 33, T_SUPER_BUILTIN = 34,
             T_MODULE = 35, T_SUM_BUILTIN = 36,
-            T_USER_EXCTYPE = 51, T_USER_EXCINSTANCE = 52;
+            T_USER_EXCTYPE = 51, T_USER_EXCINSTANCE = 52,
+            T_RANGE_ITER = 69;   // 37-50 and 53-68 are written as literals below
 
     /** The nearest built-in exception type name in a user excType's base chain,
      *  i.e. the registered PyExc.TYPES ancestor (Exception, ValueError, ...). */
@@ -233,6 +234,14 @@ final class Snapshot {
                 var s = ((PyObj.PySet) v).items;
                 out.writeInt(s.size());
                 for (Object o : s) writeValue(o);
+                return;
+            }
+            if (v instanceof PyObj.Iter && ((PyObj.Iter) v).range != null) {
+                if (ref(v)) return;
+                PyObj.Iter it = (PyObj.Iter) v;
+                out.writeByte(T_RANGE_ITER);
+                out.writeLong(it.range.start); out.writeLong(it.range.stop); out.writeLong(it.range.step);
+                out.writeLong(it.index);
                 return;
             }
             if (v instanceof PyObj.Iter) {
@@ -487,6 +496,7 @@ final class Snapshot {
     // ==== reader ==============================================================
 
     static final class Reader {
+        private final net.mpy.qstr.SymbolPool symbols;
         private final DataInputStream in;
         private final MpyModule module;   // the main module
         private final HostRegistry hosts;
@@ -500,7 +510,8 @@ final class Snapshot {
         private final List<Frame> framesById = new ArrayList<>();
         private final java.util.Map<Integer, java.util.Map<String, Object>> nsById = new java.util.HashMap<>();
 
-        Reader(DataInputStream in, MpyModule module, HostRegistry hosts) {
+        Reader(DataInputStream in, MpyModule module, HostRegistry hosts, net.mpy.qstr.SymbolPool symbols) {
+            this.symbols = symbols;
             this.in = in; this.module = module; this.hosts = hosts;
         }
 
@@ -549,7 +560,7 @@ final class Snapshot {
             if (kind == 2) return nsById.get(in.readInt());   // back-ref
             int nsId = in.readInt();
             int nEG = in.readInt();
-            java.util.Map<String, Object> ns = new java.util.HashMap<String, Object>();
+            java.util.Map<String, Object> ns = new net.mpy.qstr.SymbolMap(symbols);
             nsById.put(nsId, ns);              // register before contents (cycles)
             for (int i = 0; i < nEG; i++) {
                 String k = readStr(in);
@@ -621,6 +632,12 @@ final class Snapshot {
                     for (int i = 0; i < n; i++) it.items.add(readValue());
                     return it;
                 }
+                case T_RANGE_ITER: {
+                    PyObj.Iter it = new PyObj.Iter(new PyObj.Range(in.readLong(), in.readLong(), in.readLong()));
+                    it.index = in.readLong();
+                    byId.add(it);
+                    return it;
+                }
                 case T_SLICE: {
                     Object a = readValue(), b = readValue(), c = readValue();
                     return new PyObj.Slice(a, b, c);
@@ -674,7 +691,7 @@ final class Snapshot {
                     int nb = in.readInt();
                     PyClass[] bases = new PyClass[nb];
                     for (int i = 0; i < nb; i++) bases[i] = (PyClass) readValue();
-                    PyClass cls = new PyClass(cname, bases);
+                    PyClass cls = new PyClass(cname, bases, symbols);
                     if (!nbName.isEmpty()) cls.nativeBase = BuiltinType.byName(nbName);
                     if (!excBaseName.isEmpty()) {
                         // rebuild the excType: prefer a user exc base already among bases,
@@ -693,7 +710,7 @@ final class Snapshot {
                     // Class methods defined by exec retain their namespace. That
                     // namespace can already contain this instance and bound timer
                     // callbacks to it, so publish a real object before reading cls.
-                    PyInstance inst = new PyInstance(null);
+                    PyInstance inst = new PyInstance(null, symbols);
                     byId.add(inst);
                     inst.cls = (PyClass) readValue();
                     boolean hasNative = in.readBoolean();
@@ -762,7 +779,7 @@ final class Snapshot {
                     boolean initializing = in.readBoolean();
                     int idx = in.readInt();
                     MpyModule fm = idx < 0 ? null : moduleTable[idx];
-                    PyModule pm = new PyModule(name, root, fm); // ctor links fm.ns
+                    PyModule pm = new PyModule(name, root, fm, symbols); // ctor links fm.ns
                     pm.initializing = initializing;
                     byId.add(pm);
                     int n = in.readInt();
@@ -817,6 +834,7 @@ final class Snapshot {
                         for (int i = 0; i < nk; i++) { Object k = readValue(); Object vv = readValue(); kwd.put(k, vv); }
                     }
                     PyFunction fn = new PyFunction(code, code.module, defs, kwd);
+                    fn.bindSymbols(symbols);
                     if (in.readByte() == 1) {
                         fn.defSandbox = in.readBoolean();
                         fn.defScope = readNs();
@@ -829,6 +847,10 @@ final class Snapshot {
                     String id = readStr(in);
                     HostFunction fn = hosts == null ? null : hosts.functionFor(id);
                     if (fn == null) {
+                        // These formerly host-backed builtins now need VM descriptor dispatch.
+                        // Preserve old snapshots, including aliases captured in user objects.
+                        if ("getattr".equals(id)) return Vm.GETATTR_BUILTIN;
+                        if ("hasattr".equals(id)) return Vm.HASATTR_BUILTIN;
                         throw new IllegalStateException("cannot restore host function id '" + id + "': "
                                 + (hosts == null ? "no HostRegistry was supplied"
                                                  : "no such id in the supplied HostRegistry"));

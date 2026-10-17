@@ -1,0 +1,12 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('webAeBrowser', JavaExec) {
+            dependsOn testClasses
+            classpath = sourceSets.test.runtimeClasspath
+            mainClass = 'reobf.mpy4oc.main.arch.WebAeTest'
+            javaLauncher = tasks.test.javaLauncher
+            workingDir = projectDir
+            jvmArgs '-Djava.awt.headless=true'
+        }
+    }
+}

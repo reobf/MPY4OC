@@ -235,6 +235,30 @@ public final class Methods {
                 out.write(part, 0, part.length);
             }
             return new PyObj.Bytes(out.toByteArray()); });
+        // find/rfind/index/rindex/count/startswith/endswith on bytes and bytearray take a
+        // bytes-like value or one byte, with CPython's optional start and end (slice bounds).
+        for (Map<String, Impl> table : java.util.List.of(BYTES, BYTEARRAY)) {
+            table.put("find", (s, a) -> { arity(a, 1, 3, "find"); return (long) bfind(bytesOf(s), needle(a[0]), a, false); });
+            table.put("rfind", (s, a) -> { arity(a, 1, 3, "rfind"); return (long) bfind(bytesOf(s), needle(a[0]), a, true); });
+            table.put("index", (s, a) -> { arity(a, 1, 3, "index");
+                int i = bfind(bytesOf(s), needle(a[0]), a, false);
+                if (i < 0) throw PyException.valueError("subsection not found");
+                return (long) i; });
+            table.put("rindex", (s, a) -> { arity(a, 1, 3, "rindex");
+                int i = bfind(bytesOf(s), needle(a[0]), a, true);
+                if (i < 0) throw PyException.valueError("subsection not found");
+                return (long) i; });
+            table.put("count", (s, a) -> { arity(a, 1, 3, "count");
+                byte[] hay = bytesOf(s), sub = needle(a[0]);
+                int start = bound(a, 1, hay.length, 0), end = bound(a, 2, hay.length, hay.length);
+                if (start > end) return 0L;
+                if (sub.length == 0) return (long) (end - start + 1);
+                long c = 0; int i = start;
+                while ((i = bindex(hay, sub, i, end)) >= 0) { c++; i += sub.length; }
+                return c; });
+            table.put("startswith", (s, a) -> { arity(a, 1, 3, "startswith"); return baffix(bytesOf(s), a, false); });
+            table.put("endswith", (s, a) -> { arity(a, 1, 3, "endswith"); return baffix(bytesOf(s), a, true); });
+        }
         // ---- bytearray (mutable) ----
         BYTEARRAY.put("append", (s, a) -> { arity(a, 1, 1, "append");
             long v = asInt(a[0]);
@@ -405,6 +429,74 @@ public final class Methods {
         return out.toString();
     }
 
+    /** For the frozen io module (its text files): decode from the front of data as far as can
+     *  be decided, with the newline mode (None: universal newlines, else "", "\n", "\r" or
+     *  "\r\n" as TextIOWrapper takes them) and stopping at limit code points (-1: none) or,
+     *  in line mode, after the first line terminator. Returns (text, bytes consumed, code
+     *  points produced, done). An incomplete sequence, or a \r whose \n may still come, is
+     *  left unconsumed until eof says no more data follows; the caller then reads on. */
+    public static PyObj.Tuple ioDecode(byte[] data, Object newline, String errors, long limit, boolean line, boolean eof) {
+        boolean universal = newline == null || newline == PyObj.NONE;
+        String mode = universal ? "" : (String) newline;
+        boolean holdCr = universal || (line && (mode.isEmpty() || mode.equals("\r\n")));
+        StringBuilder out = new StringBuilder(Math.min(data.length, 1 << 16));
+        int n = data.length, i = 0;
+        long produced = 0;
+        boolean done = false;
+        while (i < n) {
+            if (limit >= 0 && produced >= limit) { done = true; break; }
+            int b = data[i] & 0xFF, code, len;
+            if (b < 0x80) { code = b; len = 1; }
+            else {
+                int need = b < 0xC2 ? 0 : b < 0xE0 ? 1 : b < 0xF0 ? 2 : b < 0xF5 ? 3 : 0;
+                if (need == 0) {
+                    int before = out.length();
+                    decodeError("utf-8", data, i, i + 1, "invalid start byte", errors, out);
+                    if (out.length() > before) produced++;
+                    i++;
+                    continue;
+                }
+                int low = b == 0xE0 ? 0xA0 : b == 0xF0 ? 0x90 : 0x80, high = b == 0xED ? 0x9F : b == 0xF4 ? 0x8F : 0xBF;
+                code = b & (need == 1 ? 0x1F : need == 2 ? 0x0F : 0x07);
+                int j = 1;
+                String reason = null;
+                for (; j <= need; j++) {
+                    if (i + j >= n) { reason = "unexpected end of data"; break; }
+                    int c = data[i + j] & 0xFF;
+                    if (j == 1 ? c < low || c > high : (c & 0xC0) != 0x80) { reason = "invalid continuation byte"; break; }
+                    code = code << 6 | c & 0x3F;
+                }
+                if (reason != null) {
+                    if (reason.startsWith("unexpected") && !eof) break;   // the rest of the sequence may still come
+                    int end = reason.startsWith("unexpected") ? n : i + j;
+                    int before = out.length();
+                    decodeError("utf-8", data, i, end, reason, errors, out);
+                    if (out.length() > before) produced++;
+                    i = end;
+                    continue;
+                }
+                len = need + 1;
+            }
+            if (code == '\r' && holdCr) {
+                if (i + 1 >= n && !eof) break;                  // whether a \n follows is not known yet
+                boolean crlf = i + 1 < n && data[i + 1] == '\n';
+                if (universal) {                                // \r\n and a lone \r both read as \n
+                    out.append('\n'); produced++; i += crlf ? 2 : 1;
+                    if (line) { done = true; break; }
+                    continue;
+                }
+                out.append('\r'); produced++; i++;              // "" or "\r\n": kept as it is
+                if (crlf && (limit < 0 || produced < limit)) { out.append('\n'); produced++; i++; }
+                if (mode.isEmpty() || crlf) { done = true; break; }
+                continue;
+            }
+            out.appendCodePoint(code); produced++; i += len;
+            if (line && ((code == '\n' && (universal || mode.isEmpty() || mode.equals("\n")))
+                    || (code == '\r' && mode.equals("\r")))) { done = true; break; }
+        }
+        return new PyObj.Tuple(new Object[] {out.toString(), (long) i, produced, done});
+    }
+
     /** Apply the error handler to data[start:end), or raise. */
     private static void decodeError(String encoding, byte[] data, int start, int end, String reason, String errors, StringBuilder out) {
         switch (errors) {
@@ -446,6 +538,57 @@ public final class Methods {
         if (start > end || end - start < sub.length()) return -1;
         int i = last ? str.lastIndexOf(sub, end - sub.length()) : str.indexOf(sub, start);
         return i < start || i + sub.length() > end ? -1 : i;
+    }
+    private static byte[] bytesOf(Object o) {
+        return o instanceof PyObj.ByteArray ? ((PyObj.ByteArray) o).toBytes() : ((PyObj.Bytes) o).data;
+    }
+    /** The thing searched for in bytes: bytes, bytearray or a single byte value. */
+    private static byte[] needle(Object o) {
+        if (o instanceof PyObj.Bytes || o instanceof PyObj.ByteArray) return bytesOf(o);
+        if (o instanceof Long) {
+            long v = (Long) o;
+            if (v < 0 || v > 255) throw PyException.valueError("byte must be in range(0, 256)");
+            return new byte[] {(byte) v};
+        }
+        throw PyException.typeError("argument should be integer or bytes-like object, not '" + typeName(o) + "'");
+    }
+    /** First index of sub in hay at or after from, with the match ending by to; -1 if none. */
+    private static int bindex(byte[] hay, byte[] sub, int from, int to) {
+        for (int i = from; i + sub.length <= to; i++) {
+            int k = 0;
+            while (k < sub.length && hay[i + k] == sub[k]) k++;
+            if (k == sub.length) return i;
+        }
+        return -1;
+    }
+    private static int bfind(byte[] hay, byte[] sub, Object[] a, boolean last) {
+        int n = hay.length, start = bound(a, 1, n, 0), end = bound(a, 2, n, n);
+        if (start > end || end - start < sub.length) return -1;
+        if (!last) return bindex(hay, sub, start, end);
+        for (int i = end - sub.length; i >= start; i--) {
+            int k = 0;
+            while (k < sub.length && hay[i + k] == sub[k]) k++;
+            if (k == sub.length) return i;
+        }
+        return -1;
+    }
+    private static boolean baffix(byte[] data, Object[] a, boolean suffix) {
+        String name = suffix ? "endswith" : "startswith";
+        java.util.List<Object> options = a[0] instanceof PyObj.Tuple
+                ? java.util.Arrays.asList(((PyObj.Tuple) a[0]).items) : java.util.Collections.singletonList(a[0]);
+        int n = data.length, start = bound(a, 1, n, 0), end = bound(a, 2, n, n);
+        for (Object option : options) {
+            if (!(option instanceof PyObj.Bytes) && !(option instanceof PyObj.ByteArray)) throw PyException.typeError(a[0] instanceof PyObj.Tuple
+                    ? "tuple for " + name + " must only contain bytes-like objects, not " + typeName(option)
+                    : name + " first arg must be bytes or a tuple of bytes, not " + typeName(option));
+            byte[] sub = bytesOf(option);
+            if (start > end || end - start < sub.length) continue;
+            int at = suffix ? end - sub.length : start;
+            int k = 0;
+            while (k < sub.length && data[at + k] == sub[k]) k++;
+            if (k == sub.length) return true;
+        }
+        return false;
     }
     private static boolean affix(String str, Object[] a, boolean suffix) {
         String name = suffix ? "endswith" : "startswith";

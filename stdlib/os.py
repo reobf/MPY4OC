@@ -3,6 +3,41 @@ import _program
 
 urandom = __os_urandom
 
+name = 'posix'
+sep = '/'
+altsep = None
+pathsep = ':'
+curdir = '.'
+pardir = '..'
+extsep = '.'
+linesep = '\n'
+
+class PathLike:
+    def __fspath__(self):
+        raise NotImplementedError
+
+def fspath(path):
+    if isinstance(path, (str, bytes)):
+        return path
+    method = getattr(path, '__fspath__', None)
+    if method is None:
+        raise TypeError('expected str, bytes or os.PathLike object')
+    result = method()
+    if not isinstance(result, (str, bytes)):
+        raise TypeError('__fspath__() must return str or bytes')
+    return result
+
+def fsencode(filename):
+    value = fspath(filename)
+    return value if isinstance(value, bytes) else value.encode('utf-8')
+
+def fsdecode(filename):
+    value = fspath(filename)
+    return value.decode('utf-8') if isinstance(value, bytes) else value
+
+# Pure path manipulation also works on hosts that have no filesystem installed.
+import posixpath as path
+
 def uname():
     return ("mpy-java", "mpy-java", "1.0", "1.0", "java")
 

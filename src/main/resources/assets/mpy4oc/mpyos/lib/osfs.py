@@ -34,8 +34,12 @@ def install(os_module, vfs):
     """Wire the shared Vfs and plant the filesystem API into `os_module`."""
     global _vfs
     _vfs = vfs
-    import ospath
-    os_module.path = ospath
+    import posixpath
+    os_module.path = posixpath
+    os_module._realpath = _abs
+    os_module._path_identity = _path_identity
+    os_module._path_exists = _path_exists
+    os_module._path_mode = _path_mode
     os_module.sep = sep
     os_module.getcwd = getcwd
     os_module.chdir = chdir
@@ -50,6 +54,8 @@ def install(os_module, vfs):
     os_module.statvfs = statvfs
     import _process
     _process.install(vfs)
+    import io
+    io.install(opener=_open_raw)
 
 
 def shared_vfs():
@@ -63,18 +69,82 @@ def _v():
     return _vfs
 
 
+class _RawFile:
+    """Keep the original disk with its handle, even when mounts/cwd change."""
+    def __init__(self, disk, path, mode):
+        self.disk = disk
+        self.handle = disk.open(path, mode)
+
+    def read(self, count):
+        result = self.disk._read_chunk(self.handle, count)
+        if result is None:
+            return b''
+        return result.encode('utf-8') if isinstance(result, str) else result
+
+    def write(self, data):
+        if not self.disk._write_chunk(self.handle, data):
+            raise OSError('file write failed')
+
+    def seek(self, offset, whence):
+        return self.disk.seek(self.handle, ('set', 'cur', 'end')[whence], offset)
+
+    def tell(self):
+        return self.seek(0, 1)
+
+    def close(self):
+        self.disk.close(self.handle)
+
+
+def _open_raw(path, mode):
+    if not path:
+        raise FileNotFoundError('empty file name')
+    absolute = _abs(path)
+    vfs = _v()
+    if vfs.is_directory(absolute):
+        raise IsADirectoryError('is a directory: ' + path)
+    disk, local = vfs._route(absolute)
+    if mode == 'rb' and not disk.exists(local):
+        raise FileNotFoundError('no such file: ' + path)
+    if mode != 'rb' and disk.is_readonly():
+        raise PermissionError('read-only filesystem: ' + path)
+    return _RawFile(disk, local, mode)
+
+
 def _program_now():
     return _program.current() if _program is not None and _cwds else None
 
 
 def _abs(path):
     """Absolute, normalized path; relative resolves against os's cwd."""
+    import os
+    path = os.fspath(path)
+    if not isinstance(path, str):
+        raise TypeError('virtual filesystem paths must be str')
+    if '\x00' in path:
+        raise ValueError('embedded null byte')
     cwd = getcwd()
-    if not path or path == ".":
+    if not path:
+        raise FileNotFoundError('empty file name')
+    if path == ".":
         return cwd
     if path.startswith("/"):
         return fs.normalize(path)
     return fs.normalize(cwd + "/" + path)
+
+
+def _path_identity(path):
+    disk, local = _v()._route(_abs(path))
+    return disk.address, local
+
+
+def _path_exists(path):
+    return _v().exists(_abs(path))
+
+
+def _path_mode(path):
+    path = _abs(path)
+    vfs = _v()
+    return (0x4000 if vfs.is_directory(path) else 0x8000) if vfs.exists(path) else 0
 
 
 # -- directory state ---------------------------------------------------------
@@ -133,7 +203,7 @@ def stat(path):
     t = _abs(path)
     v = _v()
     if not v.exists(t):
-        raise OSError("stat: no such file or directory: " + t)
+        raise FileNotFoundError("stat: no such file or directory: " + t)
     is_dir = v.is_directory(t)
     mode = 0x4000 if is_dir else 0x8000
     size = 0 if is_dir else (v.size(t) or 0)
@@ -157,7 +227,7 @@ def mkdir(path):
     t = _abs(path)
     v = _v()
     if v.exists(t):
-        raise OSError("mkdir: already exists: " + t)
+        raise FileExistsError("mkdir: already exists: " + t)
     if not v.make_directory(t):
         raise OSError("mkdir: cannot create: " + t)
 
@@ -168,7 +238,7 @@ def makedirs(path, exist_ok=False):
     if v.exists(t):
         if exist_ok and v.is_directory(t):
             return
-        raise OSError("makedirs: already exists: " + t)
+        raise FileExistsError("makedirs: already exists: " + t)
     # build each missing level; OC's makeDirectory is single-level on some
     # filesystems, so walk the segments explicitly
     parts = [p for p in t.split("/") if p]
@@ -177,7 +247,7 @@ def makedirs(path, exist_ok=False):
         cur = cur + "/" + p
         if v.exists(cur):
             if not v.is_directory(cur):
-                raise OSError("makedirs: not a directory: " + cur)
+                raise NotADirectoryError("makedirs: not a directory: " + cur)
             continue
         if not v.make_directory(cur):
             raise OSError("makedirs: cannot create: " + cur)
@@ -200,9 +270,9 @@ def remove(path):
     t = _abs(path)
     v = _v()
     if not v.exists(t):
-        raise OSError("remove: no such file: " + t)
+        raise FileNotFoundError("remove: no such file: " + t)
     if v.is_directory(t):
-        raise OSError("remove: is a directory (use rmdir): " + t)
+        raise IsADirectoryError("remove: is a directory (use rmdir): " + t)
     if not v.remove(t):
         raise OSError("remove: cannot remove: " + t)
 

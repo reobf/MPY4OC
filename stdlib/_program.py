@@ -109,16 +109,26 @@ def stop(program):
 def ended(program):
     """program is over: no longer background, and no longer stopping once its tasks have
     all ended (one still computing keeps the request, and stops at its next poll point)."""
-    while program in _background:
-        _background.remove(program)
-    while program in _waited:
-        _waited.remove(program)
-    if not live(program):
-        while program in _stopping:
-            _stopping.remove(program)
+    _discard(_background, program)
+    _discard(_waited, program)
     for hook in list(_on_end):
         hook(program)
+    # Off the stopping list only once the hooks have run: a program still listed is one
+    # whose clean-up may be pending, and the shell's next reap calls here again.
+    if not live(program):
+        _discard(_stopping, program)
     _wake_end_waiters()
+
+
+def _discard(items, program):
+    # Remove every entry for program. list.remove is one VM step, so another thread
+    # (two threads winding up the same program) cannot take the entry between a
+    # membership test and the removal: the removal itself is the test.
+    while True:
+        try:
+            items.remove(program)
+        except ValueError:
+            return
 
 
 def stopping(program=None):
@@ -183,7 +193,7 @@ def wait_end(ready, deadline=None, wake_on_signal=False):
 
 
 def _wake_end_waiters():
-    for waiter in _end_waiters:
+    for waiter in list(_end_waiters):   # waiters leave the list as they wake
         __unpark(waiter)
 
 

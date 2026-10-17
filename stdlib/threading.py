@@ -90,15 +90,22 @@ class Lock:
             self._waiters.remove(me)
             # Leaving without the lock (timed out, or interrupted at the park) while the
             # lock is free: the wake-up meant for us must reach the next waiter.
-            if not self._flag[0] and self._waiters:
-                _program.unpark(self._waiters[0])
+            if not self._flag[0]:
+                self._wake_next()
+
+    def _wake_next(self):
+        # Take a private snapshot in one native slice. A waiter can leave between
+        # bytecodes, including between testing the shared list and indexing it.
+        # A waiter that leaves after this snapshot forwards the wake-up above.
+        first = self._waiters[:1]
+        if first:
+            _program.unpark(first[0])
 
     def release(self):
         if not self._flag[0]:
             raise RuntimeError("release unlocked lock")
         self._flag[0] = False
-        if self._waiters:
-            _program.unpark(self._waiters[0])
+        self._wake_next()
 
     def locked(self):
         return self._flag[0]

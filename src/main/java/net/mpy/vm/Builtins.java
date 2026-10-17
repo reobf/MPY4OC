@@ -34,7 +34,7 @@ public final class Builtins {
         globals.putIfAbsent("abs", (HostFunction) a -> abs(a[0]));
         globals.putIfAbsent("str", BuiltinType.STR);
         globals.putIfAbsent("repr", Vm.REPR_BUILTIN);
-        globals.putIfAbsent("next", Vm.NEXT_BUILTIN);
+        // next() is a Python trampoline so a default can catch generator exhaustion.
         globals.putIfAbsent("super", Vm.SUPER_BUILTIN);
         globals.putIfAbsent("set", BuiltinType.SET);
         globals.putIfAbsent("int", BuiltinType.INT);
@@ -61,8 +61,8 @@ public final class Builtins {
             return (long) (b[0] & 0xff);
         });
         globals.putIfAbsent("bool", BuiltinType.BOOL);
-        globals.putIfAbsent("min", (HostFunction) a -> minmax(a, true));
-        globals.putIfAbsent("max", (HostFunction) a -> minmax(a, false));
+        globals.putIfAbsent("min", MIN);
+        globals.putIfAbsent("max", MAX);
         globals.putIfAbsent("sum", Vm.SUM_BUILTIN);
         // round(): user instances go to their __round__ (see Vm.callHost)
         globals.putIfAbsent("round", new DunderHostFunction("__round__", Builtins::round));
@@ -138,18 +138,8 @@ public final class Builtins {
         globals.putIfAbsent("map", Vm.MAP_BUILTIN);
         globals.putIfAbsent("filter", Vm.FILTER_BUILTIN);
         // ---- attribute access --------------------------------------------
-        globals.putIfAbsent("hasattr", (HostFunction) a -> {
-            try { return getAttr(a[0], (String) a[1]) != null; }
-            catch (PyException e) { return Boolean.FALSE; }
-        });
-        globals.putIfAbsent("getattr", (HostFunction) a -> {
-            Object r;
-            try { r = getAttr(a[0], (String) a[1]); }
-            catch (PyException e) { if (a.length >= 3) return a[2]; throw e; }
-            if (r == null) { if (a.length >= 3) return a[2];
-                throw new PyException("AttributeError", "no attribute '" + a[1] + "'"); }
-            return r;
-        });
+        globals.putIfAbsent("hasattr", Vm.HASATTR_BUILTIN);
+        globals.putIfAbsent("getattr", Vm.GETATTR_BUILTIN);
         globals.putIfAbsent("setattr", (HostFunction) a -> {
             if (a[0] instanceof PyModule) { ((PyModule) a[0]).setAttr((String) a[1], a[2]); return PyObj.NONE; }
             if (a[0] instanceof PyInstance) { ((PyInstance) a[0]).attrs.put((String) a[1], a[2]); return PyObj.NONE; }
@@ -241,12 +231,7 @@ public final class Builtins {
             for (int i = src.size() - 1; i >= 0; i--) out.items.add(src.get(i));
             return out;
         });
-        globals.putIfAbsent("iter", (HostFunction) a -> {
-            PyObj.Iter it = Ops.getIter(a[0]);
-            PyObj.PyList buf = new PyObj.PyList();  // materialize (VM iterators aren't first-class yet)
-            Object v; while ((v = it.next()) != PyObj.STOP_ITERATION) buf.items.add(v);
-            return Ops.getIter(buf);
-        });
+        globals.putIfAbsent("iter", ITER);
         globals.putIfAbsent("staticmethod", (HostFunction) a -> new Descriptors.StaticMethod(a[0]));
         globals.putIfAbsent("classmethod", (HostFunction) a -> new Descriptors.ClassMethod(a[0]));
         globals.putIfAbsent("property", (HostFunction) a -> new Descriptors.Property(
@@ -309,6 +294,9 @@ public final class Builtins {
     }
 
     static Object isInstance(Object v, Object typeSpec) {
+        // bytearray keeps its VM-dispatched constructor so iterables can execute
+        // Python code, but it is also a valid type argument (as bytes is).
+        if (typeSpec == Vm.BYTEARRAY_BUILTIN) return v instanceof PyObj.ByteArray;
         if (typeSpec instanceof PyObj.Tuple) {
             for (Object t : ((PyObj.Tuple) typeSpec).items)
                 if (isInstance(v, t) == Boolean.TRUE) return Boolean.TRUE;
@@ -587,6 +575,10 @@ public final class Builtins {
         throw PyException.typeError("bad operand type for abs()");
     }
 
+    static final HostFunction MIN = a -> minmax(a, true);
+    static final HostFunction MAX = a -> minmax(a, false);
+    static final HostFunction ITER = a -> Ops.getIter(a[0]);
+
     private static Object minmax(Object[] a, boolean wantMin) {
         Iterable<Object> seq;
         if (a.length == 1) {
@@ -602,10 +594,24 @@ public final class Builtins {
         boolean first = true;
         for (Object x : seq) {
             if (first) { best = x; first = false; continue; }
-            int c = Ops.compare(x, best);
-            if (wantMin ? c < 0 : c > 0) best = x;
+            if (better(x, best, wantMin)) best = x;
         }
         if (first) throw PyException.valueError((wantMin ? "min" : "max") + "() arg is an empty sequence");
         return best;
+    }
+
+    /** Python's {@code x < best} / {@code x > best}: with a float involved both are false whenever
+     *  NaN takes part, and -0.0 is not less than 0.0; everything else compares as usual. */
+    private static boolean better(Object x, Object best, boolean wantMin) {
+        if ((x instanceof Double || best instanceof Double) && Ops.isNumeric(x) && Ops.isNumeric(best)) {
+            double a = asDouble(x), b = asDouble(best);
+            return wantMin ? a < b : a > b;
+        }
+        int c = Ops.compare(x, best);
+        return wantMin ? c < 0 : c > 0;
+    }
+
+    private static double asDouble(Object o) {
+        return o instanceof Boolean ? ((Boolean) o ? 1 : 0) : ((Number) o).doubleValue();
     }
 }

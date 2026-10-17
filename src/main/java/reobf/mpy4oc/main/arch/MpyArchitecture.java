@@ -803,7 +803,7 @@ public class MpyArchitecture implements Architecture {
         if (!nbt.getBoolean("hasVm")) return;
         try {
             byte[] snap = decompress(nbt.getByteArray("vm"));
-            Map<String, Object> globals = new LinkedHashMap<String, Object>();
+            Map<String, Object> globals = new net.mpy.qstr.SymbolMap();
             hosts = HostRegistry.fromGlobals(globals);
             installHostApi(globals);
             // proxies captured in the snapshot resolve their bound methods by id
@@ -936,7 +936,7 @@ public class MpyArchitecture implements Architecture {
 
         try {
             MpyModule module = MpyLoader.load(mpy, new QstrPool());
-            Map<String, Object> globals = new LinkedHashMap<String, Object>();
+            Map<String, Object> globals = new net.mpy.qstr.SymbolMap();
             hosts = HostRegistry.fromGlobals(globals);
             installHostApi(globals);
 
@@ -1931,6 +1931,18 @@ public class MpyArchitecture implements Architecture {
         } catch (Throwable ignored) {
             // methods() unavailable -> just offer to_list()
         }
+        if (AeCraftingCancellation.supports(value)) {
+            HostFunction cancel = valueMethod(value, "cancel");
+            if (hosts != null) hosts.register(id + ".cancel", cancel);
+            w.ns.put("cancel", cancel);
+        }
+        if (AeCpuCancellation.supports(value)) {
+            for (String name : new String[]{"getJobId", "cancelJob"}) {
+                HostFunction fn = valueMethod(value, name);
+                if (hosts != null) hosts.register(id + "." + name, fn);
+                w.ns.put(name, fn);
+            }
+        }
         HostFunction toList = valueToList(value);
         if (hosts != null) hosts.register(id + ".to_list", toList);
         w.ns.put("to_list", toList);
@@ -1970,7 +1982,15 @@ public class MpyArchitecture implements Architecture {
                 Object[] jargs = new Object[args.length];
                 for (int i = 0; i < args.length; i++) jargs[i] = toJava(args[i]);
                 try {
-                    Object[] r = machine.invoke(value, name, jargs);
+                    Object[] r;
+                    if ("cancel".equals(name) && AeCraftingCancellation.supports(value)) {
+                        if (args.length != 0) throw new IllegalArgumentException("cancel() takes no arguments");
+                        r = AeCraftingCancellation.cancel(value);
+                    } else if (AeCpuCancellation.supports(value) && ("getJobId".equals(name) || "cancelJob".equals(name))) {
+                        r = AeCpuCancellation.invoke(value, name, jargs);
+                    } else {
+                        r = machine.invoke(value, name, jargs);
+                    }
                     if (r == null || r.length == 0) return PyObj.NONE;
                     if (r.length == 1) return toPy(r[0]);
                     PyObj.PyList l = new PyObj.PyList();

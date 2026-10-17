@@ -38,3 +38,6 @@ layout.json
 
 # development notes and the Tk guide (the guide is published on the wiki); docs/licenses stays
 /docs/*.md
+
+# Python bytecode from running the tools
+__pycache__/

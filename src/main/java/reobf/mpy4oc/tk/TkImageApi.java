@@ -61,6 +61,16 @@ final class TkImageApi {
         TkImage image = tree.ownedImage(id);
         if (image == null) throw new IllegalArgumentException("image was deleted");
         switch (action) {
+            case "replace": {
+                TkGeometry.keys(m, "data");
+                TkImageCodec.Decoded decoded = TkImageCodec.decode(bytes(m.get("data")), 0, 0, image.width * image.height);
+                if (decoded.width != image.width || decoded.height != image.height)
+                    throw new IllegalArgumentException("images do not match");
+                image.argb = decoded.argb;
+                image.version++;
+                tree.imageChanged();
+                return null;
+            }
             case "size": TkGeometry.keys(m); return new Object[] {image.width, image.height};
             case "delete": TkGeometry.keys(m); tree.deleteImage(id); return null;
             case "get": {

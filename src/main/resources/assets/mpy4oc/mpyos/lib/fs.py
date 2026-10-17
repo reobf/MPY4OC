@@ -102,16 +102,15 @@ class Filesystem:
             return None
         h = self.open(path, "rb")
         try:
-            # (bytes.join exists these days; += is fine for file-sized data.)
-            data = b""
+            parts = []
             while True:
                 chunk = self._read_chunk(h, 4096)
                 if chunk is None:
                     break
                 if isinstance(chunk, str):
                     chunk = chunk.encode("utf-8")
-                data += chunk
-            return data
+                parts.append(chunk)
+            return b"".join(parts)
         finally:
             self.close(h)
 

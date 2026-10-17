@@ -12,6 +12,39 @@ import org.junit.jupiter.api.Test;
 
 /** str search methods with CPython's optional start/end (golden values from CPython 3.12). */
 class StrSearchArgsTest {
+    @Test void bytesSearchMethodsTakeBytesOrOneByteAndStartAndEnd() {
+        String program = String.join("\n",
+                "assert b'abcabc'.find(b'b', 2) == 4",
+                "assert b'abcabc'.find(b'b', 2, 4) == -1",
+                "assert b'abcabc'.find(98) == 1",
+                "assert b'abcabc'.find(b'', 6) == 6 and b'abcabc'.find(b'', 7) == -1",
+                "assert b'abcabc'.find(bytearray(b'ca')) == 2",
+                "assert b'abcabc'.rfind(b'b') == 4 and b'abcabc'.rfind(b'b', 0, 4) == 1",
+                "assert b'abcabc'.rfind(b'abc', 0, 5) == 0 and b'abcabc'.rfind(b'x') == -1",
+                "assert b'abcabc'.index(b'c', 3) == 5 and b'abcabc'.rindex(b'a', 0, 3) == 0",
+                "try:",
+                "    b'abc'.index(b'x')",
+                "    raise AssertionError('index')",
+                "except ValueError as error:",
+                "    assert str(error) == 'subsection not found', error",
+                "assert b'aaaa'.count(b'aa') == 2 and b'aaaa'.count(b'aa', 1) == 1",
+                "assert b'abc'.count(b'') == 4 and b'abc'.count(b'', 4) == 0",
+                "assert b'a\\nb\\nc'.count(10) == 2 and b'a\\nb\\nc'.count(10, 0, 2) == 1",
+                "assert b'abc'.count(b'b', -2, -1) == 1",
+                "assert b'hello.py'.endswith((b'.txt', b'.py')) and not b'hello.py'.endswith(b'.txt')",
+                "assert b'hello.py'.startswith(b'hell') and b'hello.py'.startswith(b'llo', 2) and not b'hello.py'.startswith(b'llo', 2, 4)",
+                "assert bytearray(b'abcabc').find(b'c') == 2 and bytearray(b'abcabc').count(b'c') == 2",
+                "for bad, kind in ((300, ValueError), ('b', TypeError)):",
+                "    try:",
+                "        b'abc'.find(bad)",
+                "        raise AssertionError(bad)",
+                "    except kind:",
+                "        pass",
+                "passed = True",
+                "");
+        run(program);
+    }
+
     @Test void searchMethodsTakeStartAndEnd() {
         String program = String.join("\n",
                 "assert 'abcabc'.find('b', 2) == 4",
